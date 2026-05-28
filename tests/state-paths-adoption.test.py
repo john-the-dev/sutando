@@ -194,6 +194,15 @@ ALLOWLIST = {
     "scripts/test-pr435.sh",              # test fixture, legacy retention sweep
     "scripts/poc-codeql-path-injection.sh",   # POC harness, not production
     "scripts/probe-team-sandbox.sh",      # POC harness, not production
+    # verify-v3-workspace-fixes.sh is a one-off verification harness that
+    # CHECKS whether workspace paths are correct — it does not compose
+    # runtime-state paths itself. Line 129 contains
+    # `grep -qE "/\.sutando/workspace/tasks/"` where the token appears as
+    # a grep *search pattern* to verify session-handoff.sh writes the
+    # workspace-anchored tasks listing, not as a path the script resolves.
+    # HAND_ROLLED_COMPOSITION fires on `.sutando/workspace/tasks` in any
+    # string context; this is a confirmed false positive.
+    "scripts/verify-v3-workspace-fixes.sh",
 }
 
 
