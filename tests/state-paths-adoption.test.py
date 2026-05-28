@@ -52,11 +52,34 @@ Read-only static analysis; no fixtures, no networking. Runs in <200ms.
 """
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src"
+SCRIPTS = REPO / "scripts"  # widened scope — per v3 workspace audit 2026-05-27
+
+
+def _git_tracked() -> set[str]:
+    """Set of paths (relative to REPO) tracked by git. Used to skip
+    untracked files when scanning the filesystem — keeps the test
+    behavior identical in CI (clean checkout, untracked = nonexistent)
+    and locally (where the dev tree may have untracked scratch files).
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO), "ls-files"],
+            capture_output=True, text=True, check=False,
+        )
+        if out.returncode != 0:
+            return set()  # no git? fall through, accept everything
+        return set(out.stdout.splitlines())
+    except FileNotFoundError:
+        return set()
+
+
+_TRACKED = _git_tracked()
 
 # Tokens that name runtime-state directories. A reference to any of
 # these in a non-allowlisted file is a signal it touches workspace
@@ -130,6 +153,10 @@ TS_CANONICAL = re.compile(
     r"resolveWorkspace\s*\("
     r")"
 )
+# Bash: scripts must source workspace via env var (no module import shape
+# available in bash). Accept either `${SUTANDO_WORKSPACE:-...}` form or
+# explicit `$SUTANDO_WORKSPACE` ref — both indicate workspace-aware code.
+SH_CANONICAL = re.compile(r'SUTANDO_WORKSPACE')
 
 # Files that legitimately reference these strings without runtime-state
 # semantics, or that legitimately define `__file__.parent.parent` for
@@ -147,6 +174,26 @@ ALLOWLIST = {
     # must run before any other Sutando module is loaded, so it inlines
     # the workspace resolution rather than importing workspace_default.
     "src/core_heartbeat.py",
+    # ─── scripts/ pre-existing technical debt — track via v3 workspace audit ───
+    # The 2026-05-27 audit (notes/cwd-audit-v3-2026-05-27.md) catalogues
+    # 53 reachable bugs of the #1149 / #1263 class across the repo. The
+    # entries below are scripts/* files that fail this scan today; each
+    # should be removed from ALLOWLIST as part of its targeted fix PR
+    # (P1/P2 batches). Net-new scripts/ additions must NOT exhibit the
+    # pattern (and so should not be added here).
+    "scripts/presenter-mode.sh",          # 4 sites, sentinel + state misroute
+    "scripts/query-conversation.sh",      # data/ misroute
+    "scripts/results-health.sh",          # results/ scan repo not workspace
+    "scripts/stage-readiness.sh",         # logs/ + sentinel misroute
+    "scripts/sync-memory.sh",             # 5 sites: notes/data/sentinel misroute
+    "scripts/tail-events.sh",             # logs/ misroute
+    "scripts/test-event-log.sh",          # test fixture writes repo path
+    "scripts/test-migrate-bundle.sh",     # test asserts on legacy repo path
+    "scripts/test-results-health.sh",     # mirrors results-health.sh bug
+    "scripts/test-pr354-retention-sweep.sh",  # test fixture, legacy retention sweep
+    "scripts/test-pr435.sh",              # test fixture, legacy retention sweep
+    "scripts/poc-codeql-path-injection.sh",   # POC harness, not production
+    "scripts/probe-team-sandbox.sh",      # POC harness, not production
 }
 
 
@@ -154,7 +201,7 @@ def _is_comment_line(line: str, suffix: str) -> bool:
     """Best-effort comment detection — used to skip lines that mention
     the fallback shape in prose (docstrings, header comments)."""
     s = line.strip()
-    if suffix == ".py":
+    if suffix == ".py" or suffix == ".sh":
         return s.startswith("#") or s.startswith('"""') or s.startswith("'''")
     if suffix in (".ts", ".tsx"):
         return s.startswith("//") or s.startswith("*") or s.startswith("/*")
@@ -193,7 +240,12 @@ def _check_file(path: Path) -> list[str]:
 
     # Check 2: runtime-state reference without canonical resolver.
     if RUNTIME_STATE_REGEX.search(src):
-        canonical_re = TS_CANONICAL if suffix in (".ts", ".tsx") else PY_CANONICAL
+        if suffix in (".ts", ".tsx"):
+            canonical_re = TS_CANONICAL
+        elif suffix == ".sh":
+            canonical_re = SH_CANONICAL
+        else:
+            canonical_re = PY_CANONICAL
         if not canonical_re.search(src):
             for lineno, line in enumerate(lines, 1):
                 if _is_comment_line(line, suffix):
@@ -217,11 +269,27 @@ def _check_file(path: Path) -> list[str]:
 def test_no_unauthorized_runtime_state_references():
     failures = []
     seen: set[str] = set()
-    # Per @qingyun-wu obs #4: scan .py + .ts + .tsx.
+    # src/ scan: .py + .ts + .tsx (per @qingyun-wu obs #4).
     for pat in ("*.py", "*.ts", "*.tsx"):
         for path in sorted(SRC.rglob(pat)):
             if "/__pycache__/" in str(path) or "/node_modules/" in str(path):
                 continue
+            if str(path) in seen:
+                continue
+            seen.add(str(path))
+            failures.extend(_check_file(path))
+    # scripts/ scan: .sh + .py (widened scope per v3 audit 2026-05-27).
+    # This is where ~38% of v3-audit reachable bugs lived precisely
+    # because scripts/ wasn't on the gate. The ALLOWLIST tracks
+    # pre-existing technical debt; new violations must add to the
+    # allowlist with justification OR fix the path resolution.
+    # Only scan tracked files — untracked scratch scripts in a dev
+    # tree don't represent the production surface CI cares about.
+    for pat in ("*.sh", "*.py"):
+        for path in sorted(SCRIPTS.rglob(pat)):
+            rel = path.relative_to(REPO).as_posix()
+            if _TRACKED and rel not in _TRACKED:
+                continue  # untracked / scratch file
             if str(path) in seen:
                 continue
             seen.add(str(path))
