@@ -34,16 +34,16 @@ from task_priority import default_priority_for_source  # noqa: E402
 from result_markers import parse_markers  # noqa: E402
 
 from workspace_default import resolve_workspace  # noqa: E402
-REPO = resolve_workspace()
-TASKS_DIR = REPO / "tasks"
-RESULTS_DIR = REPO / "results"
+WORKSPACE = resolve_workspace()
+TASKS_DIR = WORKSPACE / "tasks"
+RESULTS_DIR = WORKSPACE / "results"
 
 # Allowlist for paths that may be sent via Telegram [file: /path] markers.
 # Mirrors _is_path_sendable() in discord-bridge.py.
 SEND_ALLOWED_ROOTS = (
-    str(REPO / "results"),
-    str(REPO / "notes"),
-    str(REPO / "docs"),
+    str(WORKSPACE / "results"),
+    str(WORKSPACE / "notes"),
+    str(WORKSPACE / "docs"),
 )
 SEND_ALLOWED_PREFIXES = (
     "/tmp/sutando-",
@@ -75,7 +75,7 @@ def _is_path_sendable(fpath: str) -> bool:
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(REPO / ".env")
+    load_dotenv(WORKSPACE / ".env")
 except ImportError:
     pass  # python-dotenv not installed — token loaded from channels config below
 
@@ -104,11 +104,11 @@ if not TOKEN:
     print("TELEGRAM_BOT_TOKEN not set")
     exit(1)
 
-TASKS_DIR = REPO / "tasks"
-RESULTS_DIR = REPO / "results"
-STATE_DIR = REPO / "state"
-ARCHIVE_TASKS_DIR = REPO / "tasks" / "archive"
-ARCHIVE_RESULTS_DIR = REPO / "results" / "archive"
+TASKS_DIR = WORKSPACE / "tasks"
+RESULTS_DIR = WORKSPACE / "results"
+STATE_DIR = WORKSPACE / "state"
+ARCHIVE_TASKS_DIR = WORKSPACE / "tasks" / "archive"
+ARCHIVE_RESULTS_DIR = WORKSPACE / "results" / "archive"
 OWNER_ACTIVITY_FILE = STATE_DIR / "last-owner-activity.json"
 TASKS_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -190,7 +190,7 @@ def archive_file(src: "Path", kind: str, task_id: str) -> None:
 # Presenter mode: silence proactive DMs during ICLR/talk windows. Sentinel
 # is written by scripts/presenter-mode.sh with an ISO-8601 expiry. Matches
 # the check in src/check-pending-questions.py and src/discord-bridge.py.
-PRESENTER_SENTINEL = REPO / "state" / "presenter-mode.sentinel"
+PRESENTER_SENTINEL = WORKSPACE / "state" / "presenter-mode.sentinel"
 
 
 def presenter_mode_active():
@@ -306,7 +306,7 @@ def api(method, **params):
         print(f"API error {e.code}: {body}")
         return {"ok": False}
 
-INBOX_DIR = REPO / "telegram-inbox"
+INBOX_DIR = WORKSPACE / "telegram-inbox"
 INBOX_DIR.mkdir(exist_ok=True)
 
 def download_file(file_id, name_hint="file"):
@@ -407,7 +407,7 @@ def main():
     allowed = load_allowed()
     pending_replies = {}  # task_id -> chat_id
 
-    heartbeat_file = REPO / "state" / "telegram-bridge.heartbeat"
+    heartbeat_file = WORKSPACE / "state" / "telegram-bridge.heartbeat"
     last_heartbeat = 0
     while True:
         # Poll for new messages

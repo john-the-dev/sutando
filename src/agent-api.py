@@ -493,9 +493,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not safe_parts:
                 self.send_json(400, {"error": "invalid path"})
                 return
-            repo_resolved = WORKSPACE_DIR.resolve()  # /media/ serves from workspace (results/, data/, notes/)
-            media_path = repo_resolved.joinpath(*safe_parts).resolve()
-            if not media_path.is_relative_to(repo_resolved) or not media_path.is_file():
+            workspace_resolved = WORKSPACE_DIR.resolve()  # /media/ serves from workspace (results/, data/, notes/)
+            media_path = workspace_resolved.joinpath(*safe_parts).resolve()
+            if not media_path.is_relative_to(workspace_resolved) or not media_path.is_file():
                 self.send_json(404, {"error": "not found"})
                 return
             # Use a fixed allowlist of safe content types

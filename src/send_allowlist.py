@@ -48,18 +48,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workspace_default import resolve_workspace  # noqa: E402
 from util_paths import shared_personal_path  # noqa: E402
 
-_REPO = resolve_workspace()
+_WORKSPACE = resolve_workspace()
 
 # Owner-relative + machine-local roots. Files under these roots are
 # delivered to Discord as attachments without further checks.
 SEND_ALLOWED_ROOTS: tuple[str, ...] = (
-    str(_REPO / "results"),
-    str(_REPO / "notes"),
+    str(_WORKSPACE / "results"),
+    str(_WORKSPACE / "notes"),
     # Notes canonical home (private dir) — once saved by save_note,
     # paths reference the private location. Both old and new paths
     # allowed during the transition; resolver picks whichever exists.
-    str(shared_personal_path("notes", _REPO)),
-    str(_REPO / "docs"),
+    str(shared_personal_path("notes", _WORKSPACE)),
+    str(_WORKSPACE / "docs"),
     str(Path.home() / "Desktop" / "iclr-backups"),
     str(Path.home() / "Documents" / "sutando-launch-assets"),
 )

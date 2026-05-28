@@ -56,13 +56,13 @@ except ImportError:
     print("slack_bolt not installed. Run: pip install slack_bolt", file=sys.stderr)
     sys.exit(1)
 
-REPO = resolve_workspace()
-TASKS_DIR = REPO / "tasks"
-RESULTS_DIR = REPO / "results"
-STATE_DIR = REPO / "state"
-INBOX_DIR = REPO / "slack-inbox"
-ARCHIVE_TASKS_DIR = REPO / "tasks" / "archive"
-ARCHIVE_RESULTS_DIR = REPO / "results" / "archive"
+WORKSPACE = resolve_workspace()
+TASKS_DIR = WORKSPACE / "tasks"
+RESULTS_DIR = WORKSPACE / "results"
+STATE_DIR = WORKSPACE / "state"
+INBOX_DIR = WORKSPACE / "slack-inbox"
+ARCHIVE_TASKS_DIR = WORKSPACE / "tasks" / "archive"
+ARCHIVE_RESULTS_DIR = WORKSPACE / "results" / "archive"
 OWNER_ACTIVITY_FILE = STATE_DIR / "last-owner-activity.json"
 TASKS_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -78,9 +78,9 @@ if not BOT_TOKEN or not APP_TOKEN:
 # Outbound file-send allowlist — mirrors _is_path_sendable() in
 # discord-bridge.py + telegram-bridge.py. Fail-closed by default.
 SEND_ALLOWED_ROOTS = (
-    str(REPO / "results"),
-    str(REPO / "notes"),
-    str(REPO / "docs"),
+    str(WORKSPACE / "results"),
+    str(WORKSPACE / "notes"),
+    str(WORKSPACE / "docs"),
     str(INBOX_DIR),
 )
 SEND_ALLOWED_PREFIXES = (
@@ -151,7 +151,7 @@ def archive_file(src: Path, kind: str, task_id: str) -> None:
             pass
 
 
-PRESENTER_SENTINEL = REPO / "state" / "presenter-mode.sentinel"
+PRESENTER_SENTINEL = WORKSPACE / "state" / "presenter-mode.sentinel"
 
 
 def presenter_mode_active() -> bool:
@@ -559,7 +559,7 @@ def _send_reply(channel: str, thread_ts: str | None, text: str, task_id: str | N
 
 def result_watcher():
     """Background thread: polls results/ for replies + proactive messages."""
-    heartbeat_file = REPO / "state" / "slack-bridge.heartbeat"
+    heartbeat_file = WORKSPACE / "state" / "slack-bridge.heartbeat"
     last_heartbeat = 0.0
     while True:
         try:

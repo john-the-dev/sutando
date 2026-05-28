@@ -15,11 +15,11 @@ import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { resolveWorkspace } from './workspace_default.js';
 import { recordConversation, recordSessionBoundary } from './conversation-store.js';
 
-const REPO_DIR = resolveWorkspace();
-const TASK_DIR = join(REPO_DIR, 'tasks');
-const RESULT_DIR = join(REPO_DIR, 'results');
-const STATE_DIR = join(REPO_DIR, 'state');
-const CONVERSATION_LOG = join(REPO_DIR, 'logs', 'conversation.log');
+const WORKSPACE_DIR = resolveWorkspace();
+const TASK_DIR = join(WORKSPACE_DIR, 'tasks');
+const RESULT_DIR = join(WORKSPACE_DIR, 'results');
+const STATE_DIR = join(WORKSPACE_DIR, 'state');
+const CONVERSATION_LOG = join(WORKSPACE_DIR, 'logs', 'conversation.log');
 const OWNER_ACTIVITY_FILE = join(STATE_DIR, 'last-owner-activity.json');
 
 /** Record that the owner was active on <channel> right now. Atomic write
@@ -50,7 +50,7 @@ function archiveFile(srcPath: string, kind: 'tasks' | 'results', taskId: string)
 	try {
 		if (!existsSync(srcPath)) return;
 		const ym = new Date().toISOString().slice(0, 7); // YYYY-MM
-		const destDir = join(REPO_DIR, kind, 'archive', ym);
+		const destDir = join(WORKSPACE_DIR, kind, 'archive', ym);
 		mkdirSync(destDir, { recursive: true });
 		renameSync(srcPath, join(destDir, `${taskId}.txt`));
 	} catch (err) {
@@ -436,7 +436,7 @@ export function getRecentConversation(count = 10): string {
 	} catch { return ''; }
 }
 
-const CONTEXT_DROP_FILE = join(REPO_DIR, 'context-drop.txt');
+const CONTEXT_DROP_FILE = join(WORKSPACE_DIR, 'context-drop.txt');
 const NOTE_VIEWING_FILE = '/tmp/sutando-note-viewing.json';
 
 /**

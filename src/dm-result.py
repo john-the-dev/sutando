@@ -35,7 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workspace_default import resolve_workspace  # noqa: E402
 import discord_config  # noqa: E402  — workspace-local Sutando discord config (#1147)
-REPO = resolve_workspace()
+WORKSPACE = resolve_workspace()
 ACCESS_JSON = Path.home() / ".claude" / "channels" / "discord" / "access.json"
 SSE_STATUS_URL = "http://localhost:8080/sse-status"
 
@@ -184,7 +184,7 @@ def _load_token() -> str:
     """Read DISCORD_BOT_TOKEN from the first env file that has it."""
     for env_path in [
         Path.home() / ".claude" / "channels" / "discord" / ".env",
-        REPO / ".env",
+        WORKSPACE / ".env",
     ]:
         if not env_path.exists():
             continue

@@ -56,7 +56,7 @@ from workspace_default import resolve_workspace  # noqa: E402
 import discord_config  # noqa: E402  — Sutando workspace-local discord config (#1147)
 from util_paths import shared_personal_path  # noqa: E402
 from task_priority import default_priority_for_source  # noqa: E402
-REPO = resolve_workspace()
+WORKSPACE = resolve_workspace()
 
 # discord-voice "magic word" join trigger (issue: za-warudo summon). The
 # bridge stays a THIN hook — it only detects "owner + join phrase" and hands
@@ -102,11 +102,11 @@ if not TOKEN:
     print("DISCORD_BOT_TOKEN not set in ~/.claude/channels/discord/.env")
     exit(1)
 
-TASKS_DIR = REPO / "tasks"
-RESULTS_DIR = REPO / "results"
-STATE_DIR = REPO / "state"
-ARCHIVE_TASKS_DIR = REPO / "tasks" / "archive"
-ARCHIVE_RESULTS_DIR = REPO / "results" / "archive"
+TASKS_DIR = WORKSPACE / "tasks"
+RESULTS_DIR = WORKSPACE / "results"
+STATE_DIR = WORKSPACE / "state"
+ARCHIVE_TASKS_DIR = WORKSPACE / "tasks" / "archive"
+ARCHIVE_RESULTS_DIR = WORKSPACE / "results" / "archive"
 OWNER_ACTIVITY_FILE = STATE_DIR / "last-owner-activity.json"
 
 # Allowlist for paths attached via `[file:|send:|attach:]` markers.
@@ -433,7 +433,7 @@ def _safe_attachment_basename(filename: str) -> str:
 # ISO-8601 expiry; see scripts/presenter-mode.sh for the contract.
 # Matches the check in src/check-pending-questions.py — both scripts
 # share the same sentinel path + comparison logic.
-PRESENTER_SENTINEL = REPO / "state" / "presenter-mode.sentinel"
+PRESENTER_SENTINEL = WORKSPACE / "state" / "presenter-mode.sentinel"
 
 
 def presenter_mode_active():
@@ -466,7 +466,7 @@ def presenter_mode_active():
 TEAM_TIER_OWNER = ""
 LOCAL_MACHINE = ""
 try:
-    env_file = REPO / ".env"
+    env_file = WORKSPACE / ".env"
     if env_file.exists():
         for line in env_file.read_text().splitlines():
             if line.startswith("SUTANDO_TEAM_TIER_OWNER="):
@@ -476,7 +476,7 @@ except Exception:
     pass
 
 try:
-    identity_file = REPO / "stand-identity.json"
+    identity_file = WORKSPACE / "stand-identity.json"
     if identity_file.exists():
         LOCAL_MACHINE = json.loads(identity_file.read_text()).get("machine", "")
 except Exception:
@@ -1920,7 +1920,7 @@ def _read_welcome_template(template_path=None):
         return ""
     p = Path(template_path).expanduser()
     if not p.is_absolute():
-        p = REPO / p
+        p = WORKSPACE / p
     try:
         return p.read_text()
     except Exception:
@@ -2843,7 +2843,7 @@ async def poll_approved():
 # messages since the checkpoint and replay them through
 # `_handle_discord_message`. Discord message IDs are Snowflake-
 # monotonic so `after=<id>` reliably returns only newer messages.
-DM_CHECKPOINT_FILE = REPO / "state" / "discord-dm-checkpoint.json"
+DM_CHECKPOINT_FILE = WORKSPACE / "state" / "discord-dm-checkpoint.json"
 
 def _atomic_write_dm_checkpoint(data: dict) -> None:
     """Write JSON atomically — same shape as _atomic_write_pending_replies."""
@@ -2951,7 +2951,7 @@ async def _catchup_missed_dms():
 #
 # Scope of THIS PR: poll_results main-path only. Channel-redirect,
 # proactive, and dm-fallback paths are scoped follow-ups.
-DELIVERED_DIR = REPO / "state" / "discord-delivered"
+DELIVERED_DIR = WORKSPACE / "state" / "discord-delivered"
 
 
 def _delivered_sentinel_path(task_id: str) -> Path:
@@ -2984,7 +2984,7 @@ def _clear_delivered(task_id: str) -> None:
         pass
 
 
-PENDING_REPLIES_FILE = REPO / "state" / "discord-pending-replies.json"
+PENDING_REPLIES_FILE = WORKSPACE / "state" / "discord-pending-replies.json"
 
 def _atomic_write_pending_replies(data: dict) -> None:
     """Write JSON atomically: tmp + rename. Avoids truncation on mid-write
@@ -3044,7 +3044,7 @@ _recovered_replies = load_pending_replies_from_disk()
 async def poll_results():
     """Poll results/ for replies to send back to Discord."""
     global _recovered_replies
-    heartbeat_file = REPO / "state" / "discord-bridge.heartbeat"
+    heartbeat_file = WORKSPACE / "state" / "discord-bridge.heartbeat"
     last_heartbeat = 0
     while True:
         # Heartbeat is gated on `client.is_ready()` (Discord gateway WS
@@ -3682,9 +3682,9 @@ async def poll_dm_fallback():
                     # `OSError: [Errno 9] Bad file descriptor`. Force clean stdin.
                     # dm-result.py is a SIBLING of this script in src/, not a
                     # workspace artifact. Resolving via Path(__file__) keeps the
-                    # invocation correct after PR #762 — which made REPO point
+                    # invocation correct after PR #762 — which made WORKSPACE point
                     # at the runtime workspace (a subdir of the repo root), so
-                    # `REPO / "src" / "dm-result.py"` would resolve to
+                    # `WORKSPACE / "src" / "dm-result.py"` would resolve to
                     # `<workspace>/src/dm-result.py` (does not exist) and the
                     # dm-fallback path errored out silently before delivering.
                     _DM_RESULT_SCRIPT = Path(__file__).resolve().parent / "dm-result.py"
