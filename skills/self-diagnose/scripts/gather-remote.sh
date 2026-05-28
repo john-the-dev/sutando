@@ -248,7 +248,7 @@ DIFF_MD="$OUT/diff.md"
 } > "$DIFF_MD"
 
 # 5) Persist a copy of the diff under notes/ for review later.
-PERSIST="$LOCAL_REPO/notes/diagnose-cross-node-$(date +%Y-%m-%d).md"
+PERSIST="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}/notes/diagnose-cross-node-$(date +%Y-%m-%d).md"
 cp "$DIFF_MD" "$PERSIST" 2>/dev/null || true
 
 echo "" >&2
