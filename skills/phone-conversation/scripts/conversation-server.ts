@@ -119,6 +119,9 @@ const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER ?? '';
 const NGROK_AUTHTOKEN = process.env.NGROK_AUTHTOKEN ?? '';
 const PORT = Number(process.env.PHONE_PORT) || 3100;
 const WORKSPACE_DIR = resolveWorkspace();
+// Repo root for code-tree paths (e.g. src/scan-call-logs.py). Matches the
+// canonical two-name pattern in src/github-webhook.py per qingyun PR #775 review.
+const REPO_DIR = new URL('../../..', import.meta.url).pathname.replace(/\/$/, '');
 const RESULTS_DIR = process.env.PHONE_RESULTS_DIR || join(WORKSPACE_DIR, 'results');
 const TASKS_DIR = join(WORKSPACE_DIR, 'tasks');
 const TASK_POLL_INTERVAL_MS = 500;
@@ -1145,9 +1148,14 @@ function cleanupCall(callSid: string): void {
 		events: session.events,
 	});
 
-	// Auto-scan the latest call for issues (async, best effort)
+	// Auto-scan the latest call for issues (async, best effort).
+	// scan-call-logs.py is CODE (lives in repo's src/), not state. Pre-fix
+	// joined WORKSPACE_DIR/src/scan-call-logs.py which resolved to a non-
+	// existent path and the spawn silently failed (post-call auto-scan was
+	// dead since written). The inverse mistake — CODE under STATE — was
+	// flagged in the 2026-05-27 v3 audit (notes/cwd-poc-v3-4-skills-jq.md).
 	try {
-		const scanScript = join(WORKSPACE_DIR, 'src', 'scan-call-logs.py');
+		const scanScript = join(REPO_DIR, 'src', 'scan-call-logs.py');
 		spawn('python3', [scanScript, '--last', '1', '--json'], { stdio: 'pipe', detached: true })
 			.on('close', (code) => { if (code === 0) console.log(`${ts()} [Phone] call scan complete`); });
 	} catch { /* best effort */ }

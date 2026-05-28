@@ -65,8 +65,10 @@ export function buildVoiceAgentContext(): string {
 		} catch { /* best effort */ }
 	}
 
-	// Read recent phone call summaries (last 3 calls)
-	const callsFile = join(REPO_DIR, 'results', 'calls', 'calls.jsonl');
+	// Read recent phone call summaries (last 3 calls). calls.jsonl lives under
+	// workspace/results/calls/ per docs/workspace-contract.md — REPO_DIR for
+	// state was the #1149-class bug. v3 audit 2026-05-27.
+	const callsFile = join(WORKSPACE_DIR, 'results', 'calls', 'calls.jsonl');
 	if (existsSync(callsFile)) {
 		try {
 			const callLines = readFileSync(callsFile, 'utf-8').trim().split('\n').filter(Boolean);
