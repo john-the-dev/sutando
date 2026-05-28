@@ -37,6 +37,11 @@ from workspace_default import resolve_workspace  # noqa: E402
 REPO = resolve_workspace()
 TASKS_DIR = REPO / "tasks"
 RESULTS_DIR = REPO / "results"
+# Source-tree root for reading checked-in files like .env (which lives
+# at `<repo>/.env`, NOT under workspace). The misnamed `REPO` above
+# actually holds workspace; P3 will rename. Pattern from
+# src/github-webhook.py per qingyun review on PR #775.
+_SRC_TREE = Path(__file__).resolve().parent.parent
 
 # Allowlist for paths that may be sent via Telegram [file: /path] markers.
 # Mirrors _is_path_sendable() in discord-bridge.py.
@@ -75,7 +80,7 @@ def _is_path_sendable(fpath: str) -> bool:
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(REPO / ".env")
+    load_dotenv(_SRC_TREE / ".env")
 except ImportError:
     pass  # python-dotenv not installed — token loaded from channels config below
 

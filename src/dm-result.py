@@ -36,6 +36,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workspace_default import resolve_workspace  # noqa: E402
 import discord_config  # noqa: E402  — workspace-local Sutando discord config (#1147)
 REPO = resolve_workspace()
+# Source-tree root for reading checked-in files like .env (which lives
+# at `<repo>/.env`, NOT under workspace). The misnamed `REPO` above
+# actually holds workspace; P3 will rename. Pattern from
+# src/github-webhook.py per qingyun review on PR #775.
+_SRC_TREE = Path(__file__).resolve().parent.parent
 ACCESS_JSON = Path.home() / ".claude" / "channels" / "discord" / "access.json"
 SSE_STATUS_URL = "http://localhost:8080/sse-status"
 
@@ -184,7 +189,7 @@ def _load_token() -> str:
     """Read DISCORD_BOT_TOKEN from the first env file that has it."""
     for env_path in [
         Path.home() / ".claude" / "channels" / "discord" / ".env",
-        REPO / ".env",
+        _SRC_TREE / ".env",
     ]:
         if not env_path.exists():
             continue

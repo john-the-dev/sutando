@@ -57,6 +57,11 @@ import discord_config  # noqa: E402  — Sutando workspace-local discord config 
 from util_paths import shared_personal_path  # noqa: E402
 from task_priority import default_priority_for_source  # noqa: E402
 REPO = resolve_workspace()
+# Source-tree root for reading checked-in files like .env (which lives
+# at `<repo>/.env`, NOT under workspace). The misnamed `REPO` var above
+# actually holds workspace per the historical refactor; P3 will rename.
+# Pattern matches src/github-webhook.py per qingyun review on PR #775.
+_SRC_TREE = Path(__file__).resolve().parent.parent
 
 # discord-voice "magic word" join trigger (issue: za-warudo summon). The
 # bridge stays a THIN hook — it only detects "owner + join phrase" and hands
@@ -466,7 +471,7 @@ def presenter_mode_active():
 TEAM_TIER_OWNER = ""
 LOCAL_MACHINE = ""
 try:
-    env_file = REPO / ".env"
+    env_file = _SRC_TREE / ".env"
     if env_file.exists():
         for line in env_file.read_text().splitlines():
             if line.startswith("SUTANDO_TEAM_TIER_OWNER="):
