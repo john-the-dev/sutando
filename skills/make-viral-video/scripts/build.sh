@@ -15,6 +15,9 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 SKILL_DIR="$REPO/skills/make-viral-video"
+# state/ + viral-* output dirs live under workspace per docs/workspace-contract.md.
+# Pre-fix the output landed in <repo>/state/ polluting git status (v3 audit).
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
 
 TOPIC=""
 SOURCE_URL=""
@@ -41,7 +44,7 @@ done
 [[ -n "$TOPIC" ]] || { echo "ERROR: --topic required" >&2; exit 2; }
 [[ -n "$SOURCE_URL" ]] || { echo "ERROR: --source required" >&2; exit 2; }
 
-[[ -n "$OUT_DIR" ]] || OUT_DIR="$REPO/state/viral-$(date +%s)"
+[[ -n "$OUT_DIR" ]] || OUT_DIR="$WORKSPACE/state/viral-$(date +%s)"
 mkdir -p "$OUT_DIR/artifacts" "$OUT_DIR/fetched_assets" "$OUT_DIR/frames"
 LOG="$OUT_DIR/build.log"
 

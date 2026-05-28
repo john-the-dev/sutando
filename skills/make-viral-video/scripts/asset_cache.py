@@ -41,8 +41,13 @@ from typing import Optional
 
 
 REPO = Path(__file__).resolve().parents[3]
-CACHE_DIR = REPO / "state" / "viral-cache" / "fetched_assets"
-INDEX_FILE = REPO / "state" / "viral-cache" / "index.json"
+# state/ lives at $SUTANDO_WORKSPACE per docs/workspace-contract.md, not under repo.
+# Pre-fix cache + index landed in <repo>/state/viral-cache/ polluting git status
+# on workspace-pinned installs (v3 audit #1149-class).
+import os as _os
+_WORKSPACE = Path(_os.environ.get("SUTANDO_WORKSPACE") or (Path.home() / ".sutando" / "workspace"))
+CACHE_DIR = _WORKSPACE / "state" / "viral-cache" / "fetched_assets"
+INDEX_FILE = _WORKSPACE / "state" / "viral-cache" / "index.json"
 
 
 def _ensure_cache_dir():

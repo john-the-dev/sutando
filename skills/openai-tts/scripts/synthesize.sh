@@ -19,11 +19,14 @@ TEXT="${ARGS[*]-}"
 [[ -n "$TEXT" ]] || { echo "Usage: synthesize.sh [--voice <name>] [--out <path>] -- \"text\"" >&2; exit 2; }
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
+# results/ lives at workspace per docs/workspace-contract.md; .env at repo
+# per §5 (Code-adjacent secrets). v3 audit #1149-class.
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
 KEY="${OPENAI_API_KEY:-$(grep -E '^OPENAI_API_KEY=' "$REPO/.env" 2>/dev/null | cut -d= -f2-)}"
 KEY="${KEY%\"}"; KEY="${KEY#\"}"; KEY="${KEY%\'}"; KEY="${KEY#\'}"
 [[ -n "$KEY" ]] || { echo "OPENAI_API_KEY missing" >&2; exit 1; }
 
-[[ -n "$OUT" ]] || OUT="$REPO/results/openai-tts-$(date +%s).mp3"
+[[ -n "$OUT" ]] || OUT="$WORKSPACE/results/openai-tts-$(date +%s).mp3"
 mkdir -p "$(dirname "$OUT")"
 
 curl -sSf https://api.openai.com/v1/audio/speech \
