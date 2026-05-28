@@ -54,10 +54,18 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SETTINGS="$REPO_DIR/.claude/settings.json"
 
 # Hook specs: each line is "<event>|<command>".  Order = install order.
+#
+# Paths to session-handoff.sh / check-pending-tasks.sh resolve at hook-fire
+# time via ${SUTANDO_REPO_DIR:-$HOME/Desktop/sutando} — matches the
+# convention used by session-handoff.sh's auto-detect (CLAUDE.md
+# "$SUTANDO_REPO_DIR (added in #831 cleanup) names the public-repo
+# checkout") and by skills/catchup-after-startup's installer.  Hardcoding
+# $HOME/Desktop/sutando broke users with checkouts under
+# ~/Documents/sutando/sutando — the hook would silently never run.
 HOOKS=(
   "PreCompact|cp \"\$TRANSCRIPT_PATH\" \"\$HOME/Desktop/sutando-conversations/\$(date +%Y-%m-%dT%H-%M-%S).jsonl\""
-  "PreCompact|bash \$HOME/Desktop/sutando/src/session-handoff.sh \"\$TRANSCRIPT_PATH\""
-  "Stop|bash \$HOME/Desktop/sutando/src/check-pending-tasks.sh"
+  "PreCompact|bash \"\${SUTANDO_REPO_DIR:-\$HOME/Desktop/sutando}/src/session-handoff.sh\" \"\$TRANSCRIPT_PATH\""
+  "Stop|bash \"\${SUTANDO_REPO_DIR:-\$HOME/Desktop/sutando}/src/check-pending-tasks.sh\""
 )
 
 # Deprecated hooks to uninstall on re-run.  Each line: "<event>|<substring>".
@@ -70,6 +78,11 @@ DEPRECATED_HOOKS=(
   # firing killed the live Monitor watcher every turn). Cleanup-by-re-run
   # added in #1083 follow-up.
   "Stop|watch-tasks-stream.pid"
+  # Hardcoded $HOME/Desktop/sutando paths replaced with
+  # ${SUTANDO_REPO_DIR:-...}.  Substring match on the bare hardcoded
+  # path catches the old hook regardless of which version installed it.
+  "PreCompact|\$HOME/Desktop/sutando/src/session-handoff.sh"
+  "Stop|\$HOME/Desktop/sutando/src/check-pending-tasks.sh"
 )
 
 if ! command -v jq >/dev/null 2>&1; then

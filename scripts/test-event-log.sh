@@ -12,6 +12,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
 N_WRITERS="${1:-50}"
 M_EVENTS="${2:-50}"
 
@@ -21,9 +22,14 @@ from pathlib import Path
 from datetime import date
 
 REPO = Path("$REPO")
+WORKSPACE = Path("$WORKSPACE")
 N = $N_WRITERS
 M = $M_EVENTS
-LOG = REPO / "logs" / f"events-{date.today()}.jsonl"
+# Read from the workspace-anchored log file that event_log.py actually
+# writes to (src/event_log.py:57 — LOGS_DIR = WORKSPACE_DIR / "logs").
+# Previously read from REPO/logs/, which silently mismatched the writer
+# and produced false-positive PASS / FAIL depending on stale state.
+LOG = WORKSPACE / "logs" / f"events-{date.today()}.jsonl"
 
 if LOG.exists():
     LOG.unlink()

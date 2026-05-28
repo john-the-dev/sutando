@@ -53,7 +53,11 @@ REQUIRED+=("^sutando-migration/memory/MEMORY\\.md$")
 REQUIRED+=("^sutando-migration/setup-new-mac\\.sh$")
 
 # Notes (PR #343 addition).
-if [ -d "$REPO/notes" ] && [ "$(find "$REPO/notes" -name '*.md' | wc -l | tr -d ' ')" -gt 0 ]; then
+# Post-#769 notes/ lives under $SUTANDO_WORKSPACE (per the workspace contract),
+# not $REPO/notes. Reading the repo path falsely passed on workspace-only
+# setups and falsely required notes/ to be in the bundle on repo-only ones.
+NOTES_DIR="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}/notes"
+if [ -d "$NOTES_DIR" ] && [ "$(find "$NOTES_DIR" -name '*.md' | wc -l | tr -d ' ')" -gt 0 ]; then
   REQUIRED+=("^sutando-migration/notes/.*\\.md$")
 fi
 

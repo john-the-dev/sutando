@@ -2,6 +2,11 @@
 # Sutando setup verification — checks everything a new user needs
 # Usage: bash src/verify-setup.sh
 
+# Workspace directory — per-user runtime state lives here, not in the repo.
+# Honors $SUTANDO_WORKSPACE override; default ~/.sutando/workspace matches
+# the workspace contract (CLAUDE.md "Workspace contract" / docs/workspace-design.md).
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+
 PASS=0
 FAIL=0
 WARN=0
@@ -121,11 +126,12 @@ echo ""
 echo "Directories:"
 
 for d in tasks results notes; do
-  if [ -d "$d" ]; then
-    pass "$d/"
+  full="$WORKSPACE/$d"
+  if [ -d "$full" ]; then
+    pass "$d/ → $full"
   else
-    mkdir -p "$d"
-    pass "$d/ (created)"
+    mkdir -p "$full"
+    pass "$d/ (created) → $full"
   fi
 done
 
