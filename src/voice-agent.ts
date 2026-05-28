@@ -638,9 +638,16 @@ const mainAgent: MainAgent = {
 				}
 			} catch {}
 			try {
-				const content = readFileSync('voice-context.txt', 'utf-8');
+				// Resolve fallback voice-context.txt relative to this source
+				// file (sits at the repo root, one dir above _voiceAgentDir =
+				// <repo>/src/).  Previously read bare 'voice-context.txt' which
+				// only worked when cwd was the repo root — broke for app-bundle
+				// launches and any cd'd invocation, silently falling through to
+				// "no context loaded".
+				const fallbackPath = join(_voiceAgentDir, '..', 'voice-context.txt');
+				const content = readFileSync(fallbackPath, 'utf-8');
 				const byteLen = Buffer.byteLength(content, 'utf-8');
-				console.log(`${ts()} [voice-context] loaded ${content.length} chars / ${byteLen} bytes from voice-context.txt (fallback)`);
+				console.log(`${ts()} [voice-context] loaded ${content.length} chars / ${byteLen} bytes from ${fallbackPath} (fallback)`);
 				return content;
 			} catch {
 				console.log(`${ts()} [voice-context] no context loaded (no env, no pointer, no fallback file)`);
