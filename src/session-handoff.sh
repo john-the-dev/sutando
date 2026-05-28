@@ -64,9 +64,12 @@ print(personal_path('pending-questions.md', Path('$REPO')))
   fi
   echo ""
 
-  # Tasks in flight
+  # Tasks in flight — canonical home is workspace per docs/workspace-contract.md.
+  # Reading from $REPO/tasks/ silently misses the live workspace queue on
+  # workspace-pinned installs (same #1149-class as PR #1263, PR #1272).
   echo "## Tasks"
-  ls "$REPO/tasks/"*.txt 2>/dev/null | head -5 || echo "None pending"
+  __WS="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+  ls "$__WS/tasks/"*.txt 2>/dev/null | head -5 || echo "None pending"
   echo ""
 
   # Quota (with reset times)

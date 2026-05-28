@@ -11,6 +11,11 @@ MSG="$1"
 if [ -z "$MSG" ]; then echo "Usage: bash src/notify.sh 'message'"; exit 1; fi
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# Workspace dir for runtime state writes (proactive-*.txt is per-user state,
+# polled by the workspace-aware bridges per docs/workspace-contract.md).
+# Writing to REPO_DIR/results/ left messages stranded (the watcher polls
+# $SUTANDO_WORKSPACE/results/), same #1149-class as PR #1263.
+WORKSPACE_DIR="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
 TS=$(date +%s%3N)
 
 # Load tokens from channel configs
@@ -19,7 +24,8 @@ DISCORD_USER_ID=$(python3 -c "import json; print(json.load(open('$HOME/.claude/c
 
 # 1. Voice — write proactive message if voice agent is up
 if curl -s -o /dev/null -w "%{http_code}" http://localhost:9900 2>/dev/null | grep -q "426"; then
-  echo "$MSG" > "$REPO_DIR/results/proactive-$TS.txt"
+  mkdir -p "$WORKSPACE_DIR/results"
+  echo "$MSG" > "$WORKSPACE_DIR/results/proactive-$TS.txt"
 fi
 
 # 2. Discord DM
