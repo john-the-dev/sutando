@@ -146,7 +146,13 @@ fi
 # (alphabetical). Bug silently skipped real memory writes for 5+ weeks
 # before being caught. See docs/workspace-contract.md.
 MEMORY_DIR="$HOME/.claude/projects/$(echo "$SCRIPT_PARENT" | sed 's|/|-|g')/memory"
-NOTES_DIR="$REPO_DIR/notes"
+# Workspace dir for runtime state (notes/, state/, data/ are workspace-anchored
+# per docs/workspace-contract.md, even though REPO_DIR above is correctly the
+# source tree). PR #769 migrated notes/ out of repo to workspace; the sync
+# script kept reading $REPO_DIR/notes which became stale on workspace-pinned
+# installs (v3 audit 2026-05-27). Same pattern for state/ + data/.
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+NOTES_DIR="$WORKSPACE/notes"
 LOG="/tmp/sync-memory.log"
 LOCK_DIR="/tmp/sync-memory.lock.d"
 
@@ -272,7 +278,7 @@ if [ $PULL_RC -ne 0 ]; then
     if echo "$PULL_OUT" | grep -q "CONFLICT\|conflict"; then
         log "REBASE CONFLICT — saving local versions and aborting rebase"
         # Save conflicting files for inspection
-        CONFLICT_DIR="$REPO_DIR/notes/.conflicts-$(hostname)-$(date +%Y%m%d-%H%M%S)"
+        CONFLICT_DIR="$WORKSPACE/notes/.conflicts-$(hostname)-$(date +%Y%m%d-%H%M%S)"
         mkdir -p "$CONFLICT_DIR"
         git diff --name-only --diff-filter=U > "$CONFLICT_DIR/conflicting-files.txt" 2>/dev/null
         git rebase --abort 2>/dev/null
@@ -326,7 +332,7 @@ fi
 
 # presenter-mode.sentinel: cross-node mute for talk windows (restored from PR #503,
 # dropped by PR #511). Opt-in single-file sync — rest of state/ stays per-node.
-PRESENTER_SENTINEL="$REPO_DIR/state/presenter-mode.sentinel"
+PRESENTER_SENTINEL="$WORKSPACE/state/presenter-mode.sentinel"
 if [ -f "$PRESENTER_SENTINEL" ]; then
     mkdir -p state
     copy_if_newer "$PRESENTER_SENTINEL" "state/presenter-mode.sentinel" || true
@@ -382,10 +388,10 @@ for skill_dir in "$REPO_DIR"/skills/personal-*/; do
 done
 
 # Private operational data dir (excluding example files + known binaries)
-if [ -d "$REPO_DIR/data" ]; then
+if [ -d "$WORKSPACE/data" ]; then
     rsync -a --update --checksum \
         --exclude='*.example.json' --exclude='.DS_Store' \
-        "$REPO_DIR/data/" "$MACHINE_DIR/data/" 2>/dev/null || true
+        "$WORKSPACE/data/" "$MACHINE_DIR/data/" 2>/dev/null || true
 fi
 
 # Notes listed in sync-excludes.txt (shared-notes excluded pre-talk) still get
@@ -426,7 +432,7 @@ fi
 
 # Reverse: pull presenter-mode.sentinel from sync (other node flipped it on).
 if [ -f "state/presenter-mode.sentinel" ]; then
-    mkdir -p "$REPO_DIR/state"
+    mkdir -p "$WORKSPACE/state"
     copy_if_newer "state/presenter-mode.sentinel" "$PRESENTER_SENTINEL" || true
 fi
 
