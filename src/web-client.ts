@@ -28,7 +28,7 @@ const WORKSPACE_DIR = resolveWorkspace();
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TASK_DIR = join(WORKSPACE_DIR, 'tasks');
 const STATE_DIR = join(WORKSPACE_DIR, 'state');
-const SUBSCRIPTIONS_PATH = join(REPO_ROOT, 'skills/subscription-scanner/state/subscriptions.json');
+const SUBSCRIPTIONS_PATH = join(STATE_DIR, 'subscription-scanner', 'subscriptions.json');
 
 const HTML = /* html */ `<!DOCTYPE html>
 <html lang="en">

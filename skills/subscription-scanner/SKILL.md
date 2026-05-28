@@ -15,8 +15,8 @@ The scan is **agent-driven**, not script-driven, because Gmail access lives in t
 ## Files
 
 - `scan-prompt.md` — the prompt text the agent runs to perform a scan. Updates here propagate via the cron config. **Personalize this file before first use** — the third Gmail-query line names specific senders tied to one user's actual subscriptions (Apple, Spotify, Anthropic, OpenAI, Netflix, Adobe, GitHub, 1Password, NYT, WSJ, Disney+, Hulu, Tesla insurance, Xfinity, …). Edit the `from:` list to match your subscriptions, or the scan will miss vendors not on the default list.
-- `state/subscriptions.json` — current list (gitignored — contains personal financial data)
-- `state/history/<YYYY-MM-DD>.json` — snapshots, for diff (also gitignored)
+- `<workspace>/state/subscription-scanner/subscriptions.json` — current list (workspace-anchored, contains personal financial data — never in repo)
+- `<workspace>/state/subscription-scanner/history/<YYYY-MM-DD>.json` — snapshots, for diff
 
 ## State schema
 
@@ -53,7 +53,7 @@ The scan is **agent-driven**, not script-driven, because Gmail access lives in t
 ## How `/paidsubscriptions` reads this
 
 `web-client.ts` route at `/paidsubscriptions`:
-1. Reads `skills/subscription-scanner/state/subscriptions.json`
+1. Reads `<workspace>/state/subscription-scanner/subscriptions.json`
 2. Renders a sortable table with vendor, amount, frequency, account, status, last/next charge
 3. Highlights diffs from the previous snapshot (`scan_history[-1].added` in green, `removed` in strikethrough red)
 4. Shows last-scan timestamp at the top
@@ -69,7 +69,7 @@ Monthly: 1st of every month at 08:13 (off-peak minute) — see `skills/schedule-
 {
   "name": "subscription-scan",
   "cron": "13 8 1 * *",
-  "prompt": "Run the monthly paid-subscription scan. Read the full instructions in skills/subscription-scanner/scan-prompt.md and follow them verbatim. Update skills/subscription-scanner/state/subscriptions.json with the latest list, snapshot the previous version to state/history/, and write a proactive Telegram notification to results/proactive-{ts}.txt only if subscriptions were added, removed, or had price changes since the previous scan. Stay silent if nothing changed."
+  "prompt": "Run the monthly paid-subscription scan. Read the full instructions in skills/subscription-scanner/scan-prompt.md and follow them verbatim. Update <workspace>/state/subscription-scanner/subscriptions.json with the latest list, snapshot the previous version to <workspace>/state/subscription-scanner/history/, and write a proactive Telegram notification to <workspace>/results/proactive-{ts}.txt only if subscriptions were added, removed, or had price changes since the previous scan. Stay silent if nothing changed."
 }
 ```
 

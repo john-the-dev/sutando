@@ -1,6 +1,6 @@
 # Subscription scan — prompt body
 
-Scan the user's Gmail for active paid subscriptions and update `skills/subscription-scanner/state/subscriptions.json`. Then snapshot to `state/history/<YYYY-MM-DD>.json` and update `scan_history` in the main file with the diff (added/removed/amount-changed) vs the previous scan.
+Scan the user's Gmail for active paid subscriptions and update `<workspace>/state/subscription-scanner/subscriptions.json` (the workspace path resolves under `$SUTANDO_WORKSPACE`, default `~/.sutando/workspace`). Then snapshot to `<workspace>/state/subscription-scanner/history/<YYYY-MM-DD>.json` and update `scan_history` in the main file with the diff (added/removed/amount-changed) vs the previous scan.
 
 ## What to search
 
@@ -35,12 +35,12 @@ For each receipt found, read the message body if needed via `get_thread` to extr
 
 ## Format
 
-Update `state/subscriptions.json` with the schema in `SKILL.md`. Always:
+Update `<workspace>/state/subscription-scanner/subscriptions.json` with the schema in `SKILL.md`. Always:
 1. Preserve the `id` field if a subscription was previously known (match by vendor + account)
 2. Compute the diff vs the previous scan: new vendors → `added`, missing/cancelled → `removed`, different amount → `amount_changed`
 3. Set `last_scan` to the current ISO8601 timestamp (with timezone)
 4. Append a `scan_history` entry
-5. Snapshot the previous `subscriptions.json` to `state/history/<previous-scan-date>.json` (only if it doesn't already exist)
+5. Snapshot the previous `subscriptions.json` to `<workspace>/state/subscription-scanner/history/<previous-scan-date>.json` (only if it doesn't already exist)
 
 ## Ambiguous cases
 
@@ -48,4 +48,4 @@ If you can't tell whether something is a real subscription (e.g. unclear if it's
 
 ## Notify on changes
 
-If the scan finds anything `added` or `removed` since the previous run, write a `proactive-{ts}.txt` to `results/` with a brief summary (not the full table — just "+1 added: X. -1 removed: Y") so the change is surfaced via Telegram.
+If the scan finds anything `added` or `removed` since the previous run, write a `proactive-{ts}.txt` to `<workspace>/results/` with a brief summary (not the full table — just "+1 added: X. -1 removed: Y") so the change is surfaced via Telegram.
