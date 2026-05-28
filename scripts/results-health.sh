@@ -28,7 +28,11 @@ for arg in "$@"; do
 done
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-RESULTS="$REPO/results"
+# results/ is workspace state per docs/workspace-contract.md, NOT under repo.
+# Pre-fix scanned repo/results/ which is stale legacy on workspace-pinned
+# installs; workspace/results/ is where the active queue lives (v3 audit).
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+RESULTS="$WORKSPACE/results"
 
 if [ ! -d "$RESULTS" ]; then
 	[ "$QUIET" -eq 0 ] && echo "results/ missing — nothing to check"

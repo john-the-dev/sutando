@@ -11,7 +11,12 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-DB="${SUTANDO_CONVERSATION_DB:-$REPO_DIR/data/conversation.sqlite}"
+# data/ is workspace state per docs/workspace-contract.md, NOT under repo.
+# The sibling import-conversation-log.py correctly resolves data/ via workspace;
+# query-conversation.sh diverged and pointed at repo/data/ which is stale.
+# v3 audit 2026-05-27.
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+DB="${SUTANDO_CONVERSATION_DB:-$WORKSPACE/data/conversation.sqlite}"
 
 if [[ ! -f "$DB" ]]; then
 	echo "error: $DB does not exist yet — no conversations recorded" >&2

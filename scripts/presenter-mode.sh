@@ -25,8 +25,13 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-SENTINEL="$REPO/state/presenter-mode.sentinel"
-mkdir -p "$REPO/state"
+# Sentinel is workspace state per docs/workspace-contract.md (state/ lives
+# under $SUTANDO_WORKSPACE, NOT under repo). Pre-fix the sentinel was written
+# to repo/state/, but bridge consumers (discord-bridge, check-pending-questions)
+# read from workspace/state/ — silent split-brain (v3 audit 2026-05-27).
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+SENTINEL="$WORKSPACE/state/presenter-mode.sentinel"
+mkdir -p "$WORKSPACE/state"
 
 cmd="${1:-status}"
 

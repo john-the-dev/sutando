@@ -13,6 +13,10 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Logs are workspace state per docs/workspace-contract.md, not under repo.
+# Pre-fix tail-events read repo/logs/ which is stale; canonical home is
+# $SUTANDO_WORKSPACE/logs/ (v3 audit 2026-05-27).
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
 DATE="$(date +%Y-%m-%d)"
 TAIL_N=20
 FOLLOW=true
@@ -28,7 +32,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-LOG_FILE="$REPO/logs/events-$DATE.jsonl"
+LOG_FILE="$WORKSPACE/logs/events-$DATE.jsonl"
 
 if [[ ! -f "$LOG_FILE" ]]; then
     echo "tail-events: no file at $LOG_FILE" >&2

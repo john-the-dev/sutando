@@ -21,6 +21,10 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# Workspace dir for runtime state (logs/, state/) per docs/workspace-contract.md.
+# Pre-fix the log+sentinel reads pointed at repo/logs/ + repo/state/ which are
+# stale legacy on workspace-pinned installs (v3 audit 2026-05-27).
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
 QUIET=0
 for arg in "$@"; do case "$arg" in -q|--quiet) QUIET=1 ;; esac; done
 
@@ -46,7 +50,7 @@ fail() { printf "  \033[31m✗ FAIL\033[0m  %-${WIDTH}s %s\n" "$1" "$2"; FAIL=$(
 # 1) voice-agent
 if lsof -iTCP:9900 -sTCP:LISTEN >/dev/null 2>&1; then
     # Check for a Health tick in the last 60s.
-    VLOG="$REPO/logs/voice-agent.log"
+    VLOG="$WORKSPACE/logs/voice-agent.log"
     if [ -f "$VLOG" ] && [ $(($(date +%s) - $(stat_mtime "$VLOG"))) -lt 60 ]; then
         pass "voice-agent" "port 9900 listening, log fresh (<60s)"
     else
@@ -61,7 +65,7 @@ fi
 # so a raw grep will always report historical FATALs from before a prior fix
 # was installed and fail this check forever. Use the last "Watching for
 # context drops" line as the startup marker; count FATALs only after it.
-VLOG="$REPO/logs/voice-agent.log"
+VLOG="$WORKSPACE/logs/voice-agent.log"
 if [ -f "$VLOG" ]; then
     last_start=$(grep -n "Watching for context drops" "$VLOG" 2>/dev/null | tail -1 | cut -d: -f1)
     last_start="${last_start:-1}"
@@ -126,7 +130,7 @@ fi
 # check-pending-questions (PR #432 fixup). String comparison treats "garbage" as
 # GREATER than any real ISO timestamp — without the digit-prefix guard, malformed
 # sentinel content would appear active forever.
-SENT="$REPO/state/presenter-mode.sentinel"
+SENT="$WORKSPACE/state/presenter-mode.sentinel"
 if [ -f "$SENT" ]; then
     expire_iso=$(cat "$SENT")
     now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
