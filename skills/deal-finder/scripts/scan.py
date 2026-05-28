@@ -26,11 +26,19 @@ import urllib.request
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
-WORKSPACE = SKILL_DIR.parents[1]
+# Misleading var name in the pre-fix code: `WORKSPACE = SKILL_DIR.parents[1]`
+# computed to the REPO root, not the workspace. The .env load (load_env below)
+# correctly wants the repo path so it stays here under a clearer name. Per
+# docs/workspace-contract.md, `results/` lives at $SUTANDO_WORKSPACE, NOT under
+# repo — fixed by resolving via the canonical helper.
+REPO_ROOT = SKILL_DIR.parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+from workspace_default import resolve_workspace  # noqa: E402
+_WORKSPACE = resolve_workspace()
 STATE_DIR = SKILL_DIR / "state"
 SEEN_PATH = STATE_DIR / "seen.json"
 CRITERIA_PATH = STATE_DIR / "criteria.json"
-RESULTS_DIR = WORKSPACE / "results"
+RESULTS_DIR = _WORKSPACE / "results"
 
 UA = (
     "Sutando-Personal-Agent/1.0 "
@@ -46,7 +54,7 @@ HDRS = {
 
 def load_env():
     env = {}
-    env_path = WORKSPACE / ".env"
+    env_path = REPO_ROOT / ".env"
     if env_path.exists():
         for line in env_path.read_text().splitlines():
             line = line.strip()
