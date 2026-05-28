@@ -1,9 +1,15 @@
 #!/bin/bash
 # Stop hook: blocks Claude from finishing when unprocessed tasks exist.
 # Skips tasks that already have a corresponding result file.
+#
+# Per docs/workspace-contract.md, tasks/ and results/ live under
+# $SUTANDO_WORKSPACE, NOT under the repo. Reading from REPO/tasks/ leaves
+# the hook seeing stale legacy files (pre-#911 migration leftovers) and
+# missing the actual workspace queue — the bug class fixed in PR #1263.
 
-TASKS_DIR="$(cd "$(dirname "$0")/.." && pwd)/tasks"
-RESULTS_DIR="$(cd "$(dirname "$0")/.." && pwd)/results"
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+TASKS_DIR="$WORKSPACE/tasks"
+RESULTS_DIR="$WORKSPACE/results"
 
 UNPROCESSED=""
 shopt -s nullglob 2>/dev/null
