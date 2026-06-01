@@ -38,6 +38,7 @@ import { recordConversation, recordSession, recordToolCall } from '../../../src/
 import { resultBelongsTo, discordVoiceKey } from '../../../src/result-channel-key.js';
 import { personalPath } from '../../../src/util_paths.js';
 import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed } from './access-tier.js';
+import { createGate, decideForTurn, type GateState } from './name-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
 _dotenvConfig({ path: join(process.env.HOME ?? '', '.claude/channels/discord/.env'), override: false });
@@ -90,6 +91,20 @@ const TASKS_DIR = join(WORKSPACE_DIR, 'tasks');
 const TASK_POLL_INTERVAL_MS = 500;
 const TASK_POLL_TIMEOUT_MS = 300_000;
 const OWNER_NAME = process.env.owner ?? '';
+
+// Speak-gate (name-gate, reused from sutando-skills PR #16 name-gate.ts).
+// This bot's stand name (from stand-identity.json) + peer bots' names. When a
+// peer is configured, the gate stays silent (default meeting-mode) and only
+// breaks silence for turns ADDRESSED to this bot by name (local match, no LLM).
+// Empty peer list = gate disabled = behaves like single-bot (always responds).
+const STAND_NAME: string = (() => {
+	try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); return (si.name as string) || ''; }
+	catch { return ''; }
+})();
+const STAND_NAME_ALIASES = (process.env.SUTANDO_STAND_ALIASES ?? '').split(',').map(s => s.trim()).filter(Boolean);
+const PEER_NAMES = (process.env.SUTANDO_PEER_NAMES ?? 'Lucy,Maddy,Mini,Pro,Sutando')
+	.split(',').map(s => s.trim()).filter(Boolean)
+	.filter(n => n.toLowerCase() !== STAND_NAME.toLowerCase());
 
 // Meeting mode — suppresses bot audio output while keeping transcription + sqlite running.
 // Mirrors src/voice-agent.ts `meetingActive` behaviour for the discord-voice surface.
@@ -429,6 +444,8 @@ interface DiscordVoiceSession {
 	pushScreen: boolean;
 	pushIndicatorMsgId: string | null;
 	pushIndicatorTimer: ReturnType<typeof setInterval> | null;
+	// Speak-gate (name-gate). Null when disabled (no stand name / no peers).
+	gate: GateState | null;
 }
 
 // Effective tier of the in-progress turn — the gate owner/team tools check.
@@ -894,10 +911,16 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		audioPending: [],
 		toolCalls: [],
 		events: [{ event: 'session_started', timestamp: new Date().toISOString() }],
-		meetingMode: false,
+		// Default to silent (meeting mode) when the name-gate is active (a peer bot
+		// may be present); the gate breaks silence only when this bot is addressed.
+		meetingMode: !!(STAND_NAME && PEER_NAMES.length > 0),
 		pushScreen: false,
 		pushIndicatorMsgId: null,
 		pushIndicatorTimer: null,
+		// Build the name-gate iff we have a stand name + at least one peer name.
+		gate: (STAND_NAME && PEER_NAMES.length > 0)
+			? createGate({ instanceName: STAND_NAME, nameAliases: STAND_NAME_ALIASES, otherInstances: PEER_NAMES, primary: TREAT_AS_OWNER })
+			: null,
 		lastUserAudioAt: Date.now(),
 	};
 
@@ -1032,6 +1055,16 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 					void setScreenPush(s, false);
 				} else if (_matchesAnyPhrase(item.content, SCREEN_PUSH_ON_PHRASES)) {
 					void setScreenPush(s, true);
+				}
+				// Speak-gate (name-gate): when a peer bot is present, stay silent and
+				// only break silence for turns ADDRESSED to THIS bot by name.
+				// decideForTurn auto-allows when no peer is configured (single-bot).
+				if (s.gate) {
+					const wantSilent = decideForTurn(s.gate, item.content) === 'drop';
+					if (wantSilent !== s.meetingMode) {
+						s.meetingMode = wantSilent;
+						console.log(`${ts()} [NameGate] meetingMode=${wantSilent} for: "${item.content.slice(0, 50)}"`);
+					}
 				}
 				// utterance event push removed per #1052 — canonical record is
 				// the discord_voice-table row written by recordConversation
