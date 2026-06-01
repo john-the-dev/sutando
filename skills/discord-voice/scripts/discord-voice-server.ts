@@ -1456,6 +1456,43 @@ async function start(): Promise<void> {
 		});
 	}
 
+	// Piece ④ owner-presence (multi-bot meeting mode): this bot stays only while
+	// ITS OWNER is in the channel. When the last owner leaves, the bot leaves too
+	// — no orphan bot listening to a meeting without its owner present. "Alone" =
+	// no owner here, NOT channel-empty: in a 2-person meeting, A leaving drops A's
+	// bot while B + B's bot stay. `.on` (not `.once`) — an owner may leave/rejoin
+	// many times; no cleanup needed since the process exits on Disconnected.
+	// Only armed when we know the owner by id (ACCESS.owner populated) and we're
+	// NOT in treat-everyone-as-owner mode (where no single owner can be singled out).
+	if (ACCESS.owner.size > 0 && !TREAT_AS_OWNER) {
+		client.on('voiceStateUpdate', (oldState, newState) => {
+			const leftOurChannel = oldState.channelId === CHANNEL_ID && newState.channelId !== CHANNEL_ID;
+			if (!leftOurChannel) return;
+			const leaverId = (newState.member ?? oldState.member)?.id;
+			if (!leaverId || !ACCESS.owner.has(leaverId)) return; // a non-owner left — ignore
+			// Any owner still in our channel? (members is a discord.js Collection)
+			const ch = (oldState.guild ?? newState.guild)?.channels?.cache?.get(CHANNEL_ID ?? '');
+			const members = (ch as any)?.members as Map<string, { id: string }> | undefined;
+			const ownerStillHere = members
+				? [...members.values()].some((m) => ACCESS.owner.has(m.id))
+				: false;
+			if (ownerStillHere) return; // another owner remains — stay
+			console.error(`${ts()} [Setup] owner-presence: last owner left — leaving channel`);
+			try {
+				injectSystemMessage(
+					session,
+					`[System] My owner left the voice channel. Say briefly: "My owner left — leaving too." Then stop.`,
+				);
+			} catch (e) {
+				console.error(`${ts()} [Setup] owner-presence announcement injection failed:`, e);
+			}
+			setTimeout(() => {
+				try { connection.destroy(); } catch {}
+				process.exit(0);
+			}, 2500);
+		});
+	}
+
 	connection.on(VoiceConnectionStatus.Disconnected, async () => {
 		try {
 			await Promise.race([
