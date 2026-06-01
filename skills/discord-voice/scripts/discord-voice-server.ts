@@ -105,6 +105,20 @@ function _isWakePhrase(text: string): boolean {
 	return WAKE_PHRASES.some(p => lower.includes(p));
 }
 
+// --- Screen push: local computer screen → THIS discord session's Gemini ------
+// "za warudo screen" starts; "za warudo stop screen" / "stop screen" stops.
+// Also toggled by state/vision-push.txt ('on'/'off') for a Sutando.app button.
+// Reuses src/vision-tools.ts startStreaming/stopStreaming (same loop the web
+// server uses) targeting THIS session's already-attached Gemini. Captures the
+// LOCAL machine's screen as screenshots — NOT the Discord screen-share stream.
+const VISION_PUSH_FILE = join(WORKSPACE_DIR, 'state', 'vision-push.txt');
+const SCREEN_PUSH_ON_PHRASES = ['za warudo screen', 'zawarudo screen', 'start screen push', 'watch my screen'];
+const SCREEN_PUSH_OFF_PHRASES = ['za warudo stop screen', 'stop screen', 'stop watching my screen'];
+function _matchesAnyPhrase(text: string, phrases: string[]): boolean {
+	const lower = text.toLowerCase();
+	return phrases.some(p => lower.includes(p));
+}
+
 const VOICE_MODEL = process.env.VOICE_MODEL || 'gemini-2.5-flash';
 // Per-user voice config (native-audio model + googleSearch + owner_mode +
 // channels) is data, not code: it lives in the workspace, NOT in the git repo.
@@ -245,6 +259,76 @@ async function attachVisionToSession(session: unknown): Promise<void> {
 }
 function detachVisionFromSession(): void {
 	try { _setVisionSession?.(_priorVisionSession ?? null); } catch {}
+}
+
+// Best-effort Discord indicators for screen-push state: voice-channel status
+// (top of the VC, all participants see it) + bot nickname 👁 prefix. Worded to
+// make clear it's the LOCAL computer screen, not the Discord screen-share.
+async function _setScreenPushIndicators(s: DiscordVoiceSession, on: boolean): Promise<void> {
+	try {
+		await fetch(`https://discord.com/api/v10/channels/${s.channelId}/voice-status`, {
+			method: 'PUT',
+			headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+			body: JSON.stringify({ status: on ? '👁 seeing my local screen' : '' }),
+		});
+	} catch (e) { console.error(`${ts()} [ScreenPush] VC-status update failed:`, e); }
+	try {
+		const g = await s.client.guilds.fetch(s.guildId);
+		const me = await g.members.fetchMe();
+		const base = (me.nickname || me.user.username).replace(/^👁\s*/, '');
+		await me.setNickname(on ? `👁 ${base}` : base);
+	} catch (e) { console.error(`${ts()} [ScreenPush] nickname update failed:`, e); }
+}
+
+// Toggle local-screen push for a session. Reuses vision-tools startStreaming
+// (the web-server push loop) targeting THIS session's attached Gemini, so frames
+// flow to the discord session — never the web voice-agent's.
+async function setScreenPush(s: DiscordVoiceSession, on: boolean): Promise<void> {
+	if (on === s.pushScreen) return;
+	let vt: typeof import('../../../src/vision-tools.js');
+	try { vt = await import('../../../src/vision-tools.js'); }
+	catch (e) { console.error(`${ts()} [ScreenPush] vision-tools import failed:`, e); return; }
+	const editIndicator = async (text: string): Promise<void> => {
+		if (!s.pushIndicatorMsgId) return;
+		try {
+			const ch = await s.client.channels.fetch(s.channelId);
+			if (ch && 'messages' in ch) {
+				const m = await (ch as { messages: { fetch: (id: string) => Promise<{ edit: (t: string) => Promise<unknown> }> } }).messages.fetch(s.pushIndicatorMsgId);
+				await m.edit(text);
+			}
+		} catch { /* best-effort */ }
+	};
+	if (on) {
+		const r = vt.startStreaming('screen', undefined, 'pull');
+		if (r.status !== 'streaming') {
+			console.error(`${ts()} [ScreenPush] start failed: ${(r as { error?: string }).error}`);
+			return;
+		}
+		s.pushScreen = true;
+		console.log(`${ts()} [ScreenPush] ON — pushing local screen to this session`);
+		await _setScreenPushIndicators(s, true);
+		try {
+			const ch = await s.client.channels.fetch(s.channelId);
+			if (ch && 'send' in ch) {
+				const m = await (ch as { send: (t: string) => Promise<{ id: string }> }).send(
+					'👁 **I am seeing your local computer screen** (not the Discord stream) · 0 frames');
+				s.pushIndicatorMsgId = m.id;
+			}
+		} catch (e) { console.error(`${ts()} [ScreenPush] indicator message failed:`, e); }
+		s.pushIndicatorTimer = setInterval(() => {
+			if (s.closing || !s.pushScreen) return;
+			const frames = vt.getVisionState().frames;
+			void editIndicator(`👁 **I am seeing your local computer screen** (not the Discord stream) · ${frames} frames`);
+		}, 6_000);
+	} else {
+		s.pushScreen = false;
+		const st = vt.stopStreaming();
+		console.log(`${ts()} [ScreenPush] OFF — ${st.frames} frames over ${st.durationMs}ms`);
+		if (s.pushIndicatorTimer) { clearInterval(s.pushIndicatorTimer); s.pushIndicatorTimer = null; }
+		await _setScreenPushIndicators(s, false);
+		await editIndicator(`⏹ Stopped seeing your local screen · ${st.frames} frames total`);
+		s.pushIndicatorMsgId = null;
+	}
 }
 
 // --- Conversation log -------------------------------------------------------
@@ -900,6 +984,13 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				console.log(`${ts()} [Meeting] voice-mode.txt → ${mode} (meetingMode=${s.meetingMode})`);
 			}
 		} catch { /* file absent = active mode */ }
+		// Screen-push toggle file (Sutando.app Push Screen button writes this).
+		// Absent file = leave current push state (don't auto-stop a voice-started push).
+		try {
+			const vp = readFileSync(VISION_PUSH_FILE, 'utf-8').trim().toLowerCase();
+			const wantPush = vp === 'on' || vp === '1' || vp === 'true';
+			if (wantPush !== s.pushScreen) void setScreenPush(s, wantPush);
+		} catch { /* file absent = no change */ }
 	}, 2_000);
 
 	// AUTO_MEETING_TIMEOUT_MS === 0 means auto-meeting is disabled.
@@ -933,6 +1024,14 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 					s.meetingMode = false;
 					console.log(`${ts()} [Meeting] wake-phrase detected — exiting meeting mode: "${item.content.slice(0, 60)}"`);
 					try { writeFileSync(VOICE_MODE_FILE, 'active'); } catch {}
+				}
+				// Screen-push voice toggle: "za warudo screen" starts pushing the
+				// LOCAL computer screen to this session's Gemini; "stop screen"
+				// stops. Check OFF before ON so "stop screen" doesn't match ON.
+				if (_matchesAnyPhrase(item.content, SCREEN_PUSH_OFF_PHRASES)) {
+					void setScreenPush(s, false);
+				} else if (_matchesAnyPhrase(item.content, SCREEN_PUSH_ON_PHRASES)) {
+					void setScreenPush(s, true);
 				}
 				// utterance event push removed per #1052 — canonical record is
 				// the discord_voice-table row written by recordConversation
@@ -1136,6 +1235,10 @@ function cleanupSession(s: DiscordVoiceSession): void {
 	if (s.closing) return;
 	s.closing = true;
 	if (active === s) active = null;
+
+	// Stop any active screen-push (clears the streaming ticker + indicators).
+	if (s.pushScreen) { try { void setScreenPush(s, false); } catch {} }
+	if (s.pushIndicatorTimer) { try { clearInterval(s.pushIndicatorTimer); } catch {} s.pushIndicatorTimer = null; }
 
 	detachVisionFromSession();
 
