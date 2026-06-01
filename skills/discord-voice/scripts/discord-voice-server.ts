@@ -337,6 +337,14 @@ interface DiscordVoiceSession {
 	events: { event: string; timestamp: string }[];
 	meetingMode: boolean;
 	lastUserAudioAt: number;
+	// Screen-push: when on, a timer pushes THIS machine's local computer screen
+	// (screencapture via vision-tools captureSendFrame) into this discord-voice
+	// Gemini session. NOT the Discord screen-share stream — it's the local screen.
+	// Toggled by the "za warudo screen" voice phrase or state/vision-push.txt
+	// (Sutando.app Push Screen button).
+	pushScreen: boolean;
+	pushIndicatorMsgId: string | null;
+	pushIndicatorTimer: ReturnType<typeof setInterval> | null;
 }
 
 // Effective tier of the in-progress turn — the gate owner/team tools check.
@@ -803,6 +811,9 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		toolCalls: [],
 		events: [{ event: 'session_started', timestamp: new Date().toISOString() }],
 		meetingMode: false,
+		pushScreen: false,
+		pushIndicatorMsgId: null,
+		pushIndicatorTimer: null,
 		lastUserAudioAt: Date.now(),
 	};
 
