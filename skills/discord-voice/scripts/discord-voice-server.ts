@@ -37,7 +37,7 @@ import { resolveWorkspace } from '../../../src/workspace_default.js';
 import { recordConversation, recordSession, recordToolCall } from '../../../src/conversation-store.js';
 import { resultBelongsTo, discordVoiceKey } from '../../../src/result-channel-key.js';
 import { personalPath } from '../../../src/util_paths.js';
-import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed } from './access-tier.js';
+import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed, shouldLeaveOnOwnerExit } from './access-tier.js';
 import { createGate, decideForTurn, type GateState } from './name-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
@@ -1505,14 +1505,12 @@ async function start(): Promise<void> {
 			const leftOurChannel = oldState.channelId === CHANNEL_ID && newState.channelId !== CHANNEL_ID;
 			if (!leftOurChannel) return;
 			const leaverId = (newState.member ?? oldState.member)?.id;
-			if (!leaverId || !ACCESS.owner.has(leaverId)) return; // a non-owner left — ignore
-			// Any owner still in our channel? (members is a discord.js Collection)
+			// Remaining members in our channel (members is a discord.js Collection).
 			const ch = (oldState.guild ?? newState.guild)?.channels?.cache?.get(CHANNEL_ID ?? '');
 			const members = (ch as any)?.members as Map<string, { id: string }> | undefined;
-			const ownerStillHere = members
-				? [...members.values()].some((m) => ACCESS.owner.has(m.id))
-				: false;
-			if (ownerStillHere) return; // another owner remains — stay
+			const remainingIds = members ? [...members.values()].map((m) => m.id) : [];
+			// Pure decision (unit-tested): leave only if an OWNER left and no owner remains.
+			if (!shouldLeaveOnOwnerExit(leaverId, remainingIds, ACCESS.owner)) return;
 			console.error(`${ts()} [Setup] owner-presence: last owner left — leaving channel`);
 			try {
 				injectSystemMessage(

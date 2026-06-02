@@ -121,3 +121,25 @@ export function toolNeed(name: string, ownerOnly: Set<string>, team: Set<string>
 	if (team.has(name)) return 'team';
 	return null;
 }
+
+/**
+ * Owner-presence decision (piece ④): should this bot leave the voice channel
+ * because `leaverId` just left? True iff the leaver WAS an owner AND no owner
+ * remains among `remainingIds`. "Alone" = no owner present, NOT channel-empty —
+ * in a 2-person meeting, A leaving drops A's bot while B + B's bot stay. Pure so
+ * the voiceStateUpdate handler's behaviour is unit-testable without a live
+ * Discord connection. Caller must also gate on (owner set non-empty && not
+ * treat-everyone-as-owner) — when every speaker is "owner" there's no single
+ * owner to track.
+ */
+export function shouldLeaveOnOwnerExit(
+	leaverId: string | undefined,
+	remainingIds: Iterable<string>,
+	ownerIds: Set<string>,
+): boolean {
+	if (!leaverId || !ownerIds.has(leaverId)) return false; // a non-owner left — ignore
+	for (const id of remainingIds) {
+		if (ownerIds.has(id)) return false; // another owner still present — stay
+	}
+	return true; // the last owner left — leave
+}
