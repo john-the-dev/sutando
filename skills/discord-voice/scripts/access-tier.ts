@@ -143,3 +143,20 @@ export function shouldLeaveOnOwnerExit(
 	}
 	return true; // the last owner left — leave
 }
+
+/**
+ * Owner-only addressing (meeting-companion v1 boundary, Mini's design): the bot
+ * breaks its silence for a turn ONLY when the turn is addressed to it by name
+ * AND the speaker is the owner. Open-floor consultancy (anyone in the room may
+ * address the owner's bot) is a v2 opt-in — when enabled, any addressed turn
+ * breaks silence regardless of tier. A non-addressed turn never breaks silence.
+ */
+export function breakSilenceAllowed(
+	addressed: boolean,
+	speakerTier: Tier,
+	allowOpenFloor: boolean,
+): boolean {
+	if (!addressed) return false;     // not addressed by name → stay silent
+	if (allowOpenFloor) return true;  // v2 open-floor → any addressed turn breaks silence
+	return speakerTier === 'owner';   // v1 → only the owner may break silence
+}

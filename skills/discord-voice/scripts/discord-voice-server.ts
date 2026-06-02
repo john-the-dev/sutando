@@ -37,7 +37,7 @@ import { resolveWorkspace } from '../../../src/workspace_default.js';
 import { recordConversation, recordSession, recordToolCall } from '../../../src/conversation-store.js';
 import { resultBelongsTo, discordVoiceKey } from '../../../src/result-channel-key.js';
 import { personalPath } from '../../../src/util_paths.js';
-import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed, shouldLeaveOnOwnerExit } from './access-tier.js';
+import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed, shouldLeaveOnOwnerExit, breakSilenceAllowed } from './access-tier.js';
 import { createGate, decideForTurn, type GateState } from './name-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
@@ -1108,12 +1108,12 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// only break silence for turns ADDRESSED to THIS bot by name.
 				// decideForTurn auto-allows when no peer is configured (single-bot).
 				if (s.gate) {
-					let wantSilent = decideForTurn(s.gate, item.content) === 'drop';
-					// Owner-only addressing (meeting-companion v1): even when this turn
-					// is addressed to the bot by name, only break silence if the speaker
-					// is the OWNER — unless open-floor is explicitly enabled.
-					if (!wantSilent && !SUTANDO_ALLOW_OPEN_FLOOR && currentTier(s) !== 'owner') {
-						wantSilent = true;
+					// Owner-only addressing (meeting-companion v1): break silence only when
+					// the turn is addressed to the bot by name AND the speaker is the owner
+					// (unless open-floor is enabled). See breakSilenceAllowed in access-tier.
+					const addressed = decideForTurn(s.gate, item.content) !== 'drop';
+					const wantSilent = !breakSilenceAllowed(addressed, currentTier(s), SUTANDO_ALLOW_OPEN_FLOOR);
+					if (addressed && wantSilent) {
 						console.log(`${ts()} [NameGate] addressed by non-owner (tier=${currentTier(s)}) — staying silent (owner-only addressing)`);
 					}
 					if (wantSilent !== s.meetingMode) {
