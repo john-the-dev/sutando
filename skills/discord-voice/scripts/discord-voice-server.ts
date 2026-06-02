@@ -98,6 +98,10 @@ const OWNER_NAME = process.env.owner ?? '';
 // breaks silence for turns ADDRESSED to this bot by name (local match, no LLM).
 // Empty peer list = gate disabled = behaves like single-bot (always responds).
 const STAND_NAME: string = (() => {
+	// Env override lets a second gated identity run on the same machine (e.g.
+	// testing Lucy + Maddy on one host without two checkouts). Falls back to
+	// the workspace stand-identity.json name.
+	if (process.env.SUTANDO_STAND_NAME) return process.env.SUTANDO_STAND_NAME.trim();
 	try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); return (si.name as string) || ''; }
 	catch { return ''; }
 })();
@@ -457,7 +461,9 @@ function currentTier(s: DiscordVoiceSession): Tier {
 }
 
 let active: DiscordVoiceSession | null = null;
-let nextBodhiPort = 9930;
+// Base port for the per-session bodhi VoiceSession server. Env-overridable so a
+// second gated identity can run on the same host without an EADDRINUSE collision.
+let nextBodhiPort = Number(process.env.SUTANDO_BODHI_BASE_PORT) || 9930;
 
 // --- Task delegation (work tool) — same pattern as conversation-server -----
 
@@ -999,14 +1005,21 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 	// Both timers are cleared in finalizeSession() via the closing flag check.
 	const voiceModePoll = setInterval(() => {
 		if (s.closing) { clearInterval(voiceModePoll); return; }
-		try {
-			const mode = readFileSync(VOICE_MODE_FILE, 'utf-8').trim();
-			const want = mode === 'meeting';
-			if (want !== s.meetingMode) {
-				s.meetingMode = want;
-				console.log(`${ts()} [Meeting] voice-mode.txt → ${mode} (meetingMode=${s.meetingMode})`);
-			}
-		} catch { /* file absent = active mode */ }
+		// When the name-gate is active (a peer bot is configured), the gate is the
+		// SOLE owner of meetingMode — it flips per-turn on name-address. The manual
+		// voice-mode.txt toggle would otherwise fight the gate every 2s (reverting
+		// each gate decision back to the file's value), so skip the manual override
+		// in gate mode. Single-bot / no-gate keeps the manual toggle.
+		if (!s.gate) {
+			try {
+				const mode = readFileSync(VOICE_MODE_FILE, 'utf-8').trim();
+				const want = mode === 'meeting';
+				if (want !== s.meetingMode) {
+					s.meetingMode = want;
+					console.log(`${ts()} [Meeting] voice-mode.txt → ${mode} (meetingMode=${s.meetingMode})`);
+				}
+			} catch { /* file absent = active mode */ }
+		}
 		// Screen-push toggle file (Sutando.app Push Screen button writes this).
 		// Absent file = leave current push state (don't auto-stop a voice-started push).
 		try {
@@ -1019,7 +1032,9 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 	// AUTO_MEETING_TIMEOUT_MS === 0 means auto-meeting is disabled.
 	const autoMeetingTimer = AUTO_MEETING_TIMEOUT_MS > 0 ? setInterval(() => {
 		if (s.closing) { clearInterval(autoMeetingTimer!); return; }
-		if (!s.meetingMode && Date.now() - s.lastUserAudioAt > AUTO_MEETING_TIMEOUT_MS) {
+		// Skip when the gate owns meetingMode — it already defaults to silent and
+		// flips per-turn, so auto-idle-to-meeting is redundant and would fight it.
+		if (!s.gate && !s.meetingMode && Date.now() - s.lastUserAudioAt > AUTO_MEETING_TIMEOUT_MS) {
 			s.meetingMode = true;
 			console.log(`${ts()} [Meeting] auto-meeting triggered — no user audio for ${AUTO_MEETING_TIMEOUT_MS / 1000}s`);
 			try { writeFileSync(VOICE_MODE_FILE, 'meeting'); } catch {}
