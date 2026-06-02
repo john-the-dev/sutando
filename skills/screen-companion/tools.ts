@@ -232,7 +232,8 @@ end try'`,
 			).trim();
 			if (ax) { selectedText = ax; selectionSource = 'ax_selection'; }
 		} catch (err) {
-			if (err instanceof Error && err.message.includes('ETIMEDOUT')) {
+			const e = err as NodeJS.ErrnoException;
+			if (e.signal === 'SIGTERM' || e.code === 'ETIMEDOUT') {
 				console.error(`[vision_query] AX probe timed out — AX permission may be denied`);
 			}
 		}
