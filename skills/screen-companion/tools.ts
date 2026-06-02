@@ -14,6 +14,7 @@
 // to the owner about screen sharing if vision isn't already streaming.
 
 import { z } from 'zod';
+import { execSync } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
@@ -210,6 +211,51 @@ const visionQueryTool: ToolDefinition = {
 	execution: 'inline',
 	async execute(args) {
 		const { question } = (args ?? {}) as { question?: string };
+
+		// Selection-first path (issue #1389): exact text beats frame-eyeballing.
+		// Try AX selected text (native apps), then Chrome JS (browser content).
+		// Fall through to vision only when there is no selection.
+		let selectedText: string | null = null;
+		try {
+			const ax = execSync(
+				`osascript -e 'try
+  tell application "System Events" to tell (first process whose frontmost is true)
+    return value of attribute "AXSelectedText" of (first UI element whose AXFocused is true)
+  end tell
+on error
+  return ""
+end try'`,
+				{ encoding: 'utf-8', timeout: 3_000 }
+			).trim();
+			if (ax) selectedText = ax;
+		} catch { /* native app has no focused editable or AX denied */ }
+
+		if (!selectedText) {
+			try {
+				const js = execSync(
+					`osascript -e 'try
+  tell application "Google Chrome" to tell active tab of front window to execute javascript "window.getSelection().toString()"
+on error
+  return ""
+end try'`,
+					{ encoding: 'utf-8', timeout: 3_000 }
+				).trim();
+				if (js) selectedText = js;
+			} catch { /* Chrome not front, JS disabled, or no selection */ }
+		}
+
+		if (selectedText) {
+			return {
+				status: 'selection_read',
+				text: selectedText,
+				source: 'ax_selection',
+				_note: question
+					? `Selected text read via AX (exact, not frame-eyeballing). Answer: ${question}`
+					: 'Selected text read via AX. Describe or quote the selection as relevant.',
+			};
+		}
+
+		// No selection — fall back to screen frame capture.
 		const r = await captureSendFrame('screen');
 		if (!r.ok) {
 			return {
@@ -223,8 +269,8 @@ const visionQueryTool: ToolDefinition = {
 			source: r.source,
 			question: question ?? null,
 			_note: question
-				? `Frame is in your vision context. Answer: ${question}`
-				: 'Frame is in your vision context. Describe what you see and continue the conversation.',
+				? `No selection found; frame is in your vision context. Answer: ${question}`
+				: 'No selection found; frame is in your vision context. Describe what you see.',
 		};
 	},
 };
