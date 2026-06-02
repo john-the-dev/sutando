@@ -191,6 +191,13 @@ const SUTANDO_PEER_USERNAME_PATTERNS = (process.env.SUTANDO_PEER_USERNAME_PATTER
 // leaves if a peer joins anyway.
 const SUTANDO_PEER_ENFORCEMENT_DISABLED = process.env.SUTANDO_PEER_ENFORCEMENT_DISABLED === '1';
 
+// Meeting-companion v1 boundary (Mini's design, #1389 thread): owner-only
+// addressing. Only the OWNER may break the bot's silence by name — a non-owner
+// in the room saying the bot's name is ignored. Open-floor consultancy (anyone
+// can address the owner's bot) is a bigger consent question, deferred to v2
+// behind this opt-in flag.
+const SUTANDO_ALLOW_OPEN_FLOOR = process.env.SUTANDO_ALLOW_OPEN_FLOOR === '1';
+
 // Hung-session watchdog threshold. A Gemini Live session can silently stall —
 // audio keeps flowing in but it stops emitting turn.end, with no transport
 // close event to trigger the reconnect path. If utterances have piled up
@@ -1087,15 +1094,28 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// LOCAL computer screen to this session's Gemini; "stop screen"
 				// stops. Check OFF before ON so "stop screen" doesn't match ON.
 				if (_matchesAnyPhrase(item.content, SCREEN_PUSH_OFF_PHRASES)) {
-					void setScreenPush(s, false);
+					void setScreenPush(s, false); // stopping exposure is always safe — no tier gate
 				} else if (_matchesAnyPhrase(item.content, SCREEN_PUSH_ON_PHRASES)) {
-					void setScreenPush(s, true);
+					// Screen-push exposes the HOST's local screen — owner-tier only.
+					// A non-owner in the channel must not be able to start it.
+					if (currentTier(s) === 'owner') {
+						void setScreenPush(s, true);
+					} else {
+						console.log(`${ts()} [ScreenPush] DENIED start — non-owner tier (${currentTier(s)}) requested screen push`);
+					}
 				}
 				// Speak-gate (name-gate): when a peer bot is present, stay silent and
 				// only break silence for turns ADDRESSED to THIS bot by name.
 				// decideForTurn auto-allows when no peer is configured (single-bot).
 				if (s.gate) {
-					const wantSilent = decideForTurn(s.gate, item.content) === 'drop';
+					let wantSilent = decideForTurn(s.gate, item.content) === 'drop';
+					// Owner-only addressing (meeting-companion v1): even when this turn
+					// is addressed to the bot by name, only break silence if the speaker
+					// is the OWNER — unless open-floor is explicitly enabled.
+					if (!wantSilent && !SUTANDO_ALLOW_OPEN_FLOOR && currentTier(s) !== 'owner') {
+						wantSilent = true;
+						console.log(`${ts()} [NameGate] addressed by non-owner (tier=${currentTier(s)}) — staying silent (owner-only addressing)`);
+					}
 					if (wantSilent !== s.meetingMode) {
 						s.meetingMode = wantSilent;
 						console.log(`${ts()} [NameGate] meetingMode=${wantSilent} for: "${item.content.slice(0, 50)}"`);
@@ -1259,10 +1279,6 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 
 	// Subscribe to anyone currently speaking, and to anyone who starts.
 	connection.receiver.speaking.on('start', async (userId) => {
-		// Attribute this speaker to the in-progress turn. The gate resolves
-		// the turn's effective tier across the whole set (cleared on turn.end).
-		s.turnSpeakers.add(userId);
-		s.lastSpeaker = userId;
 		// Bot/human discrimination (#1096). Discord's gateway exposes `User.bot`;
 		// without this check the receiver would happily pipe peer-bot audio to
 		// Gemini, which both wastes API quota and causes attribution errors
@@ -1285,6 +1301,12 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			console.log(`${ts()} [Voice] ignoring bot user ${userId} (not in SUTANDO_ALLOWED_BOT_USER_IDS)`);
 			return;
 		}
+		// Attribute this speaker to the in-progress turn — ONLY after passing the
+		// bot allow/deny gate, so an ignored peer-bot can't poison tier attribution
+		// (turnSpeakers feeds effectiveTier; a stray bot id would drag the turn to
+		// 'other' and, via the lastSpeaker fallback, could even deny the owner).
+		s.turnSpeakers.add(userId);
+		s.lastSpeaker = userId;
 		subscribeUser(s, userId);
 	});
 	// Start the constant-rate ticker that flushes audio to Gemini every 20ms.
