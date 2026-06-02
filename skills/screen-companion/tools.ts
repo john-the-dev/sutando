@@ -215,7 +215,10 @@ const visionQueryTool: ToolDefinition = {
 		// Selection-first path (issue #1389): exact text beats frame-eyeballing.
 		// Try AX selected text (native apps), then Chrome JS (browser content).
 		// Fall through to vision only when there is no selection.
+		// Timeout 800ms per probe (Mini #1409 review: 3s × 2 = 6s worst-case is too
+		// slow for an inline voice tool; 800ms keeps total probe budget ≤ 1.6s).
 		let selectedText: string | null = null;
+		let selectionSource: 'ax_selection' | 'chrome_js_selection' | null = null;
 		try {
 			const ax = execSync(
 				`osascript -e 'try
@@ -225,10 +228,14 @@ const visionQueryTool: ToolDefinition = {
 on error
   return ""
 end try'`,
-				{ encoding: 'utf-8', timeout: 3_000 }
+				{ encoding: 'utf-8', timeout: 800 }
 			).trim();
-			if (ax) selectedText = ax;
-		} catch { /* native app has no focused editable or AX denied */ }
+			if (ax) { selectedText = ax; selectionSource = 'ax_selection'; }
+		} catch (err) {
+			if (err instanceof Error && err.message.includes('ETIMEDOUT')) {
+				console.error(`[vision_query] AX probe timed out — AX permission may be denied`);
+			}
+		}
 
 		if (!selectedText) {
 			try {
@@ -238,20 +245,20 @@ end try'`,
 on error
   return ""
 end try'`,
-					{ encoding: 'utf-8', timeout: 3_000 }
+					{ encoding: 'utf-8', timeout: 800 }
 				).trim();
-				if (js) selectedText = js;
+				if (js) { selectedText = js; selectionSource = 'chrome_js_selection'; }
 			} catch { /* Chrome not front, JS disabled, or no selection */ }
 		}
 
-		if (selectedText) {
+		if (selectedText && selectionSource) {
 			return {
 				status: 'selection_read',
 				text: selectedText,
-				source: 'ax_selection',
+				source: selectionSource,
 				_note: question
-					? `Selected text read via AX (exact, not frame-eyeballing). Answer: ${question}`
-					: 'Selected text read via AX. Describe or quote the selection as relevant.',
+					? `Selected text read via ${selectionSource} (exact, not frame-eyeballing). Answer: ${question}`
+					: `Selected text read via ${selectionSource}. Describe or quote the selection as relevant.`,
 			};
 		}
 
