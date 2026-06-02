@@ -978,6 +978,14 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 	await session.start();
 	console.log(`${ts()} [Bodhi] VoiceSession started on port ${bodhiPort} for ${sessionId}`);
 
+	// Clear any STALE screen-push indicators left by a previous session that
+	// exited without cleaning up. The Set-Voice-Channel-Status API requires the
+	// bot to be IN the channel, so a session that disconnected (e.g. owner left →
+	// VoiceConnectionStatus.Disconnected → immediate process.exit) can never clear
+	// its own 👁 status after the fact. We ARE connected now, so clear it on start;
+	// if push is (re)enabled this session, the poll/phrase path re-sets it fresh.
+	try { await _setScreenPushIndicators(s, false); } catch {}
+
 	// [Outbound] Gemini PCM 24k mono → upsample to 48k stereo → pipe to AudioPlayer.
 	const sessionAny = session as any;
 	let outChunks = 0;
