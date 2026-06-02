@@ -435,6 +435,11 @@ interface DiscordVoiceSession {
 	// set (not a live last-speaker pointer) so a tool call is attributed to
 	// the turn that produced it, not to whoever spoke most recently.
 	turnSpeakers: Set<string>;
+	// Last speaker's user-id, set on every audio receive, NEVER cleared. Tier
+	// resolution falls back to this when turnSpeakers is empty (it's cleared at
+	// turn.end, but tool calls — e.g. `work` — execute AFTER that, so without a
+	// fallback the tier resolves to 'other' and owner tools are wrongly denied).
+	lastSpeaker: string | null;
 	audioPending: Buffer[];
 	toolCalls: { name: string; durationMs: number; timestamp: string }[];
 	events: { event: string; timestamp: string }[];
@@ -457,7 +462,13 @@ interface DiscordVoiceSession {
 // closed to the least-privileged among them (see effectiveTier). TREAT_AS_OWNER
 // (legacy DISCORD_VOICE_OWNER) overrides to owner.
 function currentTier(s: DiscordVoiceSession): Tier {
-	return effectiveTier(s.turnSpeakers, ACCESS, TREAT_AS_OWNER);
+	// Judge by the speaker's owner ID. turnSpeakers is cleared at turn.end, but
+	// tool calls run after that, so fall back to the last speaker's id (their
+	// actual owner-ID is what should decide tier — NOT a blanket owner_mode).
+	const speakers = s.turnSpeakers.size > 0
+		? s.turnSpeakers
+		: (s.lastSpeaker ? new Set([s.lastSpeaker]) : s.turnSpeakers);
+	return effectiveTier(speakers, ACCESS, TREAT_AS_OWNER);
 }
 
 let active: DiscordVoiceSession | null = null;
@@ -914,6 +925,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		client,
 		botFlagCache: new Map(),
 		turnSpeakers: new Set(),
+		lastSpeaker: null,
 		audioPending: [],
 		toolCalls: [],
 		events: [{ event: 'session_started', timestamp: new Date().toISOString() }],
@@ -1250,6 +1262,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		// Attribute this speaker to the in-progress turn. The gate resolves
 		// the turn's effective tier across the whole set (cleared on turn.end).
 		s.turnSpeakers.add(userId);
+		s.lastSpeaker = userId;
 		// Bot/human discrimination (#1096). Discord's gateway exposes `User.bot`;
 		// without this check the receiver would happily pipe peer-bot audio to
 		// Gemini, which both wastes API quota and causes attribution errors
