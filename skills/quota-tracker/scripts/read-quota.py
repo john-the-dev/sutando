@@ -15,6 +15,7 @@ Burn-rate tracking (closes #1087):
   Skips the sample if a 5h reset occurred (util dropped) or the gap is
   outside the 2min–2h window.
 """
+from __future__ import annotations
 
 import json
 import sys
