@@ -47,3 +47,50 @@ if failures:
         print(f"  {text!r}: expected {exp}, got {got}")
     sys.exit(1)
 print(f"\nOK — {len(CASES)}/{len(CASES)} summon-match cases passed")
+
+
+# --- #1427: multi-bot @-mention gating (summon_is_for_me) -------------------
+# A bare "za warudo" reaches every bot's bridge (the phrase matcher strips
+# leading mentions), so the bot must decide whether the summon is FOR IT:
+# answer iff this bot is @-mentioned OR no other Sutando bot is named.
+from join_trigger import summon_is_for_me as _sfm  # noqa: E402
+
+LUCY, MADDY, HUMAN = 1494435872949665953, 1485656249705169031, 1025785494862315690
+
+
+class _U:
+    def __init__(self, uid, bot):
+        self.id, self.bot = uid, bot
+
+
+class _Msg:
+    def __init__(self, mentions):
+        self.mentions = mentions
+
+
+GATE_CASES = [
+    # (description, mentions, self_id, expected)
+    ("bare summon → Lucy joins", [], LUCY, True),
+    ("bare summon → Maddy joins", [], MADDY, True),
+    ("@Maddy → Lucy stays out", [_U(MADDY, True)], LUCY, False),
+    ("@Maddy → Maddy joins", [_U(MADDY, True)], MADDY, True),
+    ("@Lucy → Lucy joins", [_U(LUCY, True)], LUCY, True),
+    ("@Lucy → Maddy stays out", [_U(LUCY, True)], MADDY, False),
+    ("@human only → Lucy still joins", [_U(HUMAN, False)], LUCY, True),
+    ("@Lucy @Maddy → Lucy joins", [_U(LUCY, True), _U(MADDY, True)], LUCY, True),
+    ("@Lucy @Maddy → Maddy joins", [_U(LUCY, True), _U(MADDY, True)], MADDY, True),
+    ("self_id None → backward-compat join", [_U(MADDY, True)], None, True),
+]
+
+gate_fail = []
+for desc, mentions, self_id, expected in GATE_CASES:
+    got = _sfm(_Msg(mentions), self_id)
+    status = "ok " if got == expected else "XX "
+    print(f"  {status}{desc:38} -> {got} (want {expected})")
+    if got != expected:
+        gate_fail.append(desc)
+
+if gate_fail:
+    print(f"\nFAILED {len(gate_fail)}/{len(GATE_CASES)} gate cases: {gate_fail}")
+    sys.exit(1)
+print(f"OK — {len(GATE_CASES)}/{len(GATE_CASES)} summon-gate cases passed")

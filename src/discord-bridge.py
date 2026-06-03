@@ -80,7 +80,7 @@ except Exception:  # pragma: no cover - skill optional
     def _dv_message_is_join_phrase(text):  # type: ignore
         return False
 
-    def _dv_handle_join_trigger(message):  # type: ignore
+    def _dv_handle_join_trigger(message, self_user_id=None):  # type: ignore
         return ""
 
 # Vision-frame helper — pushes image attachments into the active voice session
@@ -2322,7 +2322,7 @@ async def _handle_discord_message(message, force=False):
             if str(message.author.id) in load_allowed() and _dv_message_is_join_phrase(text):
                 print(f"  [join-trigger] owner @{message.author} said the join phrase — summoning discord-voice (bypassing requireMention)", flush=True)
                 try:
-                    reply = _dv_handle_join_trigger(message)
+                    reply = _dv_handle_join_trigger(message, getattr(client.user, "id", None))
                 except Exception as e:
                     print(f"  [join-trigger] handler raised: {e}", flush=True)
                     reply = "Couldn't process the voice-join request — check the bridge log."
@@ -2631,7 +2631,7 @@ async def _handle_discord_message(message, force=False):
         if is_join:
             print(f"  [join-trigger] owner @{username} said the join phrase — summoning discord-voice", flush=True)
             try:
-                reply = _dv_handle_join_trigger(message)
+                reply = _dv_handle_join_trigger(message, getattr(client.user, "id", None))
             except Exception as e:
                 print(f"  [join-trigger] handler raised: {e}", flush=True)
                 reply = "Couldn't process the voice-join request — check the bridge log."

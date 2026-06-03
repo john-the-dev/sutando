@@ -339,7 +339,32 @@ def _enqueue_context_prep_task(phrase: str, channel_id, channel_name: str) -> No
         pass
 
 
-def handle_join_trigger(message) -> str:
+def summon_is_for_me(message, self_user_id) -> bool:
+    """For a 'za warudo' summon seen by THIS bot, decide whether to answer.
+
+    Multiple Sutando bots watch the same channels, and `message_is_join_phrase`
+    strips leading @-mentions before matching — so a bare "za warudo" fires for
+    every bot at once, and "@Maddy za warudo" fired for whichever bridge saw it
+    (the wrong bot would join: Lucy answered a Maddy summon — #1427).
+
+    Rule (Susan 2026-06-03): answer iff THIS bot is @-mentioned, OR no OTHER
+    Sutando bot is @-mentioned. A summon that names a different bot is meant for
+    that bot, so we stay out. `self_user_id is None` (caller didn't supply an
+    identity) preserves the pre-#1427 behavior — always answer.
+    """
+    if self_user_id is None:
+        return True
+    mentions = getattr(message, "mentions", None) or []
+    mentioned_bot_ids = {
+        getattr(u, "id", None) for u in mentions if getattr(u, "bot", False)
+    }
+    mentioned_bot_ids.discard(None)
+    if self_user_id in mentioned_bot_ids:
+        return True
+    return not any(uid != self_user_id for uid in mentioned_bot_ids)
+
+
+def handle_join_trigger(message, self_user_id=None) -> str:
     """Owner said the magic word — summon discord-voice into their channel.
 
     Called by the bridge AFTER it has confirmed (a) the sender is the owner
@@ -350,9 +375,17 @@ def handle_join_trigger(message) -> str:
     waits on the other (per the agreed design: voice arrives immediately,
     context lands on the next core watcher tick).
 
+    `self_user_id` (the bridge's own bot user id) gates multi-bot summons:
+    when another bot is @-mentioned, this bot stays out and returns "" so the
+    bridge sends no reply (it guards on `if reply:`). See `summon_is_for_me`.
+
     Returns a short human-readable reply string for the bridge to send back
     to the originating channel. Never raises — any failure becomes a reply.
     """
+    # #1427: in a multi-bot guild, only the @-mentioned bot answers the summon
+    # (or every bot if none is named). Stay silent if another bot was named.
+    if not summon_is_for_me(message, self_user_id):
+        return ""
     phrase = load_join_phrase()
     try:
         channel = _owner_voice_channel(message)
