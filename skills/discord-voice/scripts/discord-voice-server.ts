@@ -110,6 +110,15 @@ const PEER_NAMES = (process.env.SUTANDO_PEER_NAMES ?? 'Lucy,Maddy,Mini,Pro,Sutan
 	.split(',').map(s => s.trim()).filter(Boolean)
 	.filter(n => n.toLowerCase() !== STAND_NAME.toLowerCase());
 
+// Meeting-buddy mode (single bot, multiple humans — PR #1427). Opt-in via
+// SUTANDO_MEETING_MODE=1. When on, the name-gate starts SILENT, stays active
+// even with no peer bots (own name is the only wake), and honors the standby
+// phrases below as an explicit "go quiet but stay in the channel" command.
+// Default off → legacy behavior is byte-for-byte unchanged.
+const SUTANDO_MEETING_MODE = process.env.SUTANDO_MEETING_MODE === '1';
+const STANDBY_PHRASES = (process.env.SUTANDO_STANDBY_PHRASES ?? 'standby,stand by,待命,你待命')
+	.split(',').map(s => s.trim()).filter(Boolean);
+
 // Meeting mode — suppresses bot audio output while keeping transcription + sqlite running.
 // Mirrors src/voice-agent.ts `meetingActive` behaviour for the discord-voice surface.
 // Manual: poll state/voice-mode.txt (same file the menu-bar app + voice-agent write).
@@ -937,14 +946,16 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		toolCalls: [],
 		events: [{ event: 'session_started', timestamp: new Date().toISOString() }],
 		// Default to silent (meeting mode) when the name-gate is active (a peer bot
-		// may be present); the gate breaks silence only when this bot is addressed.
-		meetingMode: !!(STAND_NAME && PEER_NAMES.length > 0),
+		// may be present, OR explicit meeting-buddy mode); the gate breaks silence
+		// only when this bot is addressed.
+		meetingMode: !!(STAND_NAME && (PEER_NAMES.length > 0 || SUTANDO_MEETING_MODE)),
 		pushScreen: false,
 		pushIndicatorMsgId: null,
 		pushIndicatorTimer: null,
-		// Build the name-gate iff we have a stand name + at least one peer name.
-		gate: (STAND_NAME && PEER_NAMES.length > 0)
-			? createGate({ instanceName: STAND_NAME, nameAliases: STAND_NAME_ALIASES, otherInstances: PEER_NAMES, primary: TREAT_AS_OWNER })
+		// Build the name-gate iff we have a stand name + (at least one peer name OR
+		// meeting-buddy mode, which keeps the gate active with no peers present).
+		gate: (STAND_NAME && (PEER_NAMES.length > 0 || SUTANDO_MEETING_MODE))
+			? createGate({ instanceName: STAND_NAME, nameAliases: STAND_NAME_ALIASES, otherInstances: PEER_NAMES, primary: TREAT_AS_OWNER, meetingMode: SUTANDO_MEETING_MODE, standbyAliases: STANDBY_PHRASES })
 			: null,
 		lastUserAudioAt: Date.now(),
 	};

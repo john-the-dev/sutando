@@ -12,6 +12,16 @@ export interface GateConfig {
 	otherAliases?: string[];
 	/** When true (and no name in transcript yet), respond to cold openers. */
 	primary?: boolean;
+	/**
+	 * Meeting-buddy mode (single bot, multiple humans). When true the gate:
+	 *   - starts SILENT (ignores `primary`) — waits to be named before answering,
+	 *   - stays active even with no peer instances (own-name is the only wake),
+	 *   - honors `standbyAliases` as an explicit "go silent but stay" command.
+	 * See notes/multi-bot-voice-gate-redesign.md + PR #1427.
+	 */
+	meetingMode?: boolean;
+	/** Spoken-form "standby / go quiet" phrases that re-silence the bot. */
+	standbyAliases?: string[];
 }
 
 export type Decision = 'allow' | 'drop';
@@ -20,6 +30,7 @@ export interface GateState {
 	readonly cfg: GateConfig;
 	readonly nameVariants: string[];
 	readonly otherVariants: string[];
+	readonly standbyVariants: string[];
 	/** Sticky last-addressed-to-me bit. */
 	lastAddressedToMe: boolean;
 }
@@ -111,27 +122,59 @@ export function createGate(cfg: GateConfig): GateState {
 		.map(s => s.trim()).filter(Boolean);
 	const otherVariants = [...(cfg.otherInstances ?? []), ...(cfg.otherAliases ?? [])]
 		.map(s => s.trim()).filter(Boolean);
+	const standbyVariants = (cfg.standbyAliases ?? [])
+		.map(s => s.trim()).filter(Boolean);
 	return {
 		cfg,
 		nameVariants,
 		otherVariants,
-		lastAddressedToMe: !!cfg.primary,
+		standbyVariants,
+		// Meeting mode starts SILENT — the bot waits to be named, regardless of
+		// `primary`. Legacy (non-meeting) mode keeps the primary-driven default.
+		lastAddressedToMe: cfg.meetingMode ? false : !!cfg.primary,
 	};
+}
+
+/**
+ * Detect an explicit "standby / go quiet" command. Standby phrases are bare
+ * command words ("standby", "待命"), not name-addressed imperatives, so this is
+ * a word-boundary (ASCII) / substring (CJK) match rather than isAddressedBy.
+ */
+export function isStandby(text: string, standbyVariants: string[]): boolean {
+	if (!text || standbyVariants.length === 0) return false;
+	const lc = text.toLowerCase();
+	for (const raw of standbyVariants) {
+		const s = raw.toLowerCase().trim();
+		if (!s) continue;
+		const ascii = /^[\x00-\x7f]+$/.test(s);
+		if (ascii ? new RegExp(`\\b${escape(s)}\\b`, 'i').test(lc) : lc.includes(s)) return true;
+	}
+	return false;
 }
 
 /**
  * Process one user-turn's transcript text and return the new decision.
  * Updates state in-place. Sticky semantics:
+ *   - standby phrase → drop (sticky=false): go silent but stay in the room.
  *   - my-name addressed → allow (sticky=true)
  *   - other-name addressed → drop (sticky=false)
  *   - neither → unchanged (sticky carries)
- * If OTHER_INSTANCES is empty (no peer present), gate is disabled and
- * always allows.
+ *
+ * Meeting mode (single bot, multiple humans): the gate stays active even with
+ * NO peer instances — own-name is the only wake, standby is the only sleep —
+ * and (via createGate) starts silent. Legacy mode keeps the old "no peer →
+ * always allow" shortcut so non-meeting single-bot deployments are unchanged.
  */
 export function decideForTurn(state: GateState, userText: string): Decision {
-	if (state.otherVariants.length === 0) return 'allow'; // gate disabled
+	// Standby: explicit "go silent but stay" — re-silences until next name cue.
+	if (isStandby(userText, state.standbyVariants)) {
+		state.lastAddressedToMe = false;
+		return 'drop';
+	}
+	// Legacy single-bot (no peers, not meeting mode): gate disabled, allow all.
+	if (!state.cfg.meetingMode && state.otherVariants.length === 0) return 'allow';
 	const haveMyName = isAddressedBy(userText, state.nameVariants);
-	const haveOtherName = isAddressedBy(userText, state.otherVariants);
+	const haveOtherName = state.otherVariants.length > 0 && isAddressedBy(userText, state.otherVariants);
 	if (haveMyName) state.lastAddressedToMe = true;
 	else if (haveOtherName) state.lastAddressedToMe = false;
 	return state.lastAddressedToMe ? 'allow' : 'drop';
