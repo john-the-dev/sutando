@@ -1113,6 +1113,19 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		(s as any).utterancesSinceTurn = 0;
 		// Tier gate: the turn is over — its speaker attribution no longer
 		// applies. The next turn re-accumulates speakers from speaking.start.
+		// #1427 attribution: snapshot THIS turn's human speaker BEFORE clearing,
+		// so the user-row attribution below uses who actually spoke this turn —
+		// not s.lastSpeaker (the last audio-packet sender), which mis-attributes
+		// when multiple people are in the channel (e.g. two "Susan" identities:
+		// susanliu_ main + the test account). Prefer a single human speaker;
+		// if several humans spoke, keep lastSpeaker (best available); fall back
+		// to lastSpeaker only when the turn set has no humans.
+		const _turnHumans = [...s.turnSpeakers].filter(
+			id => s.speakerNameCache.get(id)?.type !== 'agent');
+		const _turnSpeakerId: string | null =
+			_turnHumans.length === 1 ? _turnHumans[0]
+			: (s.lastSpeaker && _turnHumans.includes(s.lastSpeaker)) ? s.lastSpeaker
+			: (_turnHumans[0] ?? s.lastSpeaker ?? null);
 		s.turnSpeakers.clear();
 		const items = session.conversationContext.items;
 		if (items.length < lastProcessedIdx) lastProcessedIdx = 0;
@@ -1171,9 +1184,9 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// Attribute the turn to its speaker. turnSpeakers is cleared at
 				// the top of this handler, so use lastSpeaker (the non-cleared
 				// fallback). A human turn always reached the mic, so spoken=true.
-				const _spk = s.lastSpeaker ? s.speakerNameCache.get(s.lastSpeaker) : undefined;
+				const _spk = _turnSpeakerId ? s.speakerNameCache.get(_turnSpeakerId) : undefined;
 				recordConversation('discord-user', item.content, s.sessionId, {
-					speakerId: s.lastSpeaker ?? undefined,
+					speakerId: _turnSpeakerId ?? undefined,
 					speakerName: _spk?.name,
 					speakerType: _spk?.type ?? 'human',
 					spoken: true,
