@@ -134,7 +134,13 @@ const PEER_NAMES = (process.env.SUTANDO_PEER_NAMES ?? 'Lucy,Maddy,Mini,Pro,Sutan
 // even with no peer bots (own name is the only wake), and honors the standby
 // phrases below as an explicit "go quiet but stay in the channel" command.
 // Default off → legacy behavior is byte-for-byte unchanged.
-const SUTANDO_MEETING_MODE = process.env.SUTANDO_MEETING_MODE === '1';
+const SUTANDO_MEETING_MODE = process.env.SUTANDO_MEETING_MODE === '1' || (() => {
+	// #1427: also honor `meetingMode: true` in stand-identity.json so a node (e.g.
+	// Maddy) can default to gated WITHOUT the launcher sourcing .env (the env var
+	// doesn't reach the process there — same gotcha as aliases). When on, the bot
+	// JOINS name-gated/silent and only speaks when addressed by name.
+	try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); return si.meetingMode === true; } catch { return false; }
+})();
 const STANDBY_PHRASES = (process.env.SUTANDO_STANDBY_PHRASES ?? 'standby,stand by,hold on,wait,one sec,待命,你待命')
 	.split(',').map(s => s.trim()).filter(Boolean);
 
@@ -163,6 +169,7 @@ function _isWakePhrase(text: string): boolean {
 // Enter-meeting cues (#1427): the bot joins active and switches to silent
 // meeting/note-taker mode only when the user cues it with one of these.
 const ENTER_MEETING_PHRASES = ['take notes', 'meeting mode', 'be silent', 'go silent',
+	'stand by', 'standby', 'hold on',
 	'passive mode', 'take meeting notes', 'start the meeting', 'start meeting', 'take meeting note',
 	'记笔记', '会议模式', '安静', '记录模式'];
 function _isEnterMeetingPhrase(text: string): boolean {
@@ -1014,8 +1021,12 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		// switch to silent meeting-mode on a cue ("take notes"/"meeting mode") or
 		// the auto-timeout — not silent-upfront. The name-gate's per-turn silencing
 		// (below) applies only once s.meetingEntered is true.
-		meetingMode: false,
-		meetingEntered: false,
+		// #1427: when SUTANDO_MEETING_MODE (env or stand-identity.meetingMode), the
+		// bot JOINS already name-gated — silent by default, only speaks when addressed
+		// by name. Fixes "Maddy interjects when not called" (it used to join active
+		// and only gate after an explicit standby cue). Off → legacy join-active.
+		meetingMode: SUTANDO_MEETING_MODE,
+		meetingEntered: SUTANDO_MEETING_MODE,
 		allowAckAudible: false,
 		screenShareOn: false,
 		pushIndicatorMsgId: null,
