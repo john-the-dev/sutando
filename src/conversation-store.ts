@@ -246,7 +246,8 @@ function init(): void {
 				FROM phone ORDER BY ts_unix DESC;
 			CREATE VIEW v_discord_voice AS
 				SELECT id, datetime(ts_unix,'unixepoch','localtime') AS time,
-					ts_unix, kind, text, duration_ms, session_id
+					ts_unix, kind, text, duration_ms, session_id,
+					speaker_id, speaker_name, speaker_type, spoken
 				FROM discord_voice ORDER BY ts_unix DESC;
 			CREATE VIEW v_sessions AS
 				SELECT datetime(ts_unix,'unixepoch','localtime') AS time,
