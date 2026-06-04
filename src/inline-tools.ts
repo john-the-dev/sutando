@@ -36,8 +36,8 @@ export { describeScreenTool, clickTool, scrollAndDescribeTool, playVideoTool, pa
 import { describeScreenTool, clickTool, pointAtTool, scrollAndDescribeTool, screenRecordTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool, switchTabTool, closeTabTool, scrollTool, openUrlTool } from './browser-tools.js';
 
 // Vision: one-shot frame + start/stop live screen-to-Gemini video.
-export { sendVisionFrameTool, startVisionTool, stopVisionTool } from './vision-tools.js';
-import { sendVisionFrameTool, startVisionTool, stopVisionTool } from './vision-tools.js';
+export { sendVisionFrameTool, startVisionTool, stopVisionTool, joinDiscordScreenTool } from './vision-tools.js';
+import { sendVisionFrameTool, startVisionTool, stopVisionTool, joinDiscordScreenTool } from './vision-tools.js';
 
 // Active artifact cache — load a file once, query repeatedly without task-bridge round-trips.
 export { setActiveArtifactTool, queryActiveArtifactTool, clearActiveArtifactTool, clearActiveArtifact } from './artifact-cache-tools.js';
@@ -1120,27 +1120,6 @@ function loadCoreDocumentedSkills(): { name: string; description: string }[] {
 	return Array.from(byName.values());
 }
 export const coreDocumentedSkills = loadCoreDocumentedSkills();
-
-// "join screen" in a Discord voice channel = view THIS channel's screen-share
-// (Susan 2026-06-04). Giving the model a dedicated tool keeps it from grabbing
-// the Zoom skill's join_zoom/summon for a screen request. The actual view is
-// provided by the (optional, currently owner-private) discord-voice-view-screen
-// skill; until that's installed on this machine, report cleanly — never fall
-// back to Zoom. See feedback/notes on join-screen-as-inline-tool.
-export const joinDiscordScreenTool: ToolDefinition = {
-	name: 'join_discord_screen',
-	description:
-		'Join / view the screen share in the CURRENT Discord voice channel. Use this for "join screen", "join the screen", "view the screen", "看屏幕", "加入屏幕". ' +
-		'This is the Discord screen-share — for a screen request in a Discord voice channel, ALWAYS use this, NEVER join_zoom or summon (those are Zoom).',
-	parameters: z.object({}),
-	execution: 'inline',
-	async execute() {
-		return {
-			status: 'unavailable',
-			message: 'Discord screen-view (join_discord_screen) is not installed on this machine yet — the discord-voice-view-screen skill is missing. Do NOT fall back to Zoom; tell the user screen-view is not available here yet.',
-		};
-	},
-};
 
 export const inlineTools = assertUniqueToolNames([
 	joinDiscordScreenTool,
