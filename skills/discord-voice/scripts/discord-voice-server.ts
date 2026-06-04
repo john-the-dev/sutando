@@ -159,19 +159,14 @@ function _isEnterMeetingPhrase(text: string): boolean {
 	return ENTER_MEETING_PHRASES.some(p => lower.includes(p));
 }
 
-// --- Screen push: local computer screen → THIS discord session's Gemini ------
-// "za warudo screen" starts; "za warudo stop screen" / "stop screen" stops.
-// Also toggled by state/vision-push.txt ('on'/'off') for a Sutando.app button.
-// Reuses src/vision-tools.ts startStreaming/stopStreaming (same loop the web
-// server uses) targeting THIS session's already-attached Gemini. Captures the
-// LOCAL machine's screen as screenshots — NOT the Discord screen-share stream.
-const VISION_PUSH_FILE = join(WORKSPACE_DIR, 'state', 'vision-push.txt');
-// Screen-push voice phrases removed (#1427) — only "za warudo" remains a magic
-// word; screen sharing is the join_discord_screen inline tool's job now.
-function _matchesAnyPhrase(text: string, phrases: string[]): boolean {
-	const lower = text.toLowerCase();
-	return phrases.some(p => lower.includes(p));
-}
+// --- Screen sharing: REMOVED from discord-voice (#1427, Susan 2026-06-04) -----
+// All screen-push machinery (setScreenPush, the 👁 indicators, vision-push.txt,
+// the "za warudo screen" phrases) is gone. Screen sharing in a Discord voice
+// session is now owned entirely by the join_discord_screen inline tool
+// (src/vision-tools.ts), which the model calls on "join/share screen". The only
+// magic word that remains is "za warudo" (summon). discord-voice attaches its
+// Gemini session to vision-tools (attachVisionToSession), so join_discord_screen
+// streams frames into THIS session — no discord-voice-side push code needed.
 
 const VOICE_MODEL = process.env.VOICE_MODEL || 'gemini-2.5-flash';
 // Per-user voice config (native-audio model + googleSearch + owner_mode +
@@ -322,80 +317,6 @@ function detachVisionFromSession(): void {
 	try { _setVisionSession?.(_priorVisionSession ?? null); } catch {}
 }
 
-// Best-effort Discord indicators for screen-push state: voice-channel status
-// (top of the VC, all participants see it) + bot nickname 👁 prefix. Worded to
-// make clear it's the LOCAL computer screen, not the Discord screen-share.
-async function _setScreenPushIndicators(s: DiscordVoiceSession, on: boolean): Promise<void> {
-	try {
-		await fetch(`https://discord.com/api/v10/channels/${s.channelId}/voice-status`, {
-			method: 'PUT',
-			headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
-			body: JSON.stringify({ status: on ? '👁 seeing my local screen' : '' }),
-		});
-	} catch (e) { console.error(`${ts()} [ScreenPush] VC-status update failed:`, e); }
-	try {
-		const g = await s.client.guilds.fetch(s.guildId);
-		const me = await g.members.fetchMe();
-		const base = (me.nickname || me.user.username).replace(/^👁\s*/, '');
-		await me.setNickname(on ? `👁 ${base}` : base);
-	} catch (e) { console.error(`${ts()} [ScreenPush] nickname update failed:`, e); }
-}
-
-// Toggle local-screen push for a session. Reuses vision-tools startStreaming
-// (the web-server push loop) targeting THIS session's attached Gemini, so frames
-// flow to the discord session — never the web voice-agent's.
-async function setScreenPush(s: DiscordVoiceSession, on: boolean): Promise<void> {
-	// #1427 (Susan 2026-06-04): screen-push is REMOVED from discord-voice — it is
-	// now handled solely by the join_discord_screen inline tool. Never START a push
-	// here regardless of caller; the off-path stays so any prior state still clears.
-	if (on) return;
-	if (on === s.pushScreen) return;
-	let vt: typeof import('../../../src/vision-tools.js');
-	try { vt = await import('../../../src/vision-tools.js'); }
-	catch (e) { console.error(`${ts()} [ScreenPush] vision-tools import failed:`, e); return; }
-	const editIndicator = async (text: string): Promise<void> => {
-		if (!s.pushIndicatorMsgId) return;
-		try {
-			const ch = await s.client.channels.fetch(s.channelId);
-			if (ch && 'messages' in ch) {
-				const m = await (ch as { messages: { fetch: (id: string) => Promise<{ edit: (t: string) => Promise<unknown> }> } }).messages.fetch(s.pushIndicatorMsgId);
-				await m.edit(text);
-			}
-		} catch { /* best-effort */ }
-	};
-	if (on) {
-		const r = vt.startStreaming('screen', undefined, 'pull');
-		if (r.status !== 'streaming') {
-			console.error(`${ts()} [ScreenPush] start failed: ${(r as { error?: string }).error}`);
-			return;
-		}
-		s.pushScreen = true;
-		console.log(`${ts()} [ScreenPush] ON — pushing local screen to this session`);
-		await _setScreenPushIndicators(s, true);
-		try {
-			const ch = await s.client.channels.fetch(s.channelId);
-			if (ch && 'send' in ch) {
-				const m = await (ch as { send: (t: string) => Promise<{ id: string }> }).send(
-					'👁 **I am seeing your local computer screen** (not the Discord stream) · 0 frames');
-				s.pushIndicatorMsgId = m.id;
-			}
-		} catch (e) { console.error(`${ts()} [ScreenPush] indicator message failed:`, e); }
-		s.pushIndicatorTimer = setInterval(() => {
-			if (s.closing || !s.pushScreen) return;
-			const frames = vt.getVisionState().frames;
-			void editIndicator(`👁 **I am seeing your local computer screen** (not the Discord stream) · ${frames} frames`);
-		}, 6_000);
-	} else {
-		s.pushScreen = false;
-		const st = vt.stopStreaming();
-		console.log(`${ts()} [ScreenPush] OFF — ${st.frames} frames over ${st.durationMs}ms`);
-		if (s.pushIndicatorTimer) { clearInterval(s.pushIndicatorTimer); s.pushIndicatorTimer = null; }
-		await _setScreenPushIndicators(s, false);
-		await editIndicator(`⏹ Stopped seeing your local screen · ${st.frames} frames total`);
-		s.pushIndicatorMsgId = null;
-	}
-}
-
 // --- Conversation log -------------------------------------------------------
 // discord-voice mirrors turns into conversation.sqlite (queryable) AND the
 // shared logs/conversation.log text log — the same dual-write the phone path
@@ -500,14 +421,6 @@ interface DiscordVoiceSession {
 	// ("take notes"/"meeting mode") or the auto-timeout. Wake phrases reset it.
 	meetingEntered: boolean;
 	lastUserAudioAt: number;
-	// Screen-push: when on, a timer pushes THIS machine's local computer screen
-	// (screencapture via vision-tools captureSendFrame) into this discord-voice
-	// Gemini session. NOT the Discord screen-share stream — it's the local screen.
-	// Toggled by the "za warudo screen" voice phrase or state/vision-push.txt
-	// (Sutando.app Push Screen button).
-	pushScreen: boolean;
-	pushIndicatorMsgId: string | null;
-	pushIndicatorTimer: ReturnType<typeof setInterval> | null;
 	// Speak-gate (name-gate). Null when disabled (no stand name / no peers).
 	gate: GateState | null;
 }
@@ -1003,9 +916,6 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		// (below) applies only once s.meetingEntered is true.
 		meetingMode: false,
 		meetingEntered: false,
-		pushScreen: false,
-		pushIndicatorMsgId: null,
-		pushIndicatorTimer: null,
 		// Build the name-gate iff we have a stand name + (at least one peer name OR
 		// meeting-buddy mode, which keeps the gate active with no peers present).
 		gate: (STAND_NAME && (PEER_NAMES.length > 0 || SUTANDO_MEETING_MODE))
@@ -1062,14 +972,6 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 	await session.start();
 	console.log(`${ts()} [Bodhi] VoiceSession started on port ${bodhiPort} for ${sessionId}`);
 
-	// Clear any STALE screen-push indicators left by a previous session that
-	// exited without cleaning up. The Set-Voice-Channel-Status API requires the
-	// bot to be IN the channel, so a session that disconnected (e.g. owner left →
-	// VoiceConnectionStatus.Disconnected → immediate process.exit) can never clear
-	// its own 👁 status after the fact. We ARE connected now, so clear it on start;
-	// if push is (re)enabled this session, the poll/phrase path re-sets it fresh.
-	try { await _setScreenPushIndicators(s, false); } catch {}
-
 	// [Outbound] Gemini PCM 24k mono → upsample to 48k stereo → pipe to AudioPlayer.
 	const sessionAny = session as any;
 	let outChunks = 0;
@@ -1112,13 +1014,6 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				}
 			} catch { /* file absent = active mode */ }
 		}
-		// Screen-push toggle file (Sutando.app Push Screen button writes this).
-		// Absent file = leave current push state (don't auto-stop a voice-started push).
-		try {
-			const vp = readFileSync(VISION_PUSH_FILE, 'utf-8').trim().toLowerCase();
-			const wantPush = vp === 'on' || vp === '1' || vp === 'true';
-			if (wantPush !== s.pushScreen) void setScreenPush(s, wantPush);
-		} catch { /* file absent = no change */ }
 	}, 2_000);
 
 	// AUTO_MEETING_TIMEOUT_MS === 0 means auto-meeting is disabled.
@@ -1359,17 +1254,6 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				try { unlinkSync(full); } catch {}
 				continue;
 			}
-			// Typed screen-push sub-command, routed here by the bridge from a Discord
-			// TEXT message ("za warudo screen" / "stop screen"). Kept off the voice
-			// path on purpose — spoken commands clash with a Zoom mic (Susan
-			// 2026-06-04). Already owner-gated by the bridge (it only writes this
-			// marker for an owner author), so apply directly; don't forward to Gemini.
-			if (body === '[screen-push:on]' || body === '[screen-push:off]') {
-				console.log(`${ts()} [ChannelScan] typed screen-push: ${body}`);
-				void setScreenPush(s, body === '[screen-push:on]');
-				try { unlinkSync(full); } catch {}
-				continue;
-			}
 			console.log(`${ts()} [ChannelScan] picked up ${name} (${body.length}B)`);
 			s.events.push({ event: `channel_result:${name}`, timestamp: new Date().toISOString() });
 			// Inject through the same path the work-tool result-queue drain
@@ -1446,10 +1330,6 @@ function cleanupSession(s: DiscordVoiceSession): void {
 	if (s.closing) return;
 	s.closing = true;
 	if (active === s) active = null;
-
-	// Stop any active screen-push (clears the streaming ticker + indicators).
-	if (s.pushScreen) { try { void setScreenPush(s, false); } catch {} }
-	if (s.pushIndicatorTimer) { try { clearInterval(s.pushIndicatorTimer); } catch {} s.pushIndicatorTimer = null; }
 
 	detachVisionFromSession();
 
@@ -1687,22 +1567,6 @@ async function start(): Promise<void> {
 // before exiting; otherwise Discord keeps the bot pinned in the channel until
 // its own heartbeat timeout (~60-90s).
 async function shutdownAfterFlush(code: number): Promise<void> {
-	// Clear the 👁 voice-channel status + nickname WHILE still connected, BEFORE
-	// cleanupSession() destroys the connection. The Set-Voice-Channel-Status API
-	// requires the bot to be IN the channel, so a clear after disconnect 403s —
-	// a7a0c97 only re-clears on the NEXT session start, which never fires if the
-	// bot doesn't rejoin (so the 👁 status lingered after a graceful exit). This
-	// makes a graceful exit (dismiss/SIGTERM/owner-left → self-SIGTERM) self-clean;
-	// a7a0c97 remains the fallback for hard crashes/SIGKILL (clears on next start).
-	// 1s cap so a slow API call never wedges shutdown.
-	if (active) {
-		try {
-			await Promise.race([
-				_setScreenPushIndicators(active, false),
-				new Promise(res => setTimeout(res, 1000)),
-			]);
-		} catch {}
-	}
 	if (active) { try { cleanupSession(active); } catch {} }
 	setTimeout(() => process.exit(code), 1500);
 }
