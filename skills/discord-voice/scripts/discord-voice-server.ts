@@ -38,7 +38,7 @@ import { recordConversation, recordSession, recordToolCall } from '../../../src/
 import { resultBelongsTo, discordVoiceKey } from '../../../src/result-channel-key.js';
 import { personalPath } from '../../../src/util_paths.js';
 import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed, shouldLeaveOnOwnerExit, breakSilenceAllowed } from './access-tier.js';
-import { createGate, decideForTurn, type GateState } from './name-gate.js';
+import { createGate, decideForTurn, isAddressedBy, type GateState } from './name-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
 _dotenvConfig({ path: join(process.env.HOME ?? '', '.claude/channels/discord/.env'), override: false });
@@ -1179,12 +1179,18 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				if (_matchesAnyPhrase(item.content, SCREEN_PUSH_OFF_PHRASES)) {
 					void setScreenPush(s, false); // stopping exposure is always safe — no tier gate
 				} else if (_matchesAnyPhrase(item.content, SCREEN_PUSH_ON_PHRASES)) {
-					// Screen-push exposes the HOST's local screen — owner-tier only.
-					// A non-owner in the channel must not be able to start it.
-					if (currentTier(s) === 'owner') {
+					// Screen-push exposes the HOST's local screen. TWO gates:
+					// (1) owner-tier only; (2) #1427 (Susan 2026-06-04) — in a MULTI-bot
+					// channel the push turn must NAME this bot, else a bare "za warudo
+					// screen" makes EVERY bot push its own screen (she saw two bots both
+					// push). Single-bot (no peers) keeps the bare phrase working.
+					const myNames = [STAND_NAME, ...STAND_NAME_ALIASES].filter(Boolean);
+					const screenOk = PEER_NAMES.length === 0 || myNames.length === 0
+						|| isAddressedBy(item.content, myNames);
+					if (currentTier(s) === 'owner' && screenOk) {
 						void setScreenPush(s, true);
 					} else {
-						console.log(`${ts()} [ScreenPush] DENIED start — non-owner tier (${currentTier(s)}) requested screen push`);
+						console.log(`${ts()} [ScreenPush] DENIED start — tier=${currentTier(s)} named=${screenOk} (multi-bot needs this bot's name)`);
 					}
 				}
 				// Speak-gate (name-gate): when a peer bot is present, stay silent and
