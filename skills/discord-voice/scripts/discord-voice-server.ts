@@ -1395,19 +1395,26 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// Speak-gate (name-gate): when a peer bot is present, stay silent and
 				// only break silence for turns ADDRESSED to THIS bot by name.
 				// decideForTurn auto-allows when no peer is configured (single-bot).
-				if (s.gate && s.meetingEntered) {
-					// Only silence per-turn once meeting-mode has been ENTERED (#1427).
-					// Before that the bot is active and responds normally.
-					// Owner-only addressing (meeting-companion v1): break silence only when
-					// the turn is addressed to the bot by name AND the speaker is the owner
-					// (unless open-floor is enabled). See breakSilenceAllowed in access-tier.
+				//
+				// #1456 strict controller mode (Susan 2026-06-04: "maddy 只能回复我"):
+				// when a VOICE_CONTROLLER is designated, the bot is name-gated AT ALL
+				// TIMES (not just after meeting entry) AND only the CONTROLLER may break
+				// its silence — owner-tier alone is NOT enough (a relay account like 879
+				// is owner-tier, which is exactly why it kept babbling at the other bot /
+				// its own echo). Without a controller set → legacy behavior (active until
+				// meeting entry, then owner-may-break-silence).
+				const _strictController = !!VOICE_CONTROLLER;
+				if (s.gate && (s.meetingEntered || _strictController)) {
 					const addressed = decideForTurn(s.gate, item.content) !== 'drop';
-					// currentTier now resolves the COMMANDER's tier (the most-recent
-					// speaker), so break-silence, screen-push and tool gates all key on
-					// "who gave the command" uniformly. See currentTier.
-					const wantSilent = !breakSilenceAllowed(addressed, currentTier(s), SUTANDO_ALLOW_OPEN_FLOOR);
+					const _byController = !VOICE_CONTROLLER ||
+						(_turnHumans.length === 1 && _turnHumans[0] === VOICE_CONTROLLER);
+					// Strict: speak only if addressed by name AND the controller is the
+					// sole human speaker. Legacy: owner-may-break-silence on an addressed turn.
+					const wantSilent = _strictController
+						? !(addressed && _byController)
+						: !breakSilenceAllowed(addressed, currentTier(s), SUTANDO_ALLOW_OPEN_FLOOR);
 					if (addressed && wantSilent) {
-						console.log(`${ts()} [NameGate] addressed by non-owner (tier=${currentTier(s)}) — staying silent (owner-only addressing)`);
+						console.log(`${ts()} [NameGate] addressed but ${_strictController ? 'not by controller' : `non-owner (tier=${currentTier(s)})`} — staying silent`);
 					}
 					if (wantSilent !== s.meetingMode) {
 						s.meetingMode = wantSilent;
