@@ -486,6 +486,12 @@ interface DiscordVoiceSession {
 	// silencing applies only once meeting-mode has been entered via a cue
 	// ("take notes"/"meeting mode") or the auto-timeout. Wake phrases reset it.
 	meetingEntered: boolean;
+	// #1427: one-shot "let the next agent turn be HEARD even though meetingMode is
+	// on" — set when entering meeting mode so the spoken "Got it, I'll take notes"
+	// confirmation is audible BEFORE silence engages (Susan 2026-06-04: the ack was
+	// being suppressed by the same turn that set meetingMode=true). Cleared once the
+	// ack turn's audio has actually emitted (_ackEmitted), so only that one turn passes.
+	allowAckAudible: boolean;
 	lastUserAudioAt: number;
 	// Screen-share indicator state (#1427): the 👁 visible trace shown while the
 	// join_discord_screen tool is actively streaming. Streaming itself is owned by
@@ -988,6 +994,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		// (below) applies only once s.meetingEntered is true.
 		meetingMode: false,
 		meetingEntered: false,
+		allowAckAudible: false,
 		screenShareOn: false,
 		pushIndicatorMsgId: null,
 		pushIndicatorTimer: null,
@@ -1076,9 +1083,13 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			const pcm24Mono = Buffer.from(data, 'base64');
 			const pcm48Stereo = upsample24MonoTo48Stereo(pcm24Mono);
 			// In meeting mode, suppress audio output — keep transcription + sqlite running.
-			if (!s.meetingMode) {
+			// EXCEPTION (#1427): when allowAckAudible is set (just entered meeting mode),
+			// let this one turn through so the "entering note mode" confirmation is HEARD;
+			// mark _ackEmitted so turn.end can clear the one-shot after it actually played.
+			if (!s.meetingMode || s.allowAckAudible) {
 				pushAudio(pcm48Stereo);
 				outChunks++;
+				if (s.allowAckAudible) (s as any)._ackEmitted = true;
 				if (outChunks === 1 || outChunks % 50 === 0) {
 					console.log(`${ts()} [Audio] outbound chunks: ${outChunks} (last=${pcm48Stereo.length}B)`);
 				}
@@ -1129,6 +1140,15 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		// Watchdog: a turn completed — clear the hang counters.
 		(s as any).lastTurnActivityTs = Date.now();
 		(s as any).utterancesSinceTurn = 0;
+		// #1427: once the entering-meeting acknowledgement has actually been spoken
+		// (audio emitted this turn), engage full silence by clearing the one-shot
+		// audible override. Only fires after _ackEmitted, so the ack turn is
+		// guaranteed audible regardless of how many user turns intervene.
+		if (s.allowAckAudible && (s as any)._ackEmitted) {
+			s.allowAckAudible = false;
+			(s as any)._ackEmitted = false;
+			console.log(`${ts()} [Meeting] entry-ack delivered audibly, silence now engaged`);
+		}
 		// Tier gate: the turn is over — its speaker attribution no longer
 		// applies. The next turn re-accumulates speakers from speaking.start.
 		// #1427 attribution: snapshot THIS turn's human speaker BEFORE clearing,
@@ -1157,6 +1177,11 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				if (!s.meetingEntered && _isEnterMeetingPhrase(item.content)) {
 					s.meetingEntered = true;
 					s.meetingMode = true;
+					// #1427: let the bot's acknowledgement be HEARD before silence
+					// engages — without this, the same turn that sets meetingMode=true
+					// also suppresses the ack (Susan 2026-06-04).
+					s.allowAckAudible = true;
+					(s as any)._ackEmitted = false;
 					console.log(`${ts()} [Meeting] enter-meeting cue — switching to meeting mode: "${item.content.slice(0, 60)}"`);
 					try { writeFileSync(VOICE_MODE_FILE, 'meeting'); } catch {}
 				}
