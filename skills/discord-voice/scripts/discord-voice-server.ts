@@ -143,6 +143,15 @@ const SUTANDO_MEETING_MODE = process.env.SUTANDO_MEETING_MODE === '1' || (() => 
 })();
 const STANDBY_PHRASES = (process.env.SUTANDO_STANDBY_PHRASES ?? 'standby,stand by,hold on,wait,one sec,待命,你待命')
 	.split(',').map(s => s.trim()).filter(Boolean);
+// #1427/#1456 (Susan 2026-06-04): the SINGLE Discord user id allowed to CONTROL
+// meeting mode (enter via standby, wake/exit). When set, enter/wake cues only fire
+// when the turn's speaker is this id — so a relay account (Lucy via 879), a peer, or
+// the bot's own echo can NEVER flip Maddy's mode; only Susan can. Read from env or
+// stand-identity.json `controller`. Empty → no controller gate (legacy: anyone's cue).
+const VOICE_CONTROLLER: string = process.env.SUTANDO_VOICE_CONTROLLER || (() => {
+	try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); return String(si.controller || ''); }
+	catch { return ''; }
+})();
 
 // Loud startup warning for the exact trap that cost a full night (2026-06-04):
 // meeting-mode SUPPRESSES audio output until the bot is addressed by name, but
@@ -168,7 +177,7 @@ const AUTO_MEETING_TIMEOUT_MS = parseInt(process.env.SUTANDO_VOICE_AUTO_MEETING_
 // that one turn but the bot STAYS in meeting). Enter = "stand by"/"hold on" (unchanged).
 const _standWakeForms = [STAND_NAME, ...STAND_NAME_ALIASES]
 	.map(n => n.toLowerCase().trim()).filter(Boolean)
-	.flatMap(n => [`${n} wake up`, `wake up ${n}`, `${n} active mode`, `${n} you can talk`, `${n} resume`, `${n} come back`]);
+	.flatMap(n => [`hi ${n}`, `hey ${n}`, `okay ${n}`, `${n} wake up`, `wake up ${n}`, `${n} active mode`, `${n} you can talk`, `${n} resume`, `${n} come back`]);
 const WAKE_PHRASES = ['stop meeting mode',
 	..._standWakeForms];
 function _isWakePhrase(text: string): boolean {
@@ -1222,7 +1231,10 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// naming — they're control commands, not addressed-to-a-peer cues. Note-
 				// taking cues ("take notes"/"meeting mode") still require naming (cross-bot).
 				const _directStandby = ['standby', 'stand by', 'hold on', 'be silent', 'go silent'].some(p => item.content.toLowerCase().includes(p));
-				if (!s.meetingEntered && _isEnterMeetingPhrase(item.content) && (!s.gate || _namesThisBot(item.content) || _directStandby)) {
+				// #1456: only the designated controller (Susan) may flip meeting mode —
+				// a relay account (Lucy/879), a peer, or the bot's own echo cannot.
+				const _byController = !VOICE_CONTROLLER || _turnSpeakerId === VOICE_CONTROLLER;
+				if (_byController && !s.meetingEntered && _isEnterMeetingPhrase(item.content) && (!s.gate || _namesThisBot(item.content) || _directStandby)) {
 					s.meetingEntered = true;
 					s.meetingMode = true;
 					// #1427: let the bot's acknowledgement be HEARD before silence
@@ -1238,7 +1250,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// "Hi Maddie, can you stand by?" contains both a wake form ("hi maddie") and a
 				// standby cue ("stand by") — the intent is STANDBY, so the enter wins. Without
 				// this guard, enter then wake fire in the same turn and the bot never stays silent.
-				if (s.meetingEntered && _isWakePhrase(item.content) && !_isEnterMeetingPhrase(item.content)) {
+				if (_byController && s.meetingEntered && _isWakePhrase(item.content) && !_isEnterMeetingPhrase(item.content)) {
 					s.meetingEntered = false;
 					s.meetingMode = false;
 					console.log(`${ts()} [Meeting] wake-phrase detected — exiting meeting mode: "${item.content.slice(0, 60)}"`);
