@@ -38,7 +38,7 @@ import { recordConversation, recordSession, recordToolCall } from '../../../src/
 import { resultBelongsTo, discordVoiceKey } from '../../../src/result-channel-key.js';
 import { personalPath } from '../../../src/util_paths.js';
 import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed, shouldLeaveOnOwnerExit, breakSilenceAllowed } from './access-tier.js';
-import { createGate, decideForTurn, isAddressedBy, type GateState } from './name-gate.js';
+import { createGate, decideForTurn, type GateState } from './name-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
 _dotenvConfig({ path: join(process.env.HOME ?? '', '.claude/channels/discord/.env'), override: false });
@@ -166,8 +166,8 @@ function _isEnterMeetingPhrase(text: string): boolean {
 // server uses) targeting THIS session's already-attached Gemini. Captures the
 // LOCAL machine's screen as screenshots — NOT the Discord screen-share stream.
 const VISION_PUSH_FILE = join(WORKSPACE_DIR, 'state', 'vision-push.txt');
-const SCREEN_PUSH_ON_PHRASES = ['za warudo screen', 'zawarudo screen', 'start screen push', 'watch my screen'];
-const SCREEN_PUSH_OFF_PHRASES = ['za warudo stop screen', 'stop screen', 'stop watching my screen'];
+// Screen-push voice phrases removed (#1427) — only "za warudo" remains a magic
+// word; screen sharing is the join_discord_screen inline tool's job now.
 function _matchesAnyPhrase(text: string, phrases: string[]): boolean {
 	const lower = text.toLowerCase();
 	return phrases.some(p => lower.includes(p));
@@ -345,6 +345,10 @@ async function _setScreenPushIndicators(s: DiscordVoiceSession, on: boolean): Pr
 // (the web-server push loop) targeting THIS session's attached Gemini, so frames
 // flow to the discord session — never the web voice-agent's.
 async function setScreenPush(s: DiscordVoiceSession, on: boolean): Promise<void> {
+	// #1427 (Susan 2026-06-04): screen-push is REMOVED from discord-voice — it is
+	// now handled solely by the join_discord_screen inline tool. Never START a push
+	// here regardless of caller; the off-path stays so any prior state still clears.
+	if (on) return;
 	if (on === s.pushScreen) return;
 	let vt: typeof import('../../../src/vision-tools.js');
 	try { vt = await import('../../../src/vision-tools.js'); }
@@ -1173,26 +1177,10 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 					console.log(`${ts()} [Meeting] wake-phrase detected — exiting meeting mode: "${item.content.slice(0, 60)}"`);
 					try { writeFileSync(VOICE_MODE_FILE, 'active'); } catch {}
 				}
-				// Screen-push voice toggle: "za warudo screen" starts pushing the
-				// LOCAL computer screen to this session's Gemini; "stop screen"
-				// stops. Check OFF before ON so "stop screen" doesn't match ON.
-				if (_matchesAnyPhrase(item.content, SCREEN_PUSH_OFF_PHRASES)) {
-					void setScreenPush(s, false); // stopping exposure is always safe — no tier gate
-				} else if (_matchesAnyPhrase(item.content, SCREEN_PUSH_ON_PHRASES)) {
-					// Screen-push exposes the HOST's local screen. TWO gates:
-					// (1) owner-tier only; (2) #1427 (Susan 2026-06-04) — in a MULTI-bot
-					// channel the push turn must NAME this bot, else a bare "za warudo
-					// screen" makes EVERY bot push its own screen (she saw two bots both
-					// push). Single-bot (no peers) keeps the bare phrase working.
-					const myNames = [STAND_NAME, ...STAND_NAME_ALIASES].filter(Boolean);
-					const screenOk = PEER_NAMES.length === 0 || myNames.length === 0
-						|| isAddressedBy(item.content, myNames);
-					if (currentTier(s) === 'owner' && screenOk) {
-						void setScreenPush(s, true);
-					} else {
-						console.log(`${ts()} [ScreenPush] DENIED start — tier=${currentTier(s)} named=${screenOk} (multi-bot needs this bot's name)`);
-					}
-				}
+				// Screen-push voice phrases REMOVED (#1427, Susan 2026-06-04): the only
+				// magic word is "za warudo" (summon). Screen sharing is now driven solely
+				// by the join_discord_screen inline tool (the model calls it on "join/share
+				// screen"), so there is no "za warudo screen" phrase here anymore.
 				// Speak-gate (name-gate): when a peer bot is present, stay silent and
 				// only break silence for turns ADDRESSED to THIS bot by name.
 				// decideForTurn auto-allows when no peer is configured (single-bot).
