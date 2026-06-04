@@ -112,8 +112,19 @@ const STAND_NAME: string = (() => {
 // `SUTANDO_NAME_ALIASES` were ignored — and in meeting-mode that meant the
 // gate never matched an ASR-mangled name, leaving the bot permanently
 // audio-suppressed (generates text, no speech). 2026-06-04 debug.
-const STAND_NAME_ALIASES = [process.env.SUTANDO_STAND_ALIASES, process.env.SUTANDO_NAME_ALIASES]
-	.filter(Boolean).join(',').split(',').map(s => s.trim()).filter(Boolean);
+const STAND_NAME_ALIASES = (() => {
+	// Aliases may come from env OR the per-node stand-identity.json `aliases` array
+	// (#1427: single-file identity — name + aliases + nameOrigin in one place, so a
+	// machine like Maddy needs only that file, no env juggling for the gate to match
+	// ASR variants). Env takes precedence; both are merged.
+	let fromJson: string[] = [];
+	try {
+		const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8'));
+		if (Array.isArray(si.aliases)) fromJson = si.aliases.map((a: unknown) => String(a));
+	} catch { /* no file / no aliases */ }
+	return [process.env.SUTANDO_STAND_ALIASES, process.env.SUTANDO_NAME_ALIASES, ...fromJson]
+		.filter(Boolean).join(',').split(',').map(s => s.trim()).filter(Boolean);
+})();
 const PEER_NAMES = (process.env.SUTANDO_PEER_NAMES ?? 'Lucy,Maddy,Mini,Pro,Sutando')
 	.split(',').map(s => s.trim()).filter(Boolean)
 	.filter(n => n.toLowerCase() !== STAND_NAME.toLowerCase());
@@ -157,6 +168,17 @@ const ENTER_MEETING_PHRASES = ['take notes', 'meeting mode', 'be silent', 'go si
 function _isEnterMeetingPhrase(text: string): boolean {
 	const lower = text.toLowerCase();
 	return ENTER_MEETING_PHRASES.some(p => lower.includes(p));
+}
+// #1427 (Susan 2026-06-04): does this utterance NAME this bot (stand name or an
+// ASR alias)? Used to gate meeting-mode ENTRY so a cue addressed to a PEER
+// ("Lucy, take notes") doesn't flip THIS bot into meeting mode. Word-boundary
+// mention — looser than isAddressedBy (no punctuation/verb required, so it's
+// robust to ASR dropping commas), which is the right bar for "is this for me".
+function _namesThisBot(text: string): boolean {
+	const lc = text.toLowerCase();
+	return [STAND_NAME, ...STAND_NAME_ALIASES]
+		.map(n => n.toLowerCase().trim()).filter(Boolean)
+		.some(n => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\\\]/g, '\\$&')}\\b`).test(lc));
 }
 
 // --- Screen sharing: REMOVED from discord-voice (#1427, Susan 2026-06-04) -----
@@ -1174,7 +1196,11 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				s.transcript.push({ role: 'user', text: item.content });
 				// #1427: enter-meeting cue — bot joins ACTIVE; a cue switches it to
 				// silent meeting / note-taker mode (engages the per-turn name-gate).
-				if (!s.meetingEntered && _isEnterMeetingPhrase(item.content)) {
+				// #1427: only enter meeting mode when THIS bot is named. A cue
+				// addressed to a peer ("Lucy, take notes") must NOT flip this bot —
+				// that false-trigger left Maddy silently stuck (Susan 2026-06-04). No
+				// gate (single-bot / no stand name) → any cue still enters (back-compat).
+				if (!s.meetingEntered && _isEnterMeetingPhrase(item.content) && (!s.gate || _namesThisBot(item.content))) {
 					s.meetingEntered = true;
 					s.meetingMode = true;
 					// #1427: let the bot's acknowledgement be HEARD before silence
