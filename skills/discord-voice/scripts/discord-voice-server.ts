@@ -160,7 +160,14 @@ if (SUTANDO_MEETING_MODE && STAND_NAME && STAND_NAME_ALIASES.length === 0) {
 const VOICE_MODE_FILE = join(WORKSPACE_DIR, 'state', 'voice-mode.txt');
 const AUTO_MEETING_TIMEOUT_MS = parseInt(process.env.SUTANDO_VOICE_AUTO_MEETING_AFTER_SEC || '180', 10) * 1000;
 // Wake phrases that exit meeting mode when user speaks them (case-insensitive).
-const WAKE_PHRASES = ['active mode', 'sutando active', 'lucy active', 'wake up', 'stop meeting mode',
+// #1427 (Susan 2026-06-04): addressing the bot by name wakes it back to active —
+// the "hi maddy → active" half of her active⟷meeting toggle. Build "hi <name>",
+// "hey <name>", "<name> active" for the stand name + every ASR alias.
+const _standWakeForms = [STAND_NAME, ...STAND_NAME_ALIASES]
+	.map(n => n.toLowerCase().trim()).filter(Boolean)
+	.flatMap(n => [`hi ${n}`, `hey ${n}`, `okay ${n}`, `${n} active`]);
+const WAKE_PHRASES = ['active mode', 'sutando active', 'wake up', 'stop meeting mode',
+	..._standWakeForms,
 	...(OWNER_NAME ? [`${OWNER_NAME} active`] : [])];
 function _isWakePhrase(text: string): boolean {
 	const lower = text.toLowerCase();
@@ -1021,12 +1028,10 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		// switch to silent meeting-mode on a cue ("take notes"/"meeting mode") or
 		// the auto-timeout — not silent-upfront. The name-gate's per-turn silencing
 		// (below) applies only once s.meetingEntered is true.
-		// #1427: when SUTANDO_MEETING_MODE (env or stand-identity.meetingMode), the
-		// bot JOINS already name-gated — silent by default, only speaks when addressed
-		// by name. Fixes "Maddy interjects when not called" (it used to join active
-		// and only gate after an explicit standby cue). Off → legacy join-active.
-		meetingMode: SUTANDO_MEETING_MODE,
-		meetingEntered: SUTANDO_MEETING_MODE,
+		// The toggle Susan wants is active ⟷ meeting: "standby"/"hold on" → meeting
+		// (silent), "hi maddy" → back to active. Join ACTIVE; the cues flip state.
+		meetingMode: false,
+		meetingEntered: false,
 		allowAckAudible: false,
 		screenShareOn: false,
 		pushIndicatorMsgId: null,
@@ -1211,7 +1216,11 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// addressed to a peer ("Lucy, take notes") must NOT flip this bot —
 				// that false-trigger left Maddy silently stuck (Susan 2026-06-04). No
 				// gate (single-bot / no stand name) → any cue still enters (back-compat).
-				if (!s.meetingEntered && _isEnterMeetingPhrase(item.content) && (!s.gate || _namesThisBot(item.content))) {
+				// Direct standby/silence commands flip THIS bot to meeting regardless of
+				// naming — they're control commands, not addressed-to-a-peer cues. Note-
+				// taking cues ("take notes"/"meeting mode") still require naming (cross-bot).
+				const _directStandby = ['standby', 'stand by', 'hold on', 'be silent', 'go silent'].some(p => item.content.toLowerCase().includes(p));
+				if (!s.meetingEntered && _isEnterMeetingPhrase(item.content) && (!s.gate || _namesThisBot(item.content) || _directStandby)) {
 					s.meetingEntered = true;
 					s.meetingMode = true;
 					// #1427: let the bot's acknowledgement be HEARD before silence
