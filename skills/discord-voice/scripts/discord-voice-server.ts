@@ -160,15 +160,17 @@ if (SUTANDO_MEETING_MODE && STAND_NAME && STAND_NAME_ALIASES.length === 0) {
 const VOICE_MODE_FILE = join(WORKSPACE_DIR, 'state', 'voice-mode.txt');
 const AUTO_MEETING_TIMEOUT_MS = parseInt(process.env.SUTANDO_VOICE_AUTO_MEETING_AFTER_SEC || '180', 10) * 1000;
 // Wake phrases that exit meeting mode when user speaks them (case-insensitive).
-// #1427 (Susan 2026-06-04): addressing the bot by name wakes it back to active —
-// the "hi maddy → active" half of her active⟷meeting toggle. Build "hi <name>",
-// "hey <name>", "<name> active" for the stand name + every ASR alias.
+// #1427 (Susan 2026-06-04): wake = a DELIBERATE, NAME-QUALIFIED command, never a loose
+// substring. Earlier 'active mode' / 'wake up' matched incidental conversation — a bot
+// saying "I'm in active mode now" (heard via channel echo) woke Maddy from its OWN words.
+// Now wake fires ONLY on "<name> wake up" / "wake up <name>" / "<name> active mode" etc.
+// Bare "hi <name>" no longer exits meeting — it just addresses (the name-gate answers
+// that one turn but the bot STAYS in meeting). Enter = "stand by"/"hold on" (unchanged).
 const _standWakeForms = [STAND_NAME, ...STAND_NAME_ALIASES]
 	.map(n => n.toLowerCase().trim()).filter(Boolean)
-	.flatMap(n => [`hi ${n}`, `hey ${n}`, `okay ${n}`, `${n} active`]);
-const WAKE_PHRASES = ['active mode', 'sutando active', 'wake up', 'stop meeting mode',
-	..._standWakeForms,
-	...(OWNER_NAME ? [`${OWNER_NAME} active`] : [])];
+	.flatMap(n => [`${n} wake up`, `wake up ${n}`, `${n} active mode`, `${n} you can talk`, `${n} resume`, `${n} come back`]);
+const WAKE_PHRASES = ['stop meeting mode',
+	..._standWakeForms];
 function _isWakePhrase(text: string): boolean {
 	const lower = text.toLowerCase();
 	return WAKE_PHRASES.some(p => lower.includes(p));
