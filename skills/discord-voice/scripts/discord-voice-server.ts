@@ -216,6 +216,15 @@ function _namesThisBot(text: string): boolean {
 // streams frames into THIS session — no discord-voice-side push code needed.
 
 const VOICE_MODEL = process.env.VOICE_MODEL || 'gemini-2.5-flash';
+// #1456: per-speaker STT model for the dedicated recording path. Mirrors the
+// describe_screen / describeScreenshot REST pattern (src/browser-tools.ts) —
+// raw generateContent with inline base64 media, free-tier voice key preferred.
+const STT_MODEL = process.env.DISCORD_VOICE_STT_MODEL || 'gemini-2.5-flash';
+// Min/max accumulated PCM (16k mono s16le = 32000 B/s) for an utterance to be
+// worth transcribing. Floor ~0.4s (skip clicks/noise); cap ~30s (avoid huge
+// payloads — Discord AfterSilence chops longer utterances anyway).
+const STT_MIN_BYTES = 12_800;   // ~0.4s
+const STT_MAX_BYTES = 960_000;  // ~30s
 // Per-user voice config (native-audio model + googleSearch + owner_mode +
 // channels) is data, not code: it lives in the workspace, NOT in the git repo.
 //   live config: $SUTANDO_WORKSPACE/config/discord-voice.json
@@ -514,6 +523,12 @@ interface DiscordVoiceSession {
 	// attribution in the discord_voice recording (#1427). Populated alongside
 	// botFlagCache on speaking.start (same User.fetch).
 	speakerNameCache: Map<string, { name: string; type: 'human' | 'agent' }>;
+	// #1456: per-user clean-audio accumulation buffer (userId → PCM chunks),
+	// keyed by Discord user so each speaker's utterance is transcribed and
+	// recorded SEPARATELY — correct attribution by construction, decoupled from
+	// the mixed-into-one Gemini live turn. Filled in resampler.on('data'),
+	// flushed+transcribed in resampler.on('end').
+	sttBuffers: Map<string, Buffer[]>;
 	// Every Discord user who contributed audio to the in-progress Gemini turn.
 	// Added on speaking.start, cleared on turn.end. The tier gate reads this
 	// set (not a live last-speaker pointer) so a tool call is attributed to
@@ -930,6 +945,73 @@ function startAudioTicker(s: DiscordVoiceSession): void {
 	}
 }
 
+// #1456: wrap raw 16k-mono-s16le PCM in a 44-byte WAV header so Gemini's
+// generateContent accepts it as audio/wav inline data.
+function pcm16ToWav(pcm: Buffer, sampleRate = 16000): Buffer {
+	const header = Buffer.alloc(44);
+	const dataLen = pcm.length;
+	header.write('RIFF', 0);
+	header.writeUInt32LE(36 + dataLen, 4);
+	header.write('WAVE', 8);
+	header.write('fmt ', 12);
+	header.writeUInt32LE(16, 16);          // fmt chunk size
+	header.writeUInt16LE(1, 20);           // PCM
+	header.writeUInt16LE(1, 22);           // mono
+	header.writeUInt32LE(sampleRate, 24);
+	header.writeUInt32LE(sampleRate * 2, 28); // byte rate (mono * 2B)
+	header.writeUInt16LE(2, 32);           // block align
+	header.writeUInt16LE(16, 34);          // bits per sample
+	header.write('data', 36);
+	header.writeUInt32LE(dataLen, 40);
+	return Buffer.concat([header, pcm]);
+}
+
+// #1456: transcribe ONE user's clean accumulated PCM via Gemini STT and record
+// it as a correctly-attributed discord-user row. Fire-and-forget — never blocks
+// the audio pipeline, never throws into it. Mirrors describeScreenshot's REST
+// generateContent pattern (src/browser-tools.ts).
+async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: string, pcm: Buffer): Promise<void> {
+	const apiKey = process.env.GEMINI_VOICE_API_KEY || process.env.GEMINI_API_KEY;
+	if (!apiKey) return; // no-op gracefully when no key configured
+	try {
+		const wav = pcm16ToWav(pcm);
+		const audioData = wav.toString('base64');
+		const res = await fetch(
+			`https://generativelanguage.googleapis.com/v1beta/models/${STT_MODEL}:generateContent?key=${apiKey}`,
+			{
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					contents: [{
+						parts: [
+							{ text: 'Transcribe this audio verbatim. Return ONLY the transcript text, nothing else. If silence/no speech, return empty.' },
+							{ inlineData: { mimeType: 'audio/wav', data: audioData } },
+						],
+					}],
+				}),
+			},
+		);
+		const data = await res.json() as any;
+		if (!data?.candidates?.[0]) {
+			const reason = data?.promptFeedback?.blockReason || data?.error?.message || JSON.stringify(data).slice(0, 200);
+			console.log(`${ts()} [STT] no transcript for ${userId}: ${reason}`);
+			return;
+		}
+		const transcript = (data.candidates[0].content?.parts?.[0]?.text ?? '').trim();
+		if (!transcript) return; // skip empty/whitespace
+		const spk = s.speakerNameCache.get(userId);
+		recordConversation('discord-user', transcript, s.sessionId, {
+			speakerId: userId,
+			speakerName: spk?.name,
+			speakerType: 'human',
+			spoken: true,
+		});
+		console.log(`${ts()} [STT] recorded ${userId} (${spk?.name ?? '?'}): "${transcript.slice(0, 60)}"`);
+	} catch (err) {
+		console.error(`${ts()} [STT] transcription failed for ${userId}:`, err instanceof Error ? err.message : err);
+	}
+}
+
 function subscribeUser(s: DiscordVoiceSession, userId: string): void {
 	if (s.subscribedUsers.has(userId)) return;
 	s.subscribedUsers.add(userId);
@@ -967,6 +1049,15 @@ function subscribeUser(s: DiscordVoiceSession, userId: string): void {
 	resampler.on('data', (pcm16Mono: Buffer) => {
 		chunks++;
 		try { (s.voiceSession as any).handleAudioFromClient(pcm16Mono); } catch {}
+		// #1456: ALSO accumulate this user's clean PCM into a per-user buffer for
+		// the dedicated STT recording path (separate from the mixed live turn).
+		// Cap the buffer so a never-ending stream can't grow unbounded.
+		try {
+			let buf = s.sttBuffers.get(userId);
+			if (!buf) { buf = []; s.sttBuffers.set(userId, buf); }
+			const cur = buf.reduce((n, b) => n + b.length, 0);
+			if (cur < STT_MAX_BYTES) buf.push(pcm16Mono);
+		} catch {}
 		(s as any)._noteSpoken?.();
 		s.lastUserAudioAt = Date.now();
 		if (chunks === 1) console.log(`${ts()} [Voice] first chunk: ${pcm16Mono.length}B`);
@@ -974,6 +1065,18 @@ function subscribeUser(s: DiscordVoiceSession, userId: string): void {
 	resampler.on('end', () => {
 		s.subscribedUsers.delete(userId);
 		console.log(`${ts()} [Voice] user ${userId} stopped speaking (${chunks} chunks) — silence burst`);
+		// #1456: utterance just ended (AfterSilence 200ms). Flush this user's
+		// accumulated clean PCM and transcribe it on the dedicated STT path —
+		// fire-and-forget so the audio pipeline is never blocked. Clear the
+		// buffer regardless so the next utterance starts fresh.
+		const _buf = s.sttBuffers.get(userId);
+		s.sttBuffers.delete(userId);
+		if (_buf && _buf.length) {
+			const pcm = Buffer.concat(_buf);
+			if (pcm.length >= STT_MIN_BYTES) {
+				void transcribeAndRecordUtterance(s, userId, pcm);
+			}
+		}
 		// Watchdog bookkeeping: an utterance just finished. A healthy Gemini
 		// fires turn.end within seconds; these counters let the watchdog tell
 		// a hang apart from a normal pause.
@@ -1046,6 +1149,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		client,
 		botFlagCache: new Map(),
 		speakerNameCache: new Map(),
+		sttBuffers: new Map(),
 		turnSpeakers: new Set(),
 		lastSpeaker: null,
 		audioPending: [],
@@ -1312,16 +1416,15 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// conversation.log is the primary; write it before the sqlite
 				// mirror so a row never exists in sqlite without a log line.
 				appendConversationLog('discord-user', item.content);
-				// Attribute the turn to its speaker. turnSpeakers is cleared at
-				// the top of this handler, so use lastSpeaker (the non-cleared
-				// fallback). A human turn always reached the mic, so spoken=true.
-				const _spk = _turnSpeakerId ? s.speakerNameCache.get(_turnSpeakerId) : undefined;
-				recordConversation('discord-user', item.content, s.sessionId, {
-					speakerId: _turnSpeakerId ?? undefined,
-					speakerName: _spk?.name,
-					speakerType: _spk?.type ?? 'human',
-					spoken: true,
-				});
+				// #1456: the human discord-user sqlite row is NO LONGER written here.
+				// The mixed-into-one-turn transcript (item.content) attributed by the
+				// heuristic _turnSpeakerId mis-attributes (or drops) the second speaker
+				// when two people talk in one turn. The dedicated per-user STT path
+				// (transcribeAndRecordUtterance, fired on resampler.on('end')) is now
+				// the source of truth for human-speech rows — one row per user-
+				// utterance, correctly attributed by construction. _turnSpeakerId is
+				// still computed above and consumed by the controller-gate
+				// (_byController) and meeting-mode logic — do NOT remove it.
 			} else if (item.role === 'assistant') {
 				s.transcript.push({ role: 'sutando', text: item.content });
 				// utterance event push removed per #1052 — see comment above.
