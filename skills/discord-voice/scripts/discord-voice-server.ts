@@ -317,6 +317,72 @@ function detachVisionFromSession(): void {
 	try { _setVisionSession?.(_priorVisionSession ?? null); } catch {}
 }
 
+// --- Screen-share indicator (#1427, Susan 2026-06-04) -----------------------
+// The 👁 visible trace is KEPT (silent screen capture violates "no silent
+// action"), but it is now driven by the join_discord_screen TOOL invocation
+// (onToolResult hook below) — NOT by the old setScreenPush / magic-phrase path.
+// Streaming itself lives entirely in the join_discord_screen inline tool
+// (src/vision-tools.ts, unchanged); this only renders the Discord-side trace
+// (VC-status + nickname 👁 + a frame-count message) and clears it reliably on
+// stop_vision / session exit so it never lingers (the old lingering bug).
+
+// VC-status + nickname 👁 toggle. Idempotent; safe to call for stale-cleanup.
+async function _setScreenIndicators(s: DiscordVoiceSession, on: boolean): Promise<void> {
+	try {
+		await fetch(`https://discord.com/api/v10/channels/${s.channelId}/voice-status`, {
+			method: 'PUT',
+			headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+			body: JSON.stringify({ status: on ? '👁 seeing my local screen' : '' }),
+		});
+	} catch (e) { console.error(`${ts()} [ScreenShare] VC-status update failed:`, e); }
+	try {
+		const g = await s.client.guilds.fetch(s.guildId);
+		const me = await g.members.fetchMe();
+		const base = (me.nickname || me.user.username).replace(/^👁\s*/, '');
+		await me.setNickname(on ? `👁 ${base}` : base);
+	} catch (e) { console.error(`${ts()} [ScreenShare] nickname update failed:`, e); }
+}
+
+// Show / hide the full screen-share indicator: VC-status + nickname + a posted
+// message that live-updates the frame count (proof frames are actually flowing).
+// Driven by the join_discord_screen tool-call, cleared on stop_vision / exit.
+async function setScreenShareIndicator(s: DiscordVoiceSession, on: boolean): Promise<void> {
+	if (on === s.screenShareOn) return;
+	s.screenShareOn = on;
+	await _setScreenIndicators(s, on);
+	const editIndicator = async (text: string): Promise<void> => {
+		if (!s.pushIndicatorMsgId) return;
+		try {
+			const ch = await s.client.channels.fetch(s.channelId);
+			if (ch && 'messages' in ch) {
+				const m = await (ch as { messages: { fetch: (id: string) => Promise<{ edit: (t: string) => Promise<unknown> }> } }).messages.fetch(s.pushIndicatorMsgId);
+				await m.edit(text);
+			}
+		} catch { /* best-effort */ }
+	};
+	if (on) {
+		let vt: typeof import('../../../src/vision-tools.js') | null = null;
+		try { vt = await import('../../../src/vision-tools.js'); } catch {}
+		try {
+			const ch = await s.client.channels.fetch(s.channelId);
+			if (ch && 'send' in ch) {
+				const m = await (ch as { send: (t: string) => Promise<{ id: string }> }).send(
+					'👁 **I can see your local computer screen** (not the Discord stream) · starting…');
+				s.pushIndicatorMsgId = m.id;
+			}
+		} catch (e) { console.error(`${ts()} [ScreenShare] indicator message failed:`, e); }
+		s.pushIndicatorTimer = setInterval(() => {
+			if (s.closing || !s.screenShareOn) return;
+			const frames = vt?.getVisionState?.().frames ?? 0;
+			void editIndicator(`👁 **I can see your local computer screen** (not the Discord stream) · ${frames} frames`);
+		}, 6_000);
+	} else {
+		if (s.pushIndicatorTimer) { clearInterval(s.pushIndicatorTimer); s.pushIndicatorTimer = null; }
+		await editIndicator('⏹ Stopped seeing your local screen');
+		s.pushIndicatorMsgId = null;
+	}
+}
+
 // --- Conversation log -------------------------------------------------------
 // discord-voice mirrors turns into conversation.sqlite (queryable) AND the
 // shared logs/conversation.log text log — the same dual-write the phone path
@@ -421,6 +487,12 @@ interface DiscordVoiceSession {
 	// ("take notes"/"meeting mode") or the auto-timeout. Wake phrases reset it.
 	meetingEntered: boolean;
 	lastUserAudioAt: number;
+	// Screen-share indicator state (#1427): the 👁 visible trace shown while the
+	// join_discord_screen tool is actively streaming. Streaming itself is owned by
+	// the inline tool (vision-tools); these only track the Discord-side indicator.
+	screenShareOn: boolean;
+	pushIndicatorMsgId: string | null;
+	pushIndicatorTimer: ReturnType<typeof setInterval> | null;
 	// Speak-gate (name-gate). Null when disabled (no stand name / no peers).
 	gate: GateState | null;
 }
@@ -916,6 +988,9 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		// (below) applies only once s.meetingEntered is true.
 		meetingMode: false,
 		meetingEntered: false,
+		screenShareOn: false,
+		pushIndicatorMsgId: null,
+		pushIndicatorTimer: null,
 		// Build the name-gate iff we have a stand name + (at least one peer name OR
 		// meeting-buddy mode, which keeps the gate active with no peers present).
 		gate: (STAND_NAME && (PEER_NAMES.length > 0 || SUTANDO_MEETING_MODE))
@@ -957,6 +1032,20 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// tool_result event push removed per #1052 — recordToolCall
 				// below is the canonical write.
 				recordToolCall('discord-voice', toolName, e.durationMs, s.sessionId);
+				// #1427: drive the 👁 screen-share indicator off the tool result.
+				// join_discord_screen started the stream → show indicator IFF the
+				// stream is actually live (isStreaming, read from vision-tools — not
+				// modified); stop_vision → clear it. Streaming stays the tool's job.
+				if (toolName === 'join_discord_screen') {
+					void (async () => {
+						try {
+							const vt = await import('../../../src/vision-tools.js');
+							if (vt.isStreaming()) await setScreenShareIndicator(s, true);
+						} catch (err) { console.error(`${ts()} [ScreenShare] indicator-on failed:`, err); }
+					})();
+				} else if (toolName === 'stop_vision') {
+					void setScreenShareIndicator(s, false);
+				}
 			},
 			onError: (e) => console.error(`${ts()} [Error] ${e.component}: ${e.error.message} (${e.severity})`),
 			onTurnLatency: (e) => {
@@ -971,6 +1060,12 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 
 	await session.start();
 	console.log(`${ts()} [Bodhi] VoiceSession started on port ${bodhiPort} for ${sessionId}`);
+
+	// Clear any STALE 👁 screen-share indicator left by a previous session that
+	// crashed without cleaning up (the Set-Voice-Channel-Status API needs the bot
+	// IN the channel, so a disconnected session can't clear its own status). We
+	// ARE connected now — clear it; a fresh share this session re-sets it.
+	try { await _setScreenIndicators(s, false); } catch {}
 
 	// [Outbound] Gemini PCM 24k mono → upsample to 48k stereo → pipe to AudioPlayer.
 	const sessionAny = session as any;
@@ -1331,6 +1426,10 @@ function cleanupSession(s: DiscordVoiceSession): void {
 	s.closing = true;
 	if (active === s) active = null;
 
+	// Stop the screen-share indicator's frame-count ticker (the indicator itself
+	// is cleared while still connected in shutdownAfterFlush; this just kills the timer).
+	if (s.pushIndicatorTimer) { try { clearInterval(s.pushIndicatorTimer); } catch {} s.pushIndicatorTimer = null; }
+
 	detachVisionFromSession();
 
 	try { clearInterval((s as any)._tickHandle); } catch {}
@@ -1567,6 +1666,18 @@ async function start(): Promise<void> {
 // before exiting; otherwise Discord keeps the bot pinned in the channel until
 // its own heartbeat timeout (~60-90s).
 async function shutdownAfterFlush(code: number): Promise<void> {
+	// Clear the 👁 screen-share indicator WHILE still connected, BEFORE
+	// cleanupSession() destroys the connection (the Set-Voice-Channel-Status API
+	// 403s once disconnected). Makes a graceful exit self-clean so 👁 never
+	// lingers; the session-start clear is the fallback for hard crashes. 1s cap.
+	if (active && active.screenShareOn) {
+		try {
+			await Promise.race([
+				setScreenShareIndicator(active, false),
+				new Promise(res => setTimeout(res, 1000)),
+			]);
+		} catch {}
+	}
 	if (active) { try { cleanupSession(active); } catch {} }
 	setTimeout(() => process.exit(code), 1500);
 }
