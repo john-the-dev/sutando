@@ -1175,13 +1175,14 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		// (below) applies only once s.meetingEntered is true.
 		// The toggle Susan wants is active ⟷ meeting: "standby"/"hold on" → meeting
 		// (silent), "hi maddy" → back to active. Join ACTIVE; the cues flip state.
-		// #1456: when a controller is designated (strict mode), JOIN SILENT — the
-		// bot stays muted until the controller addresses it by name, instead of
-		// chattering during the active window before the first un-addressed turn
-		// flips the gate (Susan 2026-06-04: "maddy 还在" right after rejoin). The
-		// join-ack is still allowed audible via allowAckAudible below.
-		meetingMode: !!VOICE_CONTROLLER,
-		meetingEntered: !!VOICE_CONTROLLER,
+		// Maddy ALWAYS joins ACTIVE (Susan's standing rule, reaffirmed 2026-06-04:
+		// "maddy 进来是 active mode 你不要回退"). standby/"hold on" → meeting (silent),
+		// "hi maddy" → active. Do NOT join silent — that made it ignore her when
+		// addressed (one-turn-lag). The strict controller gate below still keeps it
+		// from answering anyone but the controller; the tool-gate keeps it inert
+		// while silent.
+		meetingMode: false,
+		meetingEntered: false,
 		allowAckAudible: false,
 		screenShareOn: false,
 		pushIndicatorMsgId: null,
