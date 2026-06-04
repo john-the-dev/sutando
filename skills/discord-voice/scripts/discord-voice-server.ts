@@ -135,7 +135,7 @@ const PEER_NAMES = (process.env.SUTANDO_PEER_NAMES ?? 'Lucy,Maddy,Mini,Pro,Sutan
 // phrases below as an explicit "go quiet but stay in the channel" command.
 // Default off → legacy behavior is byte-for-byte unchanged.
 const SUTANDO_MEETING_MODE = process.env.SUTANDO_MEETING_MODE === '1';
-const STANDBY_PHRASES = (process.env.SUTANDO_STANDBY_PHRASES ?? 'standby,stand by,待命,你待命')
+const STANDBY_PHRASES = (process.env.SUTANDO_STANDBY_PHRASES ?? 'standby,stand by,hold on,wait,one sec,待命,你待命')
 	.split(',').map(s => s.trim()).filter(Boolean);
 
 // Loud startup warning for the exact trap that cost a full night (2026-06-04):
