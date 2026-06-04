@@ -863,6 +863,15 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 		tools[i] = {
 			...t,
 			execute: async (args: any) => {
+				// #1456: in strict controller mode, when the bot is gated silent
+				// (meetingMode — not addressed by the controller) it must be INERT:
+				// block action tools too, not just audio. Gemini ignores the meeting-
+				// mode "do NOT call tools" prompt (it fired `work` while silent —
+				// Susan 2026-06-04 "maddy 还在"). Deterministic block here enforces it.
+				if (VOICE_CONTROLLER && s.meetingMode) {
+					console.log(`${ts()} [NameGate] tool '${t.name}' blocked — bot gated silent (not addressed by controller)`);
+					return { status: 'silent', message: 'Gated: the bot is silent until the controller addresses it.' };
+				}
 				const tier = currentTier(s);
 				const ok = toolAllowed(need, tier);
 				if (!ok) {
@@ -1166,8 +1175,13 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		// (below) applies only once s.meetingEntered is true.
 		// The toggle Susan wants is active ⟷ meeting: "standby"/"hold on" → meeting
 		// (silent), "hi maddy" → back to active. Join ACTIVE; the cues flip state.
-		meetingMode: false,
-		meetingEntered: false,
+		// #1456: when a controller is designated (strict mode), JOIN SILENT — the
+		// bot stays muted until the controller addresses it by name, instead of
+		// chattering during the active window before the first un-addressed turn
+		// flips the gate (Susan 2026-06-04: "maddy 还在" right after rejoin). The
+		// join-ack is still allowed audible via allowAckAudible below.
+		meetingMode: !!VOICE_CONTROLLER,
+		meetingEntered: !!VOICE_CONTROLLER,
 		allowAckAudible: false,
 		screenShareOn: false,
 		pushIndicatorMsgId: null,
