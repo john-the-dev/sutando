@@ -149,6 +149,15 @@ function _isWakePhrase(text: string): boolean {
 	const lower = text.toLowerCase();
 	return WAKE_PHRASES.some(p => lower.includes(p));
 }
+// Enter-meeting cues (#1427): the bot joins active and switches to silent
+// meeting/note-taker mode only when the user cues it with one of these.
+const ENTER_MEETING_PHRASES = ['take notes', 'meeting mode', 'be silent', 'go silent',
+	'passive mode', 'take meeting notes', 'start the meeting', 'start meeting', 'take meeting note',
+	'记笔记', '会议模式', '安静', '记录模式'];
+function _isEnterMeetingPhrase(text: string): boolean {
+	const lower = text.toLowerCase();
+	return ENTER_MEETING_PHRASES.some(p => lower.includes(p));
+}
 
 // --- Screen push: local computer screen → THIS discord session's Gemini ------
 // "za warudo screen" starts; "za warudo stop screen" / "stop screen" stops.
@@ -481,6 +490,11 @@ interface DiscordVoiceSession {
 	toolCalls: { name: string; durationMs: number; timestamp: string }[];
 	events: { event: string; timestamp: string }[];
 	meetingMode: boolean;
+	// #1427: sticky "has entered meeting mode" flag. The bot JOINS active
+	// (meetingEntered=false → responds normally); the per-turn name-gate
+	// silencing applies only once meeting-mode has been entered via a cue
+	// ("take notes"/"meeting mode") or the auto-timeout. Wake phrases reset it.
+	meetingEntered: boolean;
 	lastUserAudioAt: number;
 	// Screen-push: when on, a timer pushes THIS machine's local computer screen
 	// (screencapture via vision-tools captureSendFrame) into this discord-voice
@@ -979,10 +993,12 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		audioPending: [],
 		toolCalls: [],
 		events: [{ event: 'session_started', timestamp: new Date().toISOString() }],
-		// Default to silent (meeting mode) when the name-gate is active (a peer bot
-		// may be present, OR explicit meeting-buddy mode); the gate breaks silence
-		// only when this bot is addressed.
-		meetingMode: !!(STAND_NAME && (PEER_NAMES.length > 0 || SUTANDO_MEETING_MODE)),
+		// #1427 (Susan 2026-06-04): JOIN in ACTIVE mode (respond normally). Only
+		// switch to silent meeting-mode on a cue ("take notes"/"meeting mode") or
+		// the auto-timeout — not silent-upfront. The name-gate's per-turn silencing
+		// (below) applies only once s.meetingEntered is true.
+		meetingMode: false,
+		meetingEntered: false,
 		pushScreen: false,
 		pushIndicatorMsgId: null,
 		pushIndicatorTimer: null,
@@ -1142,8 +1158,17 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			if (item.content === lastText) continue;
 			if (item.role === 'user') {
 				s.transcript.push({ role: 'user', text: item.content });
-				// Wake-phrase detection: exit meeting mode when user speaks a wake phrase.
-				if (s.meetingMode && _isWakePhrase(item.content)) {
+				// #1427: enter-meeting cue — bot joins ACTIVE; a cue switches it to
+				// silent meeting / note-taker mode (engages the per-turn name-gate).
+				if (!s.meetingEntered && _isEnterMeetingPhrase(item.content)) {
+					s.meetingEntered = true;
+					s.meetingMode = true;
+					console.log(`${ts()} [Meeting] enter-meeting cue — switching to meeting mode: "${item.content.slice(0, 60)}"`);
+					try { writeFileSync(VOICE_MODE_FILE, 'meeting'); } catch {}
+				}
+				// Wake-phrase detection: exit meeting mode back to active.
+				if (s.meetingEntered && _isWakePhrase(item.content)) {
+					s.meetingEntered = false;
 					s.meetingMode = false;
 					console.log(`${ts()} [Meeting] wake-phrase detected — exiting meeting mode: "${item.content.slice(0, 60)}"`);
 					try { writeFileSync(VOICE_MODE_FILE, 'active'); } catch {}
@@ -1165,7 +1190,9 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// Speak-gate (name-gate): when a peer bot is present, stay silent and
 				// only break silence for turns ADDRESSED to THIS bot by name.
 				// decideForTurn auto-allows when no peer is configured (single-bot).
-				if (s.gate) {
+				if (s.gate && s.meetingEntered) {
+					// Only silence per-turn once meeting-mode has been ENTERED (#1427).
+					// Before that the bot is active and responds normally.
 					// Owner-only addressing (meeting-companion v1): break silence only when
 					// the turn is addressed to the bot by name AND the speaker is the owner
 					// (unless open-floor is enabled). See breakSilenceAllowed in access-tier.
