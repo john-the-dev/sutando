@@ -495,13 +495,17 @@ interface DiscordVoiceSession {
 // closed to the least-privileged among them (see effectiveTier). TREAT_AS_OWNER
 // (legacy DISCORD_VOICE_OWNER) overrides to owner.
 function currentTier(s: DiscordVoiceSession): Tier {
-	// Judge by the speaker's owner ID. turnSpeakers is cleared at turn.end, but
-	// tool calls run after that, so fall back to the last speaker's id (their
-	// actual owner-ID is what should decide tier — NOT a blanket owner_mode).
-	const speakers = s.turnSpeakers.size > 0
-		? s.turnSpeakers
-		: (s.lastSpeaker ? new Set([s.lastSpeaker]) : s.turnSpeakers);
-	return effectiveTier(speakers, ACCESS, TREAT_AS_OWNER);
+	// Tier of WHO issued the command — the most-recent speaker (lastSpeaker), NOT
+	// the most-restrictive of everyone present. (Susan 2026-06-04: "关键要看是谁下
+	// 的命令".) The owner's command must work even with a non-owner in the channel;
+	// a non-owner's command is gated to their own tier. Using mostRestrictiveTier
+	// over ALL turn speakers let any guest mute/deny the owner's own commands.
+	// turnSpeakers (all participants) is only the fallback when no single last
+	// speaker is known.
+	const commander = s.lastSpeaker
+		? new Set([s.lastSpeaker])
+		: s.turnSpeakers;
+	return effectiveTier(commander, ACCESS, TREAT_AS_OWNER);
 }
 
 let active: DiscordVoiceSession | null = null;
@@ -1140,6 +1144,9 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 					// the turn is addressed to the bot by name AND the speaker is the owner
 					// (unless open-floor is enabled). See breakSilenceAllowed in access-tier.
 					const addressed = decideForTurn(s.gate, item.content) !== 'drop';
+					// currentTier now resolves the COMMANDER's tier (the most-recent
+					// speaker), so break-silence, screen-push and tool gates all key on
+					// "who gave the command" uniformly. See currentTier.
 					const wantSilent = !breakSilenceAllowed(addressed, currentTier(s), SUTANDO_ALLOW_OPEN_FLOOR);
 					if (addressed && wantSilent) {
 						console.log(`${ts()} [NameGate] addressed by non-owner (tier=${currentTier(s)}) — staying silent (owner-only addressing)`);
