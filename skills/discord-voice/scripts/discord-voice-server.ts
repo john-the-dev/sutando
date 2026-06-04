@@ -634,6 +634,14 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 			// the file is absent (kept the generic "You are Sutando" framing).
 			(() => { try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); return si.name ? `Your Stand name is ${si.name}. Origin: ${si.nameOrigin || 'earned through use'}. When asked your name or who you are, say "I'm Sutando — ${si.name}."` : ''; } catch { return ''; } })(),
 			'You have full capabilities — use the work tool for anything: check the screen, send emails, look things up, make calls, browse the web, or check results of previous tasks.',
+			// Meeting/silent-mode tool restriction (#1427, Susan 2026-06-04): when the
+			// name-gate / meeting-mode is in play, the bot is a silent note-taker for
+			// turns where it is NOT addressed. It must NOT silently take actions then —
+			// silent listening is fine, silent tool-execution is not. Prompt-level for
+			// now; a hard execution-point gate is the follow-up.
+			(STAND_NAME && (PEER_NAMES.length > 0 || SUTANDO_MEETING_MODE))
+				? '## Silent / meeting mode — DO NOT act silently\nWhen you are NOT being explicitly addressed by name (i.e. in silent note-taking / meeting mode, producing no audio), do NOT call the work tool or ANY other tool. Just listen and track the discussion silently. ONLY call tools or take actions when you are explicitly addressed by name. NEVER take an action silently — the owner must always be able to hear when you do something.'
+				: '',
 			'',
 			'## How to think',
 			'Before acting, gather what you need. Before delegating, give them what they need.',
