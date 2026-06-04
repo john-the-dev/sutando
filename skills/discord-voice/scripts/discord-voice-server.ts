@@ -773,6 +773,22 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 			parameters: z.object({}),
 			execution: 'inline',
 			async execute() {
+				// #1456: only the designated controller (Susan) may dismiss the bot.
+				// dismiss SIGTERMs the session out of the channel; the tier gate alone
+				// is insufficient because a relay account (Lucy via 879) is owner-tier
+				// in the allowlist, so it (or a misfired tool-call) was making Maddy
+				// dismiss ITSELF mid-session (Susan 2026-06-04: "Maddy dismissed —
+				// that's a bug"). Mirror the meeting-mode controller-gate: require the
+				// controller to be the sole human speaker of the current turn.
+				if (VOICE_CONTROLLER) {
+					const _humans = [...s.turnSpeakers].filter(
+						id => s.speakerNameCache.get(id)?.type !== 'agent');
+					const _byController = _humans.length === 1 && _humans[0] === VOICE_CONTROLLER;
+					if (!_byController) {
+						console.log(`${ts()} [Dismiss] refused — not the controller (last=${s.lastSpeaker}, humans=${JSON.stringify(_humans)})`);
+						return { status: 'refused', message: 'Only the controller can dismiss this bot.' };
+					}
+				}
 				console.log(`${ts()} [Dismiss] Discord voice context — SIGTERM`);
 				setTimeout(() => { try { process.kill(process.pid, 'SIGTERM'); } catch {} }, 400);
 				return { status: 'left_discord_voice' };
