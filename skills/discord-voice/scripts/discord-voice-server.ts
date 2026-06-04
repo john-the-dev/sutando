@@ -1233,7 +1233,14 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				const _directStandby = ['standby', 'stand by', 'hold on', 'be silent', 'go silent'].some(p => item.content.toLowerCase().includes(p));
 				// #1456: only the designated controller (Susan) may flip meeting mode —
 				// a relay account (Lucy/879), a peer, or the bot's own echo cannot.
-				const _byController = !VOICE_CONTROLLER || _turnSpeakerId === VOICE_CONTROLLER;
+				// Robustness (Susan 2026-06-04): require the controller to be the SOLE
+				// human speaker this turn — NOT _turnSpeakerId, whose lastSpeaker
+				// fallback mis-attributes a relay/peer's audio (Lucy via 879) to the
+				// controller and false-triggered meeting mode when Lucy said "silence".
+				// If anyone else (or no human, or several humans) is in this turn, the
+				// cue is not trusted as a controller command. Susan's rule: only she.
+				const _byController = !VOICE_CONTROLLER ||
+					(_turnHumans.length === 1 && _turnHumans[0] === VOICE_CONTROLLER);
 				if (_byController && !s.meetingEntered && _isEnterMeetingPhrase(item.content) && (!s.gate || _namesThisBot(item.content) || _directStandby)) {
 					s.meetingEntered = true;
 					s.meetingMode = true;
