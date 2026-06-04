@@ -105,7 +105,15 @@ const STAND_NAME: string = (() => {
 	try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); return (si.name as string) || ''; }
 	catch { return ''; }
 })();
-const STAND_NAME_ALIASES = (process.env.SUTANDO_STAND_ALIASES ?? '').split(',').map(s => s.trim()).filter(Boolean);
+// Spoken-form aliases for the stand name (ASR variants like "Maddie" for
+// "Maddy"). Read BOTH env names: `SUTANDO_STAND_ALIASES` (what the code has
+// always read) and `SUTANDO_NAME_ALIASES` (the name the per-machine .env
+// convention actually used). They diverged silently, so aliases set under
+// `SUTANDO_NAME_ALIASES` were ignored — and in meeting-mode that meant the
+// gate never matched an ASR-mangled name, leaving the bot permanently
+// audio-suppressed (generates text, no speech). 2026-06-04 debug.
+const STAND_NAME_ALIASES = [process.env.SUTANDO_STAND_ALIASES, process.env.SUTANDO_NAME_ALIASES]
+	.filter(Boolean).join(',').split(',').map(s => s.trim()).filter(Boolean);
 const PEER_NAMES = (process.env.SUTANDO_PEER_NAMES ?? 'Lucy,Maddy,Mini,Pro,Sutando')
 	.split(',').map(s => s.trim()).filter(Boolean)
 	.filter(n => n.toLowerCase() !== STAND_NAME.toLowerCase());
@@ -118,6 +126,15 @@ const PEER_NAMES = (process.env.SUTANDO_PEER_NAMES ?? 'Lucy,Maddy,Mini,Pro,Sutan
 const SUTANDO_MEETING_MODE = process.env.SUTANDO_MEETING_MODE === '1';
 const STANDBY_PHRASES = (process.env.SUTANDO_STANDBY_PHRASES ?? 'standby,stand by,待命,你待命')
 	.split(',').map(s => s.trim()).filter(Boolean);
+
+// Loud startup warning for the exact trap that cost a full night (2026-06-04):
+// meeting-mode SUPPRESSES audio output until the bot is addressed by name, but
+// ASR routinely mangles the name ("Maddy" → "Maddie"). With no aliases, the
+// gate never matches, so the bot generates text but stays permanently silent —
+// indistinguishable from a model bug. Make the misconfig visible at boot.
+if (SUTANDO_MEETING_MODE && STAND_NAME && STAND_NAME_ALIASES.length === 0) {
+	console.warn(`[NameGate] ⚠ meeting-mode ON but NO aliases for "${STAND_NAME}" — the gate will only break silence on the EXACT word "${STAND_NAME}". ASR variants (e.g. "${STAND_NAME}ie") will NOT wake it and audio stays suppressed. Set SUTANDO_STAND_ALIASES.`);
+}
 
 // Meeting mode — suppresses bot audio output while keeping transcription + sqlite running.
 // Mirrors src/voice-agent.ts `meetingActive` behaviour for the discord-voice surface.
