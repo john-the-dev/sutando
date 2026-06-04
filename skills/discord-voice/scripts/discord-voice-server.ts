@@ -1644,12 +1644,28 @@ async function start(): Promise<void> {
 // Give connection.destroy() ~1.5s to flush the voice-gateway disconnect frame
 // before exiting; otherwise Discord keeps the bot pinned in the channel until
 // its own heartbeat timeout (~60-90s).
-function shutdownAfterFlush(code: number): void {
+async function shutdownAfterFlush(code: number): Promise<void> {
+	// Clear the 👁 voice-channel status + nickname WHILE still connected, BEFORE
+	// cleanupSession() destroys the connection. The Set-Voice-Channel-Status API
+	// requires the bot to be IN the channel, so a clear after disconnect 403s —
+	// a7a0c97 only re-clears on the NEXT session start, which never fires if the
+	// bot doesn't rejoin (so the 👁 status lingered after a graceful exit). This
+	// makes a graceful exit (dismiss/SIGTERM/owner-left → self-SIGTERM) self-clean;
+	// a7a0c97 remains the fallback for hard crashes/SIGKILL (clears on next start).
+	// 1s cap so a slow API call never wedges shutdown.
+	if (active) {
+		try {
+			await Promise.race([
+				_setScreenPushIndicators(active, false),
+				new Promise(res => setTimeout(res, 1000)),
+			]);
+		} catch {}
+	}
 	if (active) { try { cleanupSession(active); } catch {} }
 	setTimeout(() => process.exit(code), 1500);
 }
-process.on('SIGINT', () => shutdownAfterFlush(0));
-process.on('SIGTERM', () => shutdownAfterFlush(0));
+process.on('SIGINT', () => { void shutdownAfterFlush(0); });
+process.on('SIGTERM', () => { void shutdownAfterFlush(0); });
 process.on('uncaughtException', (err) => { console.error(`${ts()} [FATAL]`, err); if (active) cleanupSession(active); process.exit(1); });
 process.on('unhandledRejection', (err) => { console.error(`${ts()} [FATAL]`, err); if (active) cleanupSession(active); process.exit(1); });
 
