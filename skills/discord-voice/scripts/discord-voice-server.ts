@@ -1231,8 +1231,12 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 					console.log(`${ts()} [Meeting] enter-meeting cue — switching to meeting mode: "${item.content.slice(0, 60)}"`);
 					try { writeFileSync(VOICE_MODE_FILE, 'meeting'); } catch {}
 				}
-				// Wake-phrase detection: exit meeting mode back to active.
-				if (s.meetingEntered && _isWakePhrase(item.content)) {
+				// Wake-phrase detection: exit meeting mode back to active. BUT skip if the
+				// SAME utterance also carries an enter/standby cue (#1427, Susan 2026-06-04):
+				// "Hi Maddie, can you stand by?" contains both a wake form ("hi maddie") and a
+				// standby cue ("stand by") — the intent is STANDBY, so the enter wins. Without
+				// this guard, enter then wake fire in the same turn and the bot never stays silent.
+				if (s.meetingEntered && _isWakePhrase(item.content) && !_isEnterMeetingPhrase(item.content)) {
 					s.meetingEntered = false;
 					s.meetingMode = false;
 					console.log(`${ts()} [Meeting] wake-phrase detected — exiting meeting mode: "${item.content.slice(0, 60)}"`);
