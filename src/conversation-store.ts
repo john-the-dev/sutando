@@ -140,12 +140,19 @@ function init(): void {
 			CREATE INDEX IF NOT EXISTS idx_phone_session ON phone(session_id, ts_unix);
 
 			CREATE TABLE IF NOT EXISTS discord_voice (
-				id          INTEGER PRIMARY KEY,
-				ts_unix     REAL    NOT NULL,
-				kind        TEXT    NOT NULL,
-				text        TEXT,
-				duration_ms INTEGER,
-				session_id  TEXT
+				id           INTEGER PRIMARY KEY,
+				ts_unix      REAL    NOT NULL,
+				kind         TEXT    NOT NULL,
+				text         TEXT,
+				duration_ms  INTEGER,
+				session_id   TEXT,
+				-- Speaker attribution (meeting-buddy multi-speaker recording, #1427).
+				-- A single Gemini session transcribes mixed audio, so the speaker is
+				-- the per-user VAD owner of the turn (lastSpeaker), not true diarization.
+				speaker_id   TEXT,     -- discord user id of the turn's speaker
+				speaker_name TEXT,     -- display name (nickname || username)
+				speaker_type TEXT,     -- 'human' | 'agent'
+				spoken       INTEGER   -- 1 = audio actually played; 0 = name-gate suppressed (generated but muted)
 			);
 			CREATE INDEX IF NOT EXISTS idx_discord_voice_ts ON discord_voice(ts_unix);
 			CREATE INDEX IF NOT EXISTS idx_discord_voice_kind_ts ON discord_voice(kind, ts_unix);
@@ -260,6 +267,21 @@ function init(): void {
 				SELECT ts_unix, kind AS role, text, session_id FROM discord_voice;
 		`);
 
+		// Migration: add speaker-attribution columns to a pre-existing
+		// discord_voice table (the CREATE above is IF NOT EXISTS, so it won't
+		// add columns to a table from before #1427). Idempotent — only ADDs
+		// what's missing. Older rows keep NULL speaker fields.
+		try {
+			const dvCols = new Set(
+				(db.prepare('PRAGMA table_info(discord_voice)').all() as Array<{ name: string }>).map(c => c.name),
+			);
+			for (const [col, type] of [['speaker_id', 'TEXT'], ['speaker_name', 'TEXT'], ['speaker_type', 'TEXT'], ['spoken', 'INTEGER']] as const) {
+				if (!dvCols.has(col)) db.exec(`ALTER TABLE discord_voice ADD COLUMN ${col} ${type}`);
+			}
+		} catch (e) {
+			console.error('[conversation-store] discord_voice speaker-cols migration failed:', e);
+		}
+
 		turnStmt['voice'] = db.prepare(
 			'INSERT INTO voice (ts_unix, kind, text, duration_ms, session_id) VALUES (?, ?, ?, ?, ?)',
 		);
@@ -267,7 +289,7 @@ function init(): void {
 			'INSERT INTO phone (ts_unix, kind, text, duration_ms, session_id) VALUES (?, ?, ?, ?, ?)',
 		);
 		turnStmt['discord-voice'] = db.prepare(
-			'INSERT INTO discord_voice (ts_unix, kind, text, duration_ms, session_id) VALUES (?, ?, ?, ?, ?)',
+			'INSERT INTO discord_voice (ts_unix, kind, text, duration_ms, session_id, speaker_id, speaker_name, speaker_type, spoken) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
 		);
 		sessionInsertStmt = db.prepare(`
 			INSERT INTO sessions (
@@ -440,16 +462,36 @@ function migrateLegacyIfNeeded(d: DatabaseSync): void {
 	}
 }
 
+/** Speaker attribution for a discord_voice turn (#1427 meeting-buddy). */
+export interface SpeakerMeta {
+	speakerId?: string;        // discord user id of the turn's speaker
+	speakerName?: string;      // display name (nickname || username)
+	speakerType?: 'human' | 'agent';
+	spoken?: boolean;          // false = generated but name-gate suppressed (no audio played)
+}
+
 /** Record a conversation turn. Source is derived from `role` (`phone-*` →
  *  phone, `discord-*` → discord_voice, otherwise voice); `kind` is
- *  normalized (user / agent / peer / SESSION_END / other). Best-effort. */
-export function recordConversation(role: string, text: string, sessionId?: string): void {
+ *  normalized (user / agent / peer / SESSION_END / other). Best-effort.
+ *  `meta` is only persisted for the discord_voice surface (speaker columns);
+ *  voice/phone ignore it, so existing callers are unaffected. */
+export function recordConversation(role: string, text: string, sessionId?: string, meta?: SpeakerMeta): void {
 	init();
 	const source = sourceFromRole(role);
 	const stmt = turnStmt[source];
 	if (!stmt) return;
 	try {
-		stmt.run(Date.now() / 1000, kindFromRole(role), text, null, sessionId ?? null);
+		if (source === 'discord-voice') {
+			stmt.run(
+				Date.now() / 1000, kindFromRole(role), text, null, sessionId ?? null,
+				meta?.speakerId ?? null,
+				meta?.speakerName ?? null,
+				meta?.speakerType ?? null,
+				meta?.spoken === undefined ? null : (meta.spoken ? 1 : 0),
+			);
+		} else {
+			stmt.run(Date.now() / 1000, kindFromRole(role), text, null, sessionId ?? null);
+		}
 	} catch (e) {
 		console.error('[conversation-store] insert failed:', e);
 	}

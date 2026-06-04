@@ -463,6 +463,10 @@ interface DiscordVoiceSession {
 	// speaking.start for each speaker. Used to auto-ignore bot accounts so
 	// the receiver doesn't pipe peer-bot audio to Gemini.
 	botFlagCache: Map<string, boolean>;
+	// Cache of userId → display name + human/agent type, for per-speaker
+	// attribution in the discord_voice recording (#1427). Populated alongside
+	// botFlagCache on speaking.start (same User.fetch).
+	speakerNameCache: Map<string, { name: string; type: 'human' | 'agent' }>;
 	// Every Discord user who contributed audio to the in-progress Gemini turn.
 	// Added on speaking.start, cleared on turn.end. The tier gate reads this
 	// set (not a live last-speaker pointer) so a tool call is attributed to
@@ -961,6 +965,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		subscribedUsers: new Set(),
 		client,
 		botFlagCache: new Map(),
+		speakerNameCache: new Map(),
 		turnSpeakers: new Set(),
 		lastSpeaker: null,
 		audioPending: [],
@@ -1163,12 +1168,31 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// conversation.log is the primary; write it before the sqlite
 				// mirror so a row never exists in sqlite without a log line.
 				appendConversationLog('discord-user', item.content);
-				recordConversation('discord-user', item.content, s.sessionId);
+				// Attribute the turn to its speaker. turnSpeakers is cleared at
+				// the top of this handler, so use lastSpeaker (the non-cleared
+				// fallback). A human turn always reached the mic, so spoken=true.
+				const _spk = s.lastSpeaker ? s.speakerNameCache.get(s.lastSpeaker) : undefined;
+				recordConversation('discord-user', item.content, s.sessionId, {
+					speakerId: s.lastSpeaker ?? undefined,
+					speakerName: _spk?.name,
+					speakerType: _spk?.type ?? 'human',
+					spoken: true,
+				});
 			} else if (item.role === 'assistant') {
 				s.transcript.push({ role: 'sutando', text: item.content });
 				// utterance event push removed per #1052 — see comment above.
 				appendConversationLog('discord-agent', item.content);
-				recordConversation('discord-agent', item.content, s.sessionId);
+				// This agent generated the turn. Gemini produces a reply EVERY
+				// turn, but the outbound audio is only played when !meetingMode
+				// (the name-gate decision for this turn, set in the user branch
+				// above). spoken=false marks a generated-but-muted turn so the db
+				// distinguishes "actually said aloud" from "suppressed" (#1427).
+				recordConversation('discord-agent', item.content, s.sessionId, {
+					speakerId: s.client.user?.id,
+					speakerName: STAND_NAME || 'agent',
+					speakerType: 'agent',
+					spoken: !s.meetingMode,
+				});
 			}
 		}
 		lastProcessedIdx = items.length;
@@ -1338,6 +1362,14 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			try {
 				const user = await s.client.users.fetch(userId);
 				isBot = !!user.bot;
+				// Same fetch feeds the speaker-attribution cache (#1427): prefer
+				// the guild nickname, fall back to the global username.
+				let display = user.username;
+				try {
+					const member = await s.client.guilds.cache.get(s.guildId)?.members.fetch(userId);
+					if (member?.displayName) display = member.displayName;
+				} catch { /* nickname unavailable — keep username */ }
+				s.speakerNameCache.set(userId, { name: display, type: isBot ? 'agent' : 'human' });
 			} catch {
 				isBot = false;
 			}
