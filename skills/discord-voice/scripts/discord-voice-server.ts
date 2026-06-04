@@ -971,7 +971,12 @@ function pcm16ToWav(pcm: Buffer, sampleRate = 16000): Buffer {
 // the audio pipeline, never throws into it. Mirrors describeScreenshot's REST
 // generateContent pattern (src/browser-tools.ts).
 async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: string, pcm: Buffer): Promise<void> {
-	const apiKey = process.env.GEMINI_VOICE_API_KEY || process.env.GEMINI_API_KEY;
+	// Prefer the GENERAL (paid) key for this background recording STT so it does
+	// NOT compete with — and exhaust — the live voice session's free voice key.
+	// One STT call per utterance per speaker blew GEMINI_VOICE_API_KEY's free-tier
+	// quota within seconds (429s → missing rows) in Susan's 2026-06-04 test. Fall
+	// back to the voice key only if no general key is configured.
+	const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_VOICE_API_KEY;
 	if (!apiKey) return; // no-op gracefully when no key configured
 	try {
 		const wav = pcm16ToWav(pcm);
