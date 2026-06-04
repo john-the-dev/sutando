@@ -1121,7 +1121,29 @@ function loadCoreDocumentedSkills(): { name: string; description: string }[] {
 }
 export const coreDocumentedSkills = loadCoreDocumentedSkills();
 
+// "join screen" in a Discord voice channel = view THIS channel's screen-share
+// (Susan 2026-06-04). Giving the model a dedicated tool keeps it from grabbing
+// the Zoom skill's join_zoom/summon for a screen request. The actual view is
+// provided by the (optional, currently owner-private) discord-voice-view-screen
+// skill; until that's installed on this machine, report cleanly — never fall
+// back to Zoom. See feedback/notes on join-screen-as-inline-tool.
+export const joinDiscordScreenTool: ToolDefinition = {
+	name: 'join_discord_screen',
+	description:
+		'Join / view the screen share in the CURRENT Discord voice channel. Use this for "join screen", "join the screen", "view the screen", "看屏幕", "加入屏幕". ' +
+		'This is the Discord screen-share — for a screen request in a Discord voice channel, ALWAYS use this, NEVER join_zoom or summon (those are Zoom).',
+	parameters: z.object({}),
+	execution: 'inline',
+	async execute() {
+		return {
+			status: 'unavailable',
+			message: 'Discord screen-view (join_discord_screen) is not installed on this machine yet — the discord-voice-view-screen skill is missing. Do NOT fall back to Zoom; tell the user screen-view is not available here yet.',
+		};
+	},
+};
+
 export const inlineTools = assertUniqueToolNames([
+	joinDiscordScreenTool,
 	pressKeyTool, scrollTool, switchTabTool, closeTabTool, openUrlTool,
 	switchAppTool, captureScreenTool, typeTextTool,
 	volumeTool, brightnessTool, clipboardTool,
@@ -1144,6 +1166,7 @@ export const anyCallerTools = [
 
 /** Owner-only tools (require isOwner) */
 export const ownerOnlyTools = [
+	joinDiscordScreenTool,
 	volumeTool, brightnessTool,
 	pressKeyTool, scrollTool, switchTabTool, closeTabTool, openUrlTool,
 	switchAppTool, captureScreenTool, typeTextTool,
