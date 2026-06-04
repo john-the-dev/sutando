@@ -1257,6 +1257,30 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 	await session.start();
 	console.log(`${ts()} [Bodhi] VoiceSession started on port ${bodhiPort} for ${sessionId}`);
 
+	// #1456 IMMEDIATE WAKE (Susan 2026-06-04: "我说 hi Maddy 它应该立刻 switch 到 active,
+	// 而不是叫了两三遍不理我"). The meetingMode flip in turn.end is ONE TURN LATE, so the
+	// first "hi Maddy" while silent was ignored. Hook the INPUT transcription so the
+	// controller naming this bot flips it ACTIVE the instant it's heard — same turn,
+	// no lag. lastSpeaker (updated on speaking.start) gates it to the controller.
+	try {
+		const _wt = (session as any).transport;
+		if (_wt) {
+			const _origIn = _wt.onInputTranscription?.bind(_wt);
+			_wt.onInputTranscription = (text: string) => {
+				try {
+					if (s.meetingMode && _namesThisBot(text) &&
+						(!VOICE_CONTROLLER || s.lastSpeaker === VOICE_CONTROLLER)) {
+						s.meetingMode = false;
+						s.allowAckAudible = true;
+						(s as any)._ackEmitted = false;
+						console.log(`${ts()} [NameGate] IMMEDIATE wake — controller named the bot: "${text.slice(0, 50)}"`);
+					}
+				} catch {}
+				_origIn?.(text);
+			};
+		}
+	} catch {}
+
 	// Clear any STALE 👁 screen-share indicator left by a previous session that
 	// crashed without cleaning up (the Set-Voice-Channel-Status API needs the bot
 	// IN the channel, so a disconnected session can't clear its own status). We
