@@ -1293,6 +1293,17 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				try { unlinkSync(full); } catch {}
 				continue;
 			}
+			// Typed screen-push sub-command, routed here by the bridge from a Discord
+			// TEXT message ("za warudo screen" / "stop screen"). Kept off the voice
+			// path on purpose — spoken commands clash with a Zoom mic (Susan
+			// 2026-06-04). Already owner-gated by the bridge (it only writes this
+			// marker for an owner author), so apply directly; don't forward to Gemini.
+			if (body === '[screen-push:on]' || body === '[screen-push:off]') {
+				console.log(`${ts()} [ChannelScan] typed screen-push: ${body}`);
+				void setScreenPush(s, body === '[screen-push:on]');
+				try { unlinkSync(full); } catch {}
+				continue;
+			}
 			console.log(`${ts()} [ChannelScan] picked up ${name} (${body.length}B)`);
 			s.events.push({ event: `channel_result:${name}`, timestamp: new Date().toISOString() });
 			// Inject through the same path the work-tool result-queue drain
