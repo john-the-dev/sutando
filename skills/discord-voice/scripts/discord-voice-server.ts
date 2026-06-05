@@ -1417,7 +1417,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// latch resets only on a real GAP in Maddy's own output (>1.5s) — i.e. its reply
 			// actually finished — so an interruption can't sever an in-progress reply.
 			const _nowMs = Date.now();
-			if (_nowMs - ((s as any)._lastAudioTs || 0) > 1500) (s as any)._turnAudioAllowed = false;
+			if (_nowMs - ((s as any)._lastAudioTs || 0) > 1500) { (s as any)._turnAudioAllowed = false; (s as any)._audioPlayedThisTurn = false; }
 			// Sticky: open while she's addressing Maddy (_addressedToMe) and has spoken within
 			// the window (refreshed on every controller utterance, so it only lapses on a long
 			// silence or after she yields to a peer). The latch keeps an in-progress reply going.
@@ -1429,6 +1429,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				(s as any)._turnAudioAllowed = true;  // latch — held across continuous audio
 				(s as any)._lastAudioTs = _nowMs;
 				(s as any)._wasPlaying = true;
+				(s as any)._audioPlayedThisTurn = true;  // #1456: this turn was HEARD (audio left the gate)
 				pushAudio(pcm48Stereo);
 				outChunks++;
 				if (s.allowAckAudible) (s as any)._ackEmitted = true;
@@ -1624,11 +1625,11 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// (the name-gate decision for this turn, set in the user branch
 				// above). spoken=false marks a generated-but-muted turn so the db
 				// distinguishes "actually said aloud" from "suppressed" (#1427).
-				recordConversation('discord-agent', item.content, s.sessionId, {
+				recordConversation('discord-agent', ((s as any)._audioPlayedThisTurn ? '' : '🔇[muted] ') + item.content, s.sessionId, {
 					speakerId: s.client.user?.id,
 					speakerName: STAND_NAME || 'agent',
 					speakerType: 'agent',
-					spoken: !s.meetingMode,
+					spoken: !!(s as any)._audioPlayedThisTurn,
 				});
 			}
 		}
