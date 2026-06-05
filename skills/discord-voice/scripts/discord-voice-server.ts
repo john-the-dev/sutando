@@ -1428,8 +1428,15 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// Sticky: open while she's addressing Maddy (_addressedToMe) and has spoken within
 			// the window (refreshed on every controller utterance, so it only lapses on a long
 			// silence or after she yields to a peer). The latch keeps an in-progress reply going.
-			const _withinNameWindow = (s as any)._turnAudioAllowed
-				|| ((s.gate?.lastAddressedToMe ?? true) && (_nowMs - ((s as any)._controllerNamedAt || 0) < _NAMEGATE_WINDOW));
+			// #1456 (Susan 2026-06-04, confirmed via `✂ MUTED from start … addressedToMe=true
+		// sinceNamed=24s/win=20s`): PURE STICKY. Open while she is the addressee per
+		// decideForTurn's sticky state — which closes ONLY on an explicit yield (peer name /
+		// standby). The old 20s time-window contradicted the "name once, keep talking" sticky
+		// she asked for: it muted her whenever >20s passed without the controller re-speaking
+		// (e.g. she typed a question, or talked to a peer for 20s). The window is dropped;
+		// _NAMEGATE_WINDOW survives only in the observability reason string for context.
+		const _withinNameWindow = (s as any)._turnAudioAllowed
+				|| (s.gate?.lastAddressedToMe ?? true);
 			const _audioOpen = s.allowAckAudible
 				|| (_nowMs < ((s as any)._forceAudibleUntil || 0))  // #1456: force-audible window after a mode switch (ack guaranteed heard)
 				|| (!s.meetingMode && (VOICE_CONTROLLER ? _withinNameWindow : true));
