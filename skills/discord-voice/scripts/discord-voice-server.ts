@@ -99,23 +99,23 @@ const OWNER_NAME = process.env.owner ?? '';
 // Empty peer list = gate disabled = behaves like single-bot (always responds).
 const STAND_NAME: string = (() => {
 	// Env override lets a second gated identity run on the same machine (e.g.
-	// testing Lucy + Maddy on one host without two checkouts). Falls back to
+	// testing a peer bot + this bot on one host without two checkouts). Falls back to
 	// the workspace stand-identity.json name.
 	if (process.env.SUTANDO_STAND_NAME) return process.env.SUTANDO_STAND_NAME.trim();
 	try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); return (si.name as string) || ''; }
 	catch { return ''; }
 })();
-// Spoken-form aliases for the stand name (ASR variants like "Maddie" for
-// "Maddy"). Read BOTH env names: `SUTANDO_STAND_ALIASES` (what the code has
+// Spoken-form aliases for the stand name (ASR variants of the stand
+// name). Read BOTH env names: `SUTANDO_STAND_ALIASES` (what the code has
 // always read) and `SUTANDO_NAME_ALIASES` (the name the per-machine .env
 // convention actually used). They diverged silently, so aliases set under
 // `SUTANDO_NAME_ALIASES` were ignored — and in meeting-mode that meant the
 // gate never matched an ASR-mangled name, leaving the bot permanently
-// audio-suppressed (generates text, no speech). 2026-06-04 debug.
+// audio-suppressed (generates text, no speech).
 const STAND_NAME_ALIASES = (() => {
 	// Aliases may come from env OR the per-node stand-identity.json `aliases` array
 	// (#1427: single-file identity — name + aliases + nameOrigin in one place, so a
-	// machine like Maddy needs only that file, no env juggling for the gate to match
+	// machine like this bot's host needs only that file, no env juggling for the gate to match
 	// ASR variants). Env takes precedence; both are merged.
 	let fromJson: string[] = [];
 	try {
@@ -136,21 +136,21 @@ const PEER_NAMES = (process.env.SUTANDO_PEER_NAMES ?? '')
 // Default off → legacy behavior is byte-for-byte unchanged.
 const SUTANDO_MEETING_MODE = process.env.SUTANDO_MEETING_MODE === '1' || (() => {
 	// #1427: also honor `meetingMode: true` in stand-identity.json so a node (e.g.
-	// Maddy) can default to gated WITHOUT the launcher sourcing .env (the env var
+	// this bot) can default to gated WITHOUT the launcher sourcing .env (the env var
 	// doesn't reach the process there — same gotcha as aliases). When on, the bot
 	// JOINS name-gated/silent and only speaks when addressed by name.
 	try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); return si.meetingMode === true; } catch { return false; }
 })();
-// (Susan 2026-06-05) Tightened to DELIBERATE standby commands only. Removed
-// conversational fillers 'hold on'/'wait'/'one sec' — she says those constantly in
+// Tightened to DELIBERATE standby commands only. Removed
+// conversational fillers 'hold on'/'wait'/'one sec' — the controller says those constantly in
 // normal speech and they were false-triggering meeting mode (caught via the new
 // sqlite mode-switch log). Meeting mode = an explicit command, not a filler.
 const STANDBY_PHRASES = (process.env.SUTANDO_STANDBY_PHRASES ?? 'standby,stand by,待命,你待命')
 	.split(',').map(s => s.trim()).filter(Boolean);
-// #1427/#1456 (Susan 2026-06-04): the SINGLE Discord user id allowed to CONTROL
+// #1427/#1456: the SINGLE Discord user id allowed to CONTROL
 // meeting mode (enter via standby, wake/exit). When set, enter/wake cues only fire
-// when the turn's speaker is this id — so a relay account (Lucy via 879), a peer, or
-// the bot's own echo can NEVER flip Maddy's mode; only Susan can. Read from env or
+// when the turn's speaker is this id — so a relay account (a peer bot via a relay user-id), a peer, or
+// the bot's own echo can NEVER flip the bot's mode; only the controller can. Read from env or
 // stand-identity.json `controller`. Empty → no controller gate (legacy: anyone's cue).
 const VOICE_CONTROLLER: string = process.env.SUTANDO_VOICE_CONTROLLER || (() => {
 	try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); return String(si.controller || ''); }
@@ -159,7 +159,7 @@ const VOICE_CONTROLLER: string = process.env.SUTANDO_VOICE_CONTROLLER || (() => 
 
 // Loud startup warning for the exact trap that cost a full night (2026-06-04):
 // meeting-mode SUPPRESSES audio output until the bot is addressed by name, but
-// ASR routinely mangles the name ("Maddy" → "Maddie"). With no aliases, the
+// ASR routinely mangles the name (e.g. a name's ASR variant). With no aliases, the
 // gate never matches, so the bot generates text but stays permanently silent —
 // indistinguishable from a model bug. Make the misconfig visible at boot.
 if (SUTANDO_MEETING_MODE && STAND_NAME && STAND_NAME_ALIASES.length === 0) {
@@ -173,9 +173,9 @@ if (SUTANDO_MEETING_MODE && STAND_NAME && STAND_NAME_ALIASES.length === 0) {
 const VOICE_MODE_FILE = join(WORKSPACE_DIR, 'state', 'voice-mode.txt');
 const AUTO_MEETING_TIMEOUT_MS = parseInt(process.env.SUTANDO_VOICE_AUTO_MEETING_AFTER_SEC || '180', 10) * 1000;
 // Wake phrases that exit meeting mode when user speaks them (case-insensitive).
-// #1427 (Susan 2026-06-04): wake = a DELIBERATE, NAME-QUALIFIED command, never a loose
+// #1427: wake = a DELIBERATE, NAME-QUALIFIED command, never a loose
 // substring. Earlier 'active mode' / 'wake up' matched incidental conversation — a bot
-// saying "I'm in active mode now" (heard via channel echo) woke Maddy from its OWN words.
+// saying "I'm in active mode now" (heard via channel echo) woke this bot from its OWN words.
 // Now wake fires ONLY on "<name> wake up" / "wake up <name>" / "<name> active mode" etc.
 // Bare "hi <name>" no longer exits meeting — it just addresses (the name-gate answers
 // that one turn but the bot STAYS in meeting). Enter = "stand by"/"hold on" (unchanged).
@@ -212,9 +212,9 @@ function _looksLikeCommand(text: string): boolean {
 	const t = text.trim();
 	return t.split(/\s+/).filter(Boolean).length <= _CMD_MAX_WORDS || t.length <= 16;
 }
-// #1427 (Susan 2026-06-04): does this utterance NAME this bot (stand name or an
+// #1427: does this utterance NAME this bot (stand name or an
 // ASR alias)? Used to gate meeting-mode ENTRY so a cue addressed to a PEER
-// ("Lucy, take notes") doesn't flip THIS bot into meeting mode. Word-boundary
+// ("<peer name>, take notes") doesn't flip THIS bot into meeting mode. Word-boundary
 // mention — looser than isAddressedBy (no punctuation/verb required, so it's
 // robust to ASR dropping commas), which is the right bar for "is this for me".
 function _namesThisBot(text: string): boolean {
@@ -227,7 +227,7 @@ function _namesThisBot(text: string): boolean {
 //  local copy needed; the sticky gate reads s.gate.lastAddressedToMe, fed by decideForTurn
 //  on the controller's own per-user stream.)
 
-// --- Screen sharing: REMOVED from discord-voice (#1427, Susan 2026-06-04) -----
+// --- Screen sharing: REMOVED from discord-voice (#1427) -----
 // All screen-push machinery (setScreenPush, the 👁 indicators, vision-push.txt,
 // the "za warudo screen" phrases) is gone. Screen sharing in a Discord voice
 // session is now owned entirely by the join_discord_screen inline tool
@@ -298,7 +298,7 @@ const SUTANDO_PEER_USERNAME_PATTERNS = (process.env.SUTANDO_PEER_USERNAME_PATTER
 // leaves if a peer joins anyway.
 const SUTANDO_PEER_ENFORCEMENT_DISABLED = process.env.SUTANDO_PEER_ENFORCEMENT_DISABLED === '1';
 
-// Meeting-companion v1 boundary (Mini's design, #1389 thread): owner-only
+// Meeting-companion v1 boundary (a peer bot's design, #1389 thread): owner-only
 // addressing. Only the OWNER may break the bot's silence by name — a non-owner
 // in the room saying the bot's name is ignored. Open-floor consultancy (anyone
 // can address the owner's bot) is a bigger consent question, deferred to v2
@@ -394,7 +394,7 @@ function detachVisionFromSession(): void {
 	try { _setVisionSession?.(_priorVisionSession ?? null); } catch {}
 }
 
-// --- Screen-share indicator (#1427, Susan 2026-06-04) -----------------------
+// --- Screen-share indicator (#1427) -----------------------
 // The 👁 visible trace is KEPT (silent screen capture violates "no silent
 // action"), but it is now driven by the join_discord_screen TOOL invocation
 // (onToolResult hook below) — NOT by the old setScreenPush / magic-phrase path.
@@ -571,7 +571,7 @@ interface DiscordVoiceSession {
 	meetingEntered: boolean;
 	// #1427: one-shot "let the next agent turn be HEARD even though meetingMode is
 	// on" — set when entering meeting mode so the spoken "Got it, I'll take notes"
-	// confirmation is audible BEFORE silence engages (Susan 2026-06-04: the ack was
+	// confirmation is audible BEFORE silence engages (the ack was
 	// being suppressed by the same turn that set meetingMode=true). Cleared once the
 	// ack turn's audio has actually emitted (_ackEmitted), so only that one turn passes.
 	allowAckAudible: boolean;
@@ -718,15 +718,14 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 			'YOU are Sutando — the AI assistant. The person speaking is your OWNER, a human. Do NOT confuse yourself with them.',
 			// Per-node Stand identity — mirrors src/voice-agent.ts:606 pattern.
 			// `stand-identity.json` carries name + nameOrigin for the bot on
-			// this machine (e.g. "Echo Act IV (Mini)" on the Mac mini, "Lucy"
-			// on Susan's Mac Studio). Loading it here lets the discord-voice
+			// this machine (e.g. a distinct Stand name per node). Loading it here lets the discord-voice
 			// agent answer "who are you" with the same Stand name the core
 			// voice-agent already uses — single per-node identity contract
 			// across surfaces, no parallel env var. Silent fall-through if
 			// the file is absent (kept the generic "You are Sutando" framing).
 			(() => { try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); return si.name ? `Your Stand name is ${si.name}. Origin: ${si.nameOrigin || 'earned through use'}. When asked your name or who you are, say "I'm Sutando — ${si.name}."` : ''; } catch { return ''; } })(),
 			'You have full capabilities — use the work tool for anything: check the screen, send emails, look things up, make calls, browse the web, or check results of previous tasks.',
-			// Meeting/silent-mode tool restriction (#1427, Susan 2026-06-04): when the
+			// Meeting/silent-mode tool restriction (#1427): when the
 			// name-gate / meeting-mode is in play, the bot is a silent note-taker for
 			// turns where it is NOT addressed. It must NOT silently take actions then —
 			// silent listening is fine, silent tool-execution is not. Prompt-level for
@@ -766,7 +765,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 			'You are Sutando, an AI assistant in a Discord voice channel.',
 			// Per-node Stand identity — same load as owner-tier block above. Non-
 			// owner speakers also benefit from "this Sutando is named X" so
-			// "Hi Lucy" / "Hi Mini" doesn't get the rigid "I'm Sutando, not X"
+			// "Hi <stand name>" doesn't get the rigid "I'm Sutando, not X"
 			// correction.
 			(() => { try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); return si.name ? `Your Stand name is ${si.name}. When asked your name, say "I'm Sutando — ${si.name}."` : ''; } catch { return ''; } })(),
 			'Be helpful and conversational. You can answer general knowledge questions, do translations, and have conversations.',
@@ -800,7 +799,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 		// dismiss = SIGTERM self so cleanupSession() handler runs.
 		// Pushed BEFORE the inline-tools merge loop so the dedupe-by-name
 		// keeps THIS one and drops the core dismissTool.
-		// #1456 (Susan 2026-06-05): switch_mode TOOL — Gemini calls it on INTENT, so a mode
+		// #1456: switch_mode TOOL — Gemini calls it on INTENT, so a mode
 		// switch no longer depends on phrase-matching the ASR transcript (which garbled
 		// "meeting mode" → "switch to me" and silently failed to flip the flag). Mirrors
 		// voice-agent's switchModeTool. The tool-gate below allows it whenever the controller
@@ -824,7 +823,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 						(s as any)._pendingMeeting = true; s.allowAckAudible = true; (s as any)._ackEmitted = false;
 						console.log(`${ts()} [Meeting] switch_mode → speak ack first, meeting pending`);
 					}
-					// #1456 (Susan 2026-06-04): do NOT tell Gemini it is going silent — when the
+					// #1456: do NOT tell Gemini it is going silent — when the
 					// model thinks it is entering silent mode it emits the ack as TEXT-ONLY (no audio),
 					// so the confirmation is never heard. Ask for a NORMAL spoken reply; the CODE
 					// engages silence at turn.end (deferred _pendingMeeting), AFTER the ack is voiced.
@@ -848,12 +847,12 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 			parameters: z.object({}),
 			execution: 'inline',
 			async execute() {
-				// #1456: only the designated controller (Susan) may dismiss the bot.
+				// #1456: only the designated controller may dismiss the bot.
 				// dismiss SIGTERMs the session out of the channel; the tier gate alone
-				// is insufficient because a relay account (Lucy via 879) is owner-tier
-				// in the allowlist, so it (or a misfired tool-call) was making Maddy
-				// dismiss ITSELF mid-session (Susan 2026-06-04: "Maddy dismissed —
-				// that's a bug"). Mirror the meeting-mode controller-gate: require the
+				// is insufficient because a relay account (a peer bot via a relay user-id) is owner-tier
+				// in the allowlist, so it (or a misfired tool-call) was making the bot
+				// dismiss ITSELF mid-session (observed: the bot dismissed itself —
+				// that's a bug). Mirror the meeting-mode controller-gate: require the
 				// controller to be the sole human speaker of the current turn.
 				if (VOICE_CONTROLLER) {
 					const _humans = [...s.turnSpeakers].filter(
@@ -996,8 +995,8 @@ function triggerSilenceBurst(s: DiscordVoiceSession): void {
 
 // Silence ticker — BURST mode (2026-05-17 latency fix).
 //
-// HYPOTHESIS: Susan reported 30s gap between her utterance and Lucy's reply
-// (2026-05-17 00:30 UTC). The earlier continuous-silence ticker (50fps of
+// HYPOTHESIS: the controller reported a 30s gap between their utterance and the bot's reply.
+// The earlier continuous-silence ticker (50fps of
 // zero-PCM forever) appears to suppress Gemini Live's automatic VAD —
 // Gemini sees a never-ending audio stream and never marks end-of-speech
 // until its internal hard timeout (~25-30s).
@@ -1057,7 +1056,7 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 	// Prefer the GENERAL (paid) key for this background recording STT so it does
 	// NOT compete with — and exhaust — the live voice session's free voice key.
 	// One STT call per utterance per speaker blew GEMINI_VOICE_API_KEY's free-tier
-	// quota within seconds (429s → missing rows) in Susan's 2026-06-04 test. Fall
+	// quota within seconds (429s → missing rows) in testing. Fall
 	// back to the voice key only if no general key is configured.
 	const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_VOICE_API_KEY;
 	if (!apiKey) return; // no-op gracefully when no key configured
@@ -1089,21 +1088,21 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 		if (!transcript) return; // skip empty/whitespace
 		// #1456 PRECISE name-gate: the gate must key off EXACTLY who spoke — not a
 		// loose "if anyone named the bot" rule. It keys ONLY off the CONTROLLER's OWN clean per-
-		// user utterance — 879/Lucy naming the bot can NOT open it, because this is
+		// user utterance — a relay account / peer bot naming the bot can NOT open it, because this is
 		// the controller's separate Discord stream. Stamp the time; the audio-output
 		// gate reads this window. Also wake immediately if currently silent.
 		// #1456 STICKY conversation — use the CANONICAL gate (name-gate.ts decideForTurn +
 		// GateState.lastAddressedToMe), NOT a hand-rolled copy (the sticky-conversation
 		// behavior is already implemented there). Feed it the controller's OWN per-user STT
-		// transcript so only HER stream moves the sticky state (879/Lucy can't). Semantics
+		// transcript so only THEIR stream moves the sticky state (a relay account / peer bot can't). Semantics
 		// (from decideForTurn): my-name→allow+sticky, peer-name→drop, standby→drop, neither→
 		// carries. Confirmed need via the ✂ log: a reply was cut "name-window expired 41190ms"
-		// because she named Maddy once and kept talking 41s without re-naming.
+		// because the controller named the bot once and kept talking 41s without re-naming.
 		if (VOICE_CONTROLLER && userId === VOICE_CONTROLLER && s.gate) {
 			const _wasAddressed = s.gate.lastAddressedToMe;
 			// Track when the controller EXPLICITLY named THIS bot (not the sticky state) —
-			// switch_mode is gated on this so only "Hi Maddy, switch …" switches Maddy, and a
-			// bare "switch to active mode" (no name) switches nobody (Susan 2026-06-05).
+			// switch_mode is gated on this so only "Hi <bot name>, switch …" switches this bot, and a
+			// bare "switch to active mode" (no name) switches nobody.
 			if (_namesThisBot(transcript)) (s as any)._namedThisBotAt = Date.now();
 			decideForTurn(s.gate, transcript);  // updates s.gate.lastAddressedToMe in-place
 			if (s.gate.lastAddressedToMe) {
@@ -1275,12 +1274,12 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		audioPending: [],
 		toolCalls: [],
 		events: [{ event: 'session_started', timestamp: new Date().toISOString() }],
-		// #1427 (Susan 2026-06-04): JOIN in ACTIVE mode (respond normally). Only
+		// #1427: JOIN in ACTIVE mode (respond normally). Only
 		// switch to silent meeting-mode on a cue ("take notes"/"meeting mode") or
 		// the auto-timeout — not silent-upfront. The name-gate's per-turn silencing
 		// (below) applies only once s.meetingEntered is true.
-		// The toggle Susan wants is active ⟷ meeting: "standby"/"hold on" → meeting
-		// (silent), "hi maddy" → back to active. Join ACTIVE; the cues flip state.
+		// The desired toggle is active ⟷ meeting: "standby"/"hold on" → meeting
+		// (silent), "hi <bot name>" → back to active. Join ACTIVE; the cues flip state.
 		// The bot ALWAYS joins ACTIVE (standing rule — do not regress this).
 		// standby/"hold on" → meeting (silent), "hi <bot name>" → active. Do NOT join
 		// silent — that made it ignore the controller when addressed (one-turn-lag).
@@ -1365,9 +1364,9 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 
 	// The PRECISE sticky/wake state lives in transcribeAndRecordUtterance (per-user STT) —
 	// that's the single authority. BUT the per-user STT is async (~1s), which lagged the
-	// switch_mode TOOL gate: Gemini calls switch_mode the instant it hears "Hi Maddy", before
+	// switch_mode TOOL gate: Gemini calls switch_mode the instant it hears "Hi <bot name>", before
 	// the STT has registered the name, so the gate wrongly blocked it ("controller hasn't
-	// addressed the bot") and the bot stayed in meeting mode (Susan 2026-06-05, confirmed via
+	// addressed the bot") and the bot stayed in meeting mode (confirmed via
 	// the log). Fix: set the switch_mode freshness signal (_namedThisBotAt) from the LIVE input
 	// the moment the CONTROLLER's voice names the bot — fast, no STT wait. Gated to lastSpeaker
 	// so a peer/relay naming the bot doesn't open switch_mode. Does NOT touch sticky/meeting
@@ -1397,10 +1396,10 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		try {
 			const pcm24Mono = Buffer.from(data, 'base64');
 			const pcm48Stereo = upsample24MonoTo48Stereo(pcm24Mono);
-			// #1456 PRECISE name-gate at the AUDIO output (Susan 2026-06-04). When a
+			// #1456 PRECISE name-gate at the AUDIO output. When a
 			// controller is configured, the bot speaks ONLY if the CONTROLLER named it
 			// in their own utterance within the window (per-user STT set _controllerNamedAt)
-			// — deterministic, at output time, ignores the mixed turn entirely so 879/Lucy
+			// — deterministic, at output time, ignores the mixed turn entirely so a relay account / peer bot
 			// can't open it. allowAckAudible still lets an entry/wake ack through. Without a
 			// controller → legacy meeting-mode suppression.
 			// Per-turn LATCH (fixes a follow-up sentence being dropped): once a reply STARTS
@@ -1430,7 +1429,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// silence or after the controller yields to a peer). The latch keeps an in-progress reply going.
 			// #1456 (confirmed via the `✂ MUTED from start … addressedToMe=false
 		// sinceNamed=<epoch>` observability log): ACTIVE-mode gate keys on the controller's SPEAKER-ID, not
-		// name-text. STT mangles the bot's name (e.g. "Maddy" → "Padmani"/"Hamdi") — the root of the whole mute saga —
+		// name-text. STT mangles the bot's name (e.g. into unrelated tokens) — the root of the whole mute saga —
 		// so requiring a name-match to open is fundamentally unreliable. By speaker-id it is
 		// deterministic: in active mode the bot speaks iff the CONTROLLER is who just spoke
 		// (s.lastSpeaker === VOICE_CONTROLLER) — a peer speaking keeps it muted ("answer the
@@ -1526,8 +1525,8 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			console.log(`${ts()} [Meeting] deferred meeting engaged after ack`);
 		}
 		// (Refactor 2026-06-05) The audio latch is NO LONGER reset here — turn.end fires
-		// when Lucy/879 interrupts, which prematurely cut Maddy's reply. The latch now
-		// resets on a real gap in Maddy's OWN output (see handleAudioOutput), so an
+		// when a peer bot / relay account interrupts, which prematurely cut the bot's reply. The latch now
+		// resets on a real gap in the bot's OWN output (see handleAudioOutput), so an
 		// interruption can't sever an in-progress reply.
 		// Watchdog: a turn completed — clear the hang counters.
 		(s as any).lastTurnActivityTs = Date.now();
@@ -1546,8 +1545,8 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		// #1427 attribution: snapshot THIS turn's human speaker BEFORE clearing,
 		// so the user-row attribution below uses who actually spoke this turn —
 		// not s.lastSpeaker (the last audio-packet sender), which mis-attributes
-		// when multiple people are in the channel (e.g. two "Susan" identities:
-		// susanliu_ main + the test account). Prefer a single human speaker;
+		// when multiple people are in the channel (e.g. two identities for one person:
+		// a main account + a test account). Prefer a single human speaker;
 		// if several humans spoke, keep lastSpeaker (best available); fall back
 		// to lastSpeaker only when the turn set has no humans.
 		const _turnHumans = [...s.turnSpeakers].filter(
@@ -1567,21 +1566,21 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// #1427: enter-meeting cue — bot joins ACTIVE; a cue switches it to
 				// silent meeting / note-taker mode (engages the per-turn name-gate).
 				// #1427: only enter meeting mode when THIS bot is named. A cue
-				// addressed to a peer ("Lucy, take notes") must NOT flip this bot —
-				// that false-trigger left Maddy silently stuck (Susan 2026-06-04). No
+				// addressed to a peer ("<peer name>, take notes") must NOT flip this bot —
+				// that false-trigger left this bot silently stuck. No
 				// gate (single-bot / no stand name) → any cue still enters (back-compat).
 				// Direct standby/silence commands flip THIS bot to meeting regardless of
 				// naming — they're control commands, not addressed-to-a-peer cues. Note-
 				// taking cues ("take notes"/"meeting mode") still require naming (cross-bot).
 				const _directStandby = ['standby', 'stand by', 'be silent', 'go silent'].some(p => item.content.toLowerCase().includes(p));
-				// #1456: only the designated controller (Susan) may flip meeting mode —
-				// a relay account (Lucy/879), a peer, or the bot's own echo cannot.
-				// Robustness (Susan 2026-06-04): require the controller to be the SOLE
+				// #1456: only the designated controller may flip meeting mode —
+				// a relay account (a peer bot / relay user-id), a peer, or the bot's own echo cannot.
+				// Robustness: require the controller to be the SOLE
 				// human speaker this turn — NOT _turnSpeakerId, whose lastSpeaker
-				// fallback mis-attributes a relay/peer's audio (Lucy via 879) to the
-				// controller and false-triggered meeting mode when Lucy said "silence".
+				// fallback mis-attributes a relay/peer's audio (a peer bot via a relay user-id) to the
+				// controller and false-triggered meeting mode when a peer bot said "silence".
 				// If anyone else (or no human, or several humans) is in this turn, the
-				// cue is not trusted as a controller command. Susan's rule: only she.
+				// cue is not trusted as a controller command. The rule: only the controller.
 				const _byController = !VOICE_CONTROLLER ||
 					_turnHumans.includes(VOICE_CONTROLLER);  // controller participated (not necessarily sole — a relay/peer is usually also audible)
 				if (_byController && !s.meetingEntered && _isEnterMeetingPhrase(item.content) && _looksLikeCommand(item.content) && (!s.gate || _namesThisBot(item.content) || _directStandby)) {
@@ -1590,7 +1589,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 					try { recordConversation('discord-agent', '⇄ MODE → meeting (standby cue)', s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
 					// #1427: let the bot's acknowledgement be HEARD before silence
 					// engages — without this, the same turn that sets meetingMode=true
-					// also suppresses the ack (Susan 2026-06-04).
+					// also suppresses the ack.
 					s.allowAckAudible = true;
 					(s as any)._ackEmitted = false;
 					console.log(`${ts()} [Meeting] enter-meeting cue — switching to meeting mode: "${item.content.slice(0, 60)}"`);
@@ -1604,8 +1603,8 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 					try { injectSystemMessage(s, "You are now switching to silent note-taking mode. Reply with ONE short spoken sentence confirming it (for example: \"Got it — I'll take notes silently from here.\"), then stay silent and only listen."); } catch {}
 				}
 				// Wake-phrase detection: exit meeting mode back to active. BUT skip if the
-				// SAME utterance also carries an enter/standby cue (#1427, Susan 2026-06-04):
-				// "Hi Maddie, can you stand by?" contains both a wake form ("hi maddie") and a
+				// SAME utterance also carries an enter/standby cue (#1427):
+				// "Hi <bot name>, can you stand by?" contains both a wake form ("hi <bot name>") and a
 				// standby cue ("stand by") — the intent is STANDBY, so the enter wins. Without
 				// this guard, enter then wake fire in the same turn and the bot never stays silent.
 				if (_byController && s.meetingEntered && _isWakePhrase(item.content) && !_isEnterMeetingPhrase(item.content)) {
@@ -1615,7 +1614,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 					console.log(`${ts()} [Meeting] wake-phrase detected — exiting meeting mode: "${item.content.slice(0, 60)}"`);
 					try { writeFileSync(VOICE_MODE_FILE, 'active'); } catch {}
 				}
-				// Screen-push voice phrases REMOVED (#1427, Susan 2026-06-04): the only
+				// Screen-push voice phrases REMOVED (#1427): the only
 				// magic word is "za warudo" (summon). Screen sharing is now driven solely
 				// by the join_discord_screen inline tool (the model calls it on "join/share
 				// screen"), so there is no "za warudo screen" phrase here anymore.
@@ -2033,10 +2032,10 @@ async function start(): Promise<void> {
 			if (!looksLikeSutandoPeer(u.username, u.bot, u.id)) return;
 			console.error(`${ts()} [Setup] #1089 peer ${u.tag} joined while I was present — announcing + leaving`);
 			// Best-effort audio announcement. The text-injection goes through
-			// the Gemini Live transport so Lucy speaks before disconnecting.
+			// the Gemini Live transport so the bot speaks before disconnecting.
 			// We don't wait for the actual TTS to complete — Gemini might
 			// reword the request — just give it a short window. Worst case
-			// (TTS no-shows) Lucy still leaves; the disconnect is the
+			// (TTS no-shows) the bot still leaves; the disconnect is the
 			// authoritative action.
 			try {
 				injectSystemMessage(
