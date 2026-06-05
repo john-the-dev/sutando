@@ -202,6 +202,16 @@ function _isEnterMeetingPhrase(text: string): boolean {
 	const lower = text.toLowerCase();
 	return ENTER_MEETING_PHRASES.some(p => lower.includes(p));
 }
+// (Susan 2026-06-05) A mode command is a SHORT imperative ("Maddy, stand by"), NOT the
+// phrase buried in narrative speech ("…I told you to stand by so you wouldn't…"). Gate the
+// meeting cue on utterance length so a merely-REFERENCED phrase doesn't false-trigger a
+// switch (which silenced the bot mid-reply → "最后一句没听到"). CJK has no spaces → also
+// allow on short char length. Env-tunable.
+const _CMD_MAX_WORDS = Number(process.env.SUTANDO_MODECMD_MAX_WORDS) || 8;
+function _looksLikeCommand(text: string): boolean {
+	const t = text.trim();
+	return t.split(/\s+/).filter(Boolean).length <= _CMD_MAX_WORDS || t.length <= 16;
+}
 // #1427 (Susan 2026-06-04): does this utterance NAME this bot (stand name or an
 // ASR alias)? Used to gate meeting-mode ENTRY so a cue addressed to a PEER
 // ("Lucy, take notes") doesn't flip THIS bot into meeting mode. Word-boundary
@@ -1436,7 +1446,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// cue is not trusted as a controller command. Susan's rule: only she.
 				const _byController = !VOICE_CONTROLLER ||
 					_turnHumans.includes(VOICE_CONTROLLER);  // controller participated (not necessarily sole — a relay/peer is usually also audible)
-				if (_byController && !s.meetingEntered && _isEnterMeetingPhrase(item.content) && (!s.gate || _namesThisBot(item.content) || _directStandby)) {
+				if (_byController && !s.meetingEntered && _isEnterMeetingPhrase(item.content) && _looksLikeCommand(item.content) && (!s.gate || _namesThisBot(item.content) || _directStandby)) {
 					s.meetingEntered = true;
 					s.meetingMode = true;
 					try { recordConversation('discord-agent', '⇄ MODE → meeting (standby cue)', s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
