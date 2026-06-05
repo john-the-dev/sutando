@@ -1360,12 +1360,25 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 	await session.start();
 	console.log(`${ts()} [Bodhi] VoiceSession started on port ${bodhiPort} for ${sessionId}`);
 
-	// (Refactor 2026-06-05) The mixed-input onInputTranscription immediate-wake was
-	// REMOVED here — it keyed off the混音 turn (turnSpeakers.has(controller)), which is
-	// the loose "someone named it while you were present" heuristic Susan rejected.
-	// The PRECISE wake now lives in transcribeAndRecordUtterance (per-user STT): only
-	// the controller's OWN clean utterance naming the bot exits meeting mode. Single
-	// authority, no mixed-turn conflict.
+	// The PRECISE sticky/wake state lives in transcribeAndRecordUtterance (per-user STT) —
+	// that's the single authority. BUT the per-user STT is async (~1s), which lagged the
+	// switch_mode TOOL gate: Gemini calls switch_mode the instant it hears "Hi Maddy", before
+	// the STT has registered the name, so the gate wrongly blocked it ("controller hasn't
+	// addressed the bot") and the bot stayed in meeting mode (Susan 2026-06-05, confirmed via
+	// the log). Fix: set the switch_mode freshness signal (_namedThisBotAt) from the LIVE input
+	// the moment the CONTROLLER's voice names the bot — fast, no STT wait. Gated to lastSpeaker
+	// so a peer/relay naming the bot doesn't open switch_mode. Does NOT touch sticky/meeting
+	// state (the per-user STT still owns those precisely).
+	try {
+		const _nt = (session as any).transport;
+		if (_nt && VOICE_CONTROLLER) {
+			const _origNT = _nt.onInputTranscription?.bind(_nt);
+			_nt.onInputTranscription = (text: string) => {
+				try { if (_namesThisBot(text) && s.lastSpeaker === VOICE_CONTROLLER) (s as any)._namedThisBotAt = Date.now(); } catch {}
+				_origNT?.(text);
+			};
+		}
+	} catch {}
 
 	// Clear any STALE 👁 screen-share indicator left by a previous session that
 	// crashed without cleaning up (the Set-Voice-Channel-Status API needs the bot
