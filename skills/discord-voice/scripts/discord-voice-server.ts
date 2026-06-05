@@ -798,7 +798,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 				if (VOICE_CONTROLLER) {
 					const _humans = [...s.turnSpeakers].filter(
 						id => s.speakerNameCache.get(id)?.type !== 'agent');
-					const _byController = _humans.length === 1 && _humans[0] === VOICE_CONTROLLER;
+					const _byController = _humans.includes(VOICE_CONTROLLER);  // controller participated (not necessarily sole)
 					if (!_byController) {
 						console.log(`${ts()} [Dismiss] refused — not the controller (last=${s.lastSpeaker}, humans=${JSON.stringify(_humans)})`);
 						return { status: 'refused', message: 'Only the controller can dismiss this bot.' };
@@ -1269,7 +1269,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			_wt.onInputTranscription = (text: string) => {
 				try {
 					if (s.meetingMode && _namesThisBot(text) &&
-						(!VOICE_CONTROLLER || s.lastSpeaker === VOICE_CONTROLLER)) {
+						(!VOICE_CONTROLLER || s.turnSpeakers.has(VOICE_CONTROLLER) || s.lastSpeaker === VOICE_CONTROLLER)) {
 						s.meetingMode = false;
 						s.allowAckAudible = true;
 						(s as any)._ackEmitted = false;
@@ -1404,7 +1404,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// If anyone else (or no human, or several humans) is in this turn, the
 				// cue is not trusted as a controller command. Susan's rule: only she.
 				const _byController = !VOICE_CONTROLLER ||
-					(_turnHumans.length === 1 && _turnHumans[0] === VOICE_CONTROLLER);
+					_turnHumans.includes(VOICE_CONTROLLER);  // controller participated (not necessarily sole — a relay/peer is usually also audible)
 				if (_byController && !s.meetingEntered && _isEnterMeetingPhrase(item.content) && (!s.gate || _namesThisBot(item.content) || _directStandby)) {
 					s.meetingEntered = true;
 					s.meetingMode = true;
@@ -1446,7 +1446,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				if (s.gate && (s.meetingEntered || _strictController)) {
 					const addressed = decideForTurn(s.gate, item.content) !== 'drop';
 					const _byController = !VOICE_CONTROLLER ||
-						(_turnHumans.length === 1 && _turnHumans[0] === VOICE_CONTROLLER);
+						_turnHumans.includes(VOICE_CONTROLLER);  // controller participated (not necessarily sole — a relay/peer is usually also audible)
 					// Strict: speak only if addressed by name AND the controller is the
 					// sole human speaker. Legacy: owner-may-break-silence on an addressed turn.
 					const wantSilent = _strictController
