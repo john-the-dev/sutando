@@ -1428,15 +1428,17 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// Sticky: open while she's addressing Maddy (_addressedToMe) and has spoken within
 			// the window (refreshed on every controller utterance, so it only lapses on a long
 			// silence or after she yields to a peer). The latch keeps an in-progress reply going.
-			// #1456 (Susan 2026-06-04, confirmed via `✂ MUTED from start … addressedToMe=true
-		// sinceNamed=24s/win=20s`): PURE STICKY. Open while she is the addressee per
-		// decideForTurn's sticky state — which closes ONLY on an explicit yield (peer name /
-		// standby). The old 20s time-window contradicted the "name once, keep talking" sticky
-		// she asked for: it muted her whenever >20s passed without the controller re-speaking
-		// (e.g. she typed a question, or talked to a peer for 20s). The window is dropped;
-		// _NAMEGATE_WINDOW survives only in the observability reason string for context.
-		const _withinNameWindow = (s as any)._turnAudioAllowed
-				|| (s.gate?.lastAddressedToMe ?? true);
+			// #1456 (Susan 2026-06-04, "修", confirmed via `✂ MUTED from start … addressedToMe=false
+		// sinceNamed=<epoch>`): ACTIVE-mode gate keys on the controller's SPEAKER-ID, not
+		// name-text. STT mangles "Maddy" → "Padmani"/"Hamdi" (the root of the whole mute saga),
+		// so requiring a name-match to open is fundamentally unreliable. By speaker-id it is
+		// deterministic: in active mode Maddy speaks iff the CONTROLLER is who just spoke
+		// (s.lastSpeaker === VOICE_CONTROLLER) — a peer speaking keeps her muted ("answer the
+		// owner only"). The latch keeps an in-progress reply going. An explicit standby flips
+		// meetingMode (handled by the meeting branch), so "go quiet" still works. Meeting-mode
+		// WAKE still uses the name-gate (separate branch); only active-mode output is by id.
+		const _controllerIsSpeaker = (s as any).lastSpeaker === VOICE_CONTROLLER;
+		const _withinNameWindow = (s as any)._turnAudioAllowed || _controllerIsSpeaker;
 			const _audioOpen = s.allowAckAudible
 				|| (_nowMs < ((s as any)._forceAudibleUntil || 0))  // #1456: force-audible window after a mode switch (ack guaranteed heard)
 				|| (!s.meetingMode && (VOICE_CONTROLLER ? _withinNameWindow : true));
@@ -1459,7 +1461,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// never opened. Distinguishing them needs recv-count + forceAudible in the reason.
 				const _sinceNamed = _nowMs - ((s as any)._controllerNamedAt || 0);
 				const _forceAudible = _nowMs < ((s as any)._forceAudibleUntil || 0);
-				const _reason = `meetingMode=${s.meetingMode} allowAck=${!!s.allowAckAudible} forceAudible=${_forceAudible} addressedToMe=${s.gate?.lastAddressedToMe ?? 'n/a'} sinceNamed=${_sinceNamed}ms/win=${_NAMEGATE_WINDOW}ms recv=${(s as any)._recvThisTurn}`;
+				const _reason = `meetingMode=${s.meetingMode} allowAck=${!!s.allowAckAudible} forceAudible=${_forceAudible} ctrlIsSpeaker=${(s as any).lastSpeaker === VOICE_CONTROLLER} lastSpeaker=${(s as any).lastSpeaker} addressedToMe=${s.gate?.lastAddressedToMe ?? 'n/a'} recv=${(s as any)._recvThisTurn}`;
 				if ((s as any)._wasPlaying) {
 					(s as any)._wasPlaying = false;
 					console.log(`${ts()} [Audio] ✂ SUPPRESSED mid-reply — ${_reason} (chunks so far=${outChunks})`);
