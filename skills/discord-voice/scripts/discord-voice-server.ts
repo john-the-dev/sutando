@@ -1428,10 +1428,9 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// the EXACT reason to sqlite + log so the cause is CONFIRMED, never guessed.
 				(s as any)._wasPlaying = false;
 				const _sinceNamed = _nowMs - ((s as any)._controllerNamedAt || 0);
-				const _reason = s.meetingMode ? 'meetingMode=true'
-					: VOICE_CONTROLLER && _sinceNamed >= _NAMEGATE_WINDOW
-						? `name-window expired (${_sinceNamed}ms ≥ ${_NAMEGATE_WINDOW}ms since you last named me)`
-						: 'gate closed (other)';
+				// Granular reason (Susan 2026-06-05: "别猜"; vague "gate closed (other)" wasn't
+				// enough to confirm). Dump every gate input so the cause is unambiguous from the row.
+				const _reason = `meetingMode=${s.meetingMode} allowAck=${!!s.allowAckAudible} addressedToMe=${s.gate?.lastAddressedToMe ?? 'n/a'} sinceNamed=${_sinceNamed}ms/win=${_NAMEGATE_WINDOW}ms`;
 				console.log(`${ts()} [Audio] ✂ SUPPRESSED mid-reply — ${_reason} (chunks so far=${outChunks})`);
 				try { recordConversation('discord-agent', `✂ audio cut mid-reply — ${_reason}`, s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
 			}
