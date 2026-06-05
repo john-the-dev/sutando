@@ -863,14 +863,19 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 		tools[i] = {
 			...t,
 			execute: async (args: any) => {
-				// #1456: in strict controller mode, when the bot is gated silent
-				// (meetingMode — not addressed by the controller) it must be INERT:
-				// block action tools too, not just audio. Gemini ignores the meeting-
-				// mode "do NOT call tools" prompt (it fired `work` while silent —
-				// Susan 2026-06-04 "maddy 还在"). Deterministic block here enforces it.
-				if (VOICE_CONTROLLER && s.meetingMode) {
-					console.log(`${ts()} [NameGate] tool '${t.name}' blocked — bot gated silent (not addressed by controller)`);
-					return { status: 'silent', message: 'Gated: the bot is silent until the controller addresses it.' };
+				// #1456 (refactor 2026-06-05): in controller mode the bot is INERT unless
+				// the controller addressed it — block action tools by the SAME precise gate
+				// as audio (controller named it within the window, or an ack is in flight),
+				// not just meetingMode. Gemini ignores the "do NOT call tools" prompt and
+				// fired `work` while gated (Susan "maddy 还在"); this enforces it deterministically.
+				if (VOICE_CONTROLLER) {
+					const _win = Number(process.env.SUTANDO_NAMEGATE_WINDOW_MS) || 12000;
+					const _allowed = s.allowAckAudible
+						|| (!s.meetingMode && (Date.now() - ((s as any)._controllerNamedAt || 0) < _win));
+					if (!_allowed) {
+						console.log(`${ts()} [NameGate] tool '${t.name}' blocked — controller hasn't addressed the bot`);
+						return { status: 'silent', message: 'Gated: the bot is silent until the controller addresses it.' };
+					}
 				}
 				const tier = currentTier(s);
 				const ok = toolAllowed(need, tier);
@@ -1267,29 +1272,12 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 	await session.start();
 	console.log(`${ts()} [Bodhi] VoiceSession started on port ${bodhiPort} for ${sessionId}`);
 
-	// #1456 IMMEDIATE WAKE (Susan 2026-06-04: "我说 hi Maddy 它应该立刻 switch 到 active,
-	// 而不是叫了两三遍不理我"). The meetingMode flip in turn.end is ONE TURN LATE, so the
-	// first "hi Maddy" while silent was ignored. Hook the INPUT transcription so the
-	// controller naming this bot flips it ACTIVE the instant it's heard — same turn,
-	// no lag. lastSpeaker (updated on speaking.start) gates it to the controller.
-	try {
-		const _wt = (session as any).transport;
-		if (_wt) {
-			const _origIn = _wt.onInputTranscription?.bind(_wt);
-			_wt.onInputTranscription = (text: string) => {
-				try {
-					if (s.meetingMode && _namesThisBot(text) &&
-						(!VOICE_CONTROLLER || s.turnSpeakers.has(VOICE_CONTROLLER) || s.lastSpeaker === VOICE_CONTROLLER)) {
-						s.meetingMode = false;
-						s.allowAckAudible = true;
-						(s as any)._ackEmitted = false;
-						console.log(`${ts()} [NameGate] IMMEDIATE wake — controller named the bot: "${text.slice(0, 50)}"`);
-					}
-				} catch {}
-				_origIn?.(text);
-			};
-		}
-	} catch {}
+	// (Refactor 2026-06-05) The mixed-input onInputTranscription immediate-wake was
+	// REMOVED here — it keyed off the混音 turn (turnSpeakers.has(controller)), which is
+	// the loose "someone named it while you were present" heuristic Susan rejected.
+	// The PRECISE wake now lives in transcribeAndRecordUtterance (per-user STT): only
+	// the controller's OWN clean utterance naming the bot exits meeting mode. Single
+	// authority, no mixed-turn conflict.
 
 	// Clear any STALE 👁 screen-share indicator left by a previous session that
 	// crashed without cleaning up (the Set-Voice-Channel-Status API needs the bot
@@ -1316,10 +1304,15 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// expiring mid-reply must NOT cut off later sentences. The latch is reset
 			// at turn.end, so the window only governs whether a NEW turn opens.
 			const _NAMEGATE_WINDOW = Number(process.env.SUTANDO_NAMEGATE_WINDOW_MS) || 12000;
-			const _audioOpen = VOICE_CONTROLLER
-				? (s.allowAckAudible || (s as any)._turnAudioAllowed
-					|| (Date.now() - ((s as any)._controllerNamedAt || 0) < _NAMEGATE_WINDOW))
-				: (!s.meetingMode || s.allowAckAudible);
+			// Coherent gate (refactor 2026-06-05): allowAckAudible (entry/wake ack) always
+			// passes. Else in MEETING mode → fully silent (note-taker). In ACTIVE mode + a
+			// controller set → PRECISE per-stream gate: speak only if the controller's OWN
+			// utterance named the bot within the window (or the latch keeps an in-progress
+			// reply going). No controller → legacy (active = speak freely).
+			const _withinNameWindow = (s as any)._turnAudioAllowed
+				|| (Date.now() - ((s as any)._controllerNamedAt || 0) < _NAMEGATE_WINDOW);
+			const _audioOpen = s.allowAckAudible
+				|| (!s.meetingMode && (VOICE_CONTROLLER ? _withinNameWindow : true));
 			if (_audioOpen) {
 				(s as any)._turnAudioAllowed = true;  // latch for the rest of this turn
 				pushAudio(pcm48Stereo);
@@ -1464,30 +1457,16 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// magic word is "za warudo" (summon). Screen sharing is now driven solely
 				// by the join_discord_screen inline tool (the model calls it on "join/share
 				// screen"), so there is no "za warudo screen" phrase here anymore.
-				// Speak-gate (name-gate): when a peer bot is present, stay silent and
-				// only break silence for turns ADDRESSED to THIS bot by name.
-				// decideForTurn auto-allows when no peer is configured (single-bot).
-				//
-				// #1456 strict controller mode (Susan 2026-06-04: "maddy 只能回复我"):
-				// when a VOICE_CONTROLLER is designated, the bot is name-gated AT ALL
-				// TIMES (not just after meeting entry) AND only the CONTROLLER may break
-				// its silence — owner-tier alone is NOT enough (a relay account like 879
-				// is owner-tier, which is exactly why it kept babbling at the other bot /
-				// its own echo). Without a controller set → legacy behavior (active until
-				// meeting entry, then owner-may-break-silence).
-				const _strictController = !!VOICE_CONTROLLER;
-				if (s.gate && (s.meetingEntered || _strictController)) {
+				// Speak-gate (name-gate) — LEGACY (no controller) path only.
+				// (Refactor 2026-06-05) When a VOICE_CONTROLLER is set, meetingMode is NOT
+				// auto-flipped per mixed turn here — that fought the precise per-stream audio
+				// gate and caused the thrash. In controller mode, meetingMode changes ONLY via
+				// the explicit standby cue (→meeting) and the precise per-user-STT wake
+				// (controller names the bot →active); the per-utterance speak decision is the
+				// audio-output gate. So this block runs only for the legacy owner-tier model.
+				if (!VOICE_CONTROLLER && s.gate && s.meetingEntered) {
 					const addressed = decideForTurn(s.gate, item.content) !== 'drop';
-					const _byController = !VOICE_CONTROLLER ||
-						_turnHumans.includes(VOICE_CONTROLLER);  // controller participated (not necessarily sole — a relay/peer is usually also audible)
-					// Strict: speak only if addressed by name AND the controller is the
-					// sole human speaker. Legacy: owner-may-break-silence on an addressed turn.
-					const wantSilent = _strictController
-						? !(addressed && _byController)
-						: !breakSilenceAllowed(addressed, currentTier(s), SUTANDO_ALLOW_OPEN_FLOOR);
-					if (addressed && wantSilent) {
-						console.log(`${ts()} [NameGate] addressed but ${_strictController ? 'not by controller' : `non-owner (tier=${currentTier(s)})`} — staying silent`);
-					}
+					const wantSilent = !breakSilenceAllowed(addressed, currentTier(s), SUTANDO_ALLOW_OPEN_FLOOR);
 					if (wantSilent !== s.meetingMode) {
 						s.meetingMode = wantSilent;
 						console.log(`${ts()} [NameGate] meetingMode=${wantSilent} for: "${item.content.slice(0, 50)}"`);
