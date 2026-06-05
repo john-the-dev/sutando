@@ -223,16 +223,9 @@ function _namesThisBot(text: string): boolean {
 		.map(n => n.toLowerCase().trim()).filter(Boolean)
 		.some(n => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\\\]/g, '\\$&')}\\b`).test(lc));
 }
-// (Susan 2026-06-05 sticky conversation) Does the utterance name a DIFFERENT bot (a peer,
-// not THIS one)? When the controller addresses a peer ("Lucy, …"), this bot YIELDS — it
-// stops treating the controller's ongoing turns as directed at itself.
-function _namesAPeer(text: string): boolean {
-	const lc = text.toLowerCase();
-	const mine = new Set([STAND_NAME, ...STAND_NAME_ALIASES].map(n => n.toLowerCase().trim()).filter(Boolean));
-	return PEER_NAMES.map(n => n.toLowerCase().trim())
-		.filter(p => p && !mine.has(p))
-		.some(n => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\\\]/g, '\\$&')}\\b`).test(lc));
-}
+// (peer-naming detection lives in name-gate.ts decideForTurn / isAddressedToOther — no
+//  local copy needed; the sticky gate reads s.gate.lastAddressedToMe, fed by decideForTurn
+//  on the controller's own per-user stream.)
 
 // --- Screen sharing: REMOVED from discord-voice (#1427, Susan 2026-06-04) -----
 // All screen-push machinery (setScreenPush, the 👁 indicators, vision-push.txt,
@@ -899,7 +892,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 				if (VOICE_CONTROLLER) {
 					const _win = Number(process.env.SUTANDO_NAMEGATE_WINDOW_MS) || 20000;
 					const _allowed = s.allowAckAudible
-						|| (!s.meetingMode && (s as any)._addressedToMe && (Date.now() - ((s as any)._controllerNamedAt || 0) < _win));
+						|| (!s.meetingMode && (s.gate?.lastAddressedToMe ?? true) && (Date.now() - ((s as any)._controllerNamedAt || 0) < _win));
 					if (!_allowed) {
 						console.log(`${ts()} [NameGate] tool '${t.name}' blocked — controller hasn't addressed the bot`);
 						return { status: 'silent', message: 'Gated: the bot is silent until the controller addresses it.' };
@@ -1051,28 +1044,27 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 		// user utterance — 879/Lucy naming the bot can NOT open it, because this is
 		// the controller's separate Discord stream. Stamp the time; the audio-output
 		// gate reads this window. Also wake immediately if currently silent.
-		// #1456 STICKY conversation (Susan 2026-06-05, confirmed via the ✂ log: a reply was
-		// cut "name-window expired 41190ms" — she'd named Maddy once 41s earlier and kept
-		// talking without re-naming). Once she addresses Maddy, the conversation STAYS open
-		// while she keeps speaking; she yields it to a peer only by naming the peer. No need
-		// to repeat "Maddy" every window. Keys ONLY off her own (controller) per-user stream.
-		if (VOICE_CONTROLLER && userId === VOICE_CONTROLLER) {
-			if (_namesThisBot(transcript)) {
-				(s as any)._addressedToMe = true;
-				(s as any)._controllerNamedAt = Date.now();
-				// Wake to active UNLESS this same utterance is a meeting-ENTER command — naming
-				// + "switch to meeting mode" in one breath was waking and entering at once and
-				// cancelling out (Susan: "switch to meeting mode 没真的 switch"). Let the enter-cue win.
-				if (s.meetingMode && !_isEnterMeetingPhrase(transcript)) {
+		// #1456 STICKY conversation — use the CANONICAL gate (name-gate.ts decideForTurn +
+		// GateState.lastAddressedToMe), NOT a hand-rolled copy (Susan 2026-06-05: "sticky 早
+		//就实现了，去 sutando-skills PR16 看"). Feed it the controller's OWN per-user STT
+		// transcript so only HER stream moves the sticky state (879/Lucy can't). Semantics
+		// (from decideForTurn): my-name→allow+sticky, peer-name→drop, standby→drop, neither→
+		// carries. Confirmed need via the ✂ log: a reply was cut "name-window expired 41190ms"
+		// because she named Maddy once and kept talking 41s without re-naming.
+		if (VOICE_CONTROLLER && userId === VOICE_CONTROLLER && s.gate) {
+			const _wasAddressed = s.gate.lastAddressedToMe;
+			decideForTurn(s.gate, transcript);  // updates s.gate.lastAddressedToMe in-place
+			if (s.gate.lastAddressedToMe) {
+				(s as any)._controllerNamedAt = Date.now();  // keep window fresh while she's with me (sticky)
+				// Fresh name (false→true) wakes from meeting mode — unless THIS utterance is a
+				// meeting-ENTER command (naming + "switch to meeting mode" in one breath was
+				// waking AND entering and cancelling out; let the enter-cue win).
+				if (!_wasAddressed && s.meetingMode && !_isEnterMeetingPhrase(transcript)) {
 					s.meetingMode = false; s.allowAckAudible = true; (s as any)._ackEmitted = false;
 					try { recordConversation('discord-agent', '⇄ MODE → active (controller named the bot)', s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
 				}
-				console.log(`${ts()} [NameGate] controller named the bot in OWN utterance: "${transcript.slice(0, 50)}"`);
-			} else if (_namesAPeer(transcript)) {
-				(s as any)._addressedToMe = false;  // she's talking to another bot now → yield
-				console.log(`${ts()} [NameGate] controller addressed a peer — yielding the conversation: "${transcript.slice(0, 50)}"`);
-			} else if ((s as any)._addressedToMe) {
-				(s as any)._controllerNamedAt = Date.now();  // sticky: keep the Maddy conversation alive
+			} else if (_wasAddressed) {
+				console.log(`${ts()} [NameGate] controller yielded the conversation (named a peer / standby): "${transcript.slice(0, 50)}"`);
 			}
 		}
 		const spk = s.speakerNameCache.get(userId);
@@ -1368,7 +1360,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// the window (refreshed on every controller utterance, so it only lapses on a long
 			// silence or after she yields to a peer). The latch keeps an in-progress reply going.
 			const _withinNameWindow = (s as any)._turnAudioAllowed
-				|| ((s as any)._addressedToMe && (_nowMs - ((s as any)._controllerNamedAt || 0) < _NAMEGATE_WINDOW));
+				|| ((s.gate?.lastAddressedToMe ?? true) && (_nowMs - ((s as any)._controllerNamedAt || 0) < _NAMEGATE_WINDOW));
 			const _audioOpen = s.allowAckAudible
 				|| (!s.meetingMode && (VOICE_CONTROLLER ? _withinNameWindow : true));
 			if (_audioOpen) {
