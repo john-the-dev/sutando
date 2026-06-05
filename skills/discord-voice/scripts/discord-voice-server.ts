@@ -125,7 +125,7 @@ const STAND_NAME_ALIASES = (() => {
 	return [process.env.SUTANDO_STAND_ALIASES, process.env.SUTANDO_NAME_ALIASES, ...fromJson]
 		.filter(Boolean).join(',').split(',').map(s => s.trim()).filter(Boolean);
 })();
-const PEER_NAMES = (process.env.SUTANDO_PEER_NAMES ?? 'Lucy,Maddy,Mini,Pro,Sutando')
+const PEER_NAMES = (process.env.SUTANDO_PEER_NAMES ?? '')
 	.split(',').map(s => s.trim()).filter(Boolean)
 	.filter(n => n.toLowerCase() !== STAND_NAME.toLowerCase());
 
@@ -190,9 +190,9 @@ function _isWakePhrase(text: string): boolean {
 }
 // Enter-meeting cues (#1427): the bot joins active and switches to silent
 // meeting/note-taker mode only when the user cues it with one of these.
-// (Susan 2026-06-05) DELIBERATE mode-switch commands only. Removed the note-CONTENT
-// and filler phrases that conflated "record this" / "wait a sec" with "switch to silent
-// mode": 'take notes', 'take meeting note(s)', '记笔记', '记录模式', 'hold on'. Asking the
+// DELIBERATE mode-switch commands only. Removed the note-CONTENT and filler
+// phrases that conflated "record this" / "wait a sec" with "switch to silent
+// mode" (e.g. 'take notes', 'take meeting note(s)', 'hold on'). Asking the
 // bot to write something down (add_to_vault) must NOT also flip it into meeting mode.
 const ENTER_MEETING_PHRASES = ['meeting mode', 'be silent', 'go silent',
 	'stand by', 'standby', 'passive mode',
@@ -202,11 +202,11 @@ function _isEnterMeetingPhrase(text: string): boolean {
 	const lower = text.toLowerCase();
 	return ENTER_MEETING_PHRASES.some(p => lower.includes(p));
 }
-// (Susan 2026-06-05) A mode command is a SHORT imperative ("Maddy, stand by"), NOT the
-// phrase buried in narrative speech ("…I told you to stand by so you wouldn't…"). Gate the
+// A mode command is a SHORT imperative ("<bot name>, stand by"), NOT the phrase
+// buried in narrative speech ("…I told you to stand by so you wouldn't…"). Gate the
 // meeting cue on utterance length so a merely-REFERENCED phrase doesn't false-trigger a
-// switch (which silenced the bot mid-reply → "最后一句没听到"). CJK has no spaces → also
-// allow on short char length. Env-tunable.
+// switch (which would silence the bot mid-reply and drop its last sentence). CJK has
+// no spaces → also allow on short char length. Env-tunable.
 const _CMD_MAX_WORDS = Number(process.env.SUTANDO_MODECMD_MAX_WORDS) || 8;
 function _looksLikeCommand(text: string): boolean {
 	const t = text.trim();
@@ -288,7 +288,7 @@ const ALLOWED_BOT_USER_IDS = new Set(
 // enforcement to decide who to refuse-join-against / leave-when-detected.
 // Override via `SUTANDO_PEER_USERNAME_PATTERNS=Foo,Bar` if the naming
 // convention drifts. Match: `username.startsWith(pattern)`, case-sensitive.
-const SUTANDO_PEER_USERNAME_PATTERNS = (process.env.SUTANDO_PEER_USERNAME_PATTERNS ?? 'Sutando-,Sutando_,Lucy-,Lucy_,Maddy,Mini')
+const SUTANDO_PEER_USERNAME_PATTERNS = (process.env.SUTANDO_PEER_USERNAME_PATTERNS ?? 'Sutando-,Sutando_')
 	.split(',').map(s => s.trim()).filter(Boolean);
 
 // Disable #1089 single-bot enforcement (testing-only). Set to "1" to allow
@@ -592,8 +592,8 @@ interface DiscordVoiceSession {
 // (legacy DISCORD_VOICE_OWNER) overrides to owner.
 function currentTier(s: DiscordVoiceSession): Tier {
 	// Tier of WHO issued the command — the most-recent speaker (lastSpeaker), NOT
-	// the most-restrictive of everyone present. (Susan 2026-06-04: "关键要看是谁下
-	// 的命令".) The owner's command must work even with a non-owner in the channel;
+	// the most-restrictive of everyone present. What matters is who gave the
+	// command. The owner's command must work even with a non-owner in the channel;
 	// a non-owner's command is gated to their own tier. Using mostRestrictiveTier
 	// over ALL turn speakers let any guest mute/deny the owner's own commands.
 	// turnSpeakers (all participants) is only the fallback when no single last
@@ -811,7 +811,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 				'Switch THIS bot between active mode and silent meeting / note-taking mode. ' +
 				'Call switch_mode("meeting") when the user asks you to take notes, go silent, be quiet, stand by / standby, hold on, wait, or enter meeting/passive mode. ' +
 				'Call switch_mode("active") when the user asks you to come back, resume, wake up, or be active. ' +
-				'IMPORTANT: only call this when the user is addressing YOU BY NAME in the command (e.g. "Hi Maddy, …" / "Maddy, …"). If they say a switch command WITHOUT your name, do NOT call it — it is meant for the other bot. ' +
+				'IMPORTANT: only call this when the user is addressing YOU BY NAME in the command (e.g. "Hi <your name>, …" / "<your name>, …"). If they say a switch command WITHOUT your name, do NOT call it — it is meant for the other bot. ' +
 				'And only call it when they genuinely mean to switch your mode — not when "stand by" appears inside a narrative sentence ("…I told you to stand by so…"). ' +
 				'Prefer THIS tool over inferring the mode from raw words — speech-to-text mangles phrases like "meeting mode".',
 			parameters: z.object({ mode: z.enum(['active', 'meeting']) }),
@@ -928,14 +928,14 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 				// the controller addressed it — block action tools by the SAME precise gate
 				// as audio (controller named it within the window, or an ack is in flight),
 				// not just meetingMode. Gemini ignores the "do NOT call tools" prompt and
-				// fired `work` while gated (Susan "maddy 还在"); this enforces it deterministically.
+				// fired `work` while gated (the bot kept acting while it should have been silent); this enforces it deterministically.
 				if (VOICE_CONTROLLER) {
 					const _win = Number(process.env.SUTANDO_NAMEGATE_WINDOW_MS) || 20000;
 					const _addressed = (s.gate?.lastAddressedToMe ?? true) && (Date.now() - ((s as any)._controllerNamedAt || 0) < _win);
 					// switch_mode requires the controller to have EXPLICITLY named THIS bot in the
 					// immediate command (≤10s) — NOT the sticky state — so a bare "switch to active
-					// mode" switches nobody, and only "Hi Maddy, switch …" switches Maddy (Susan
-					// 2026-06-05: "不要我一说 switch 两个全都 switch"). It's exempt from the !meetingMode
+					// mode" switches nobody, and only "Hi <bot name>, switch …" switches this bot
+					// (the controller must name THIS bot for it to switch). It's exempt from the !meetingMode
 					// clause so it can also EXIT meeting mode. Other tools stay inert while silent.
 					const _SWITCH_FRESH_MS = Number(process.env.SUTANDO_SWITCHMODE_FRESH_MS) || 10000;
 					const _namedFresh = Date.now() - ((s as any)._namedThisBotAt || 0) < _SWITCH_FRESH_MS;
@@ -1087,14 +1087,14 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 		}
 		const transcript = (data.candidates[0].content?.parts?.[0]?.text ?? '').trim();
 		if (!transcript) return; // skip empty/whitespace
-		// #1456 PRECISE name-gate (Susan 2026-06-04: "exactly 是我说的，不要什么只要
-		// 有一个说了之类的"): the gate keys ONLY off the CONTROLLER's OWN clean per-
+		// #1456 PRECISE name-gate: the gate must key off EXACTLY who spoke — not a
+		// loose "if anyone named the bot" rule. It keys ONLY off the CONTROLLER's OWN clean per-
 		// user utterance — 879/Lucy naming the bot can NOT open it, because this is
 		// the controller's separate Discord stream. Stamp the time; the audio-output
 		// gate reads this window. Also wake immediately if currently silent.
 		// #1456 STICKY conversation — use the CANONICAL gate (name-gate.ts decideForTurn +
-		// GateState.lastAddressedToMe), NOT a hand-rolled copy (Susan 2026-06-05: "sticky 早
-		//就实现了，去 sutando-skills PR16 看"). Feed it the controller's OWN per-user STT
+		// GateState.lastAddressedToMe), NOT a hand-rolled copy (the sticky-conversation
+		// behavior is already implemented there). Feed it the controller's OWN per-user STT
 		// transcript so only HER stream moves the sticky state (879/Lucy can't). Semantics
 		// (from decideForTurn): my-name→allow+sticky, peer-name→drop, standby→drop, neither→
 		// carries. Confirmed need via the ✂ log: a reply was cut "name-window expired 41190ms"
@@ -1281,10 +1281,10 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		// (below) applies only once s.meetingEntered is true.
 		// The toggle Susan wants is active ⟷ meeting: "standby"/"hold on" → meeting
 		// (silent), "hi maddy" → back to active. Join ACTIVE; the cues flip state.
-		// Maddy ALWAYS joins ACTIVE (Susan's standing rule, reaffirmed 2026-06-04:
-		// "maddy 进来是 active mode 你不要回退"). standby/"hold on" → meeting (silent),
-		// "hi maddy" → active. Do NOT join silent — that made it ignore her when
-		// addressed (one-turn-lag). The strict controller gate below still keeps it
+		// The bot ALWAYS joins ACTIVE (standing rule — do not regress this).
+		// standby/"hold on" → meeting (silent), "hi <bot name>" → active. Do NOT join
+		// silent — that made it ignore the controller when addressed (one-turn-lag).
+		// The strict controller gate below still keeps it
 		// from answering anyone but the controller; the tool-gate keeps it inert
 		// while silent.
 		meetingMode: false,
@@ -1403,7 +1403,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// — deterministic, at output time, ignores the mixed turn entirely so 879/Lucy
 			// can't open it. allowAckAudible still lets an entry/wake ack through. Without a
 			// controller → legacy meeting-mode suppression.
-			// Per-turn LATCH (Susan 2026-06-04: "第二句我没听到"): once a reply STARTS
+			// Per-turn LATCH (fixes a follow-up sentence being dropped): once a reply STARTS
 			// while addressed (within window), let the WHOLE turn play — the window
 			// expiring mid-reply must NOT cut off later sentences. The latch is reset
 			// at turn.end, so the window only governs whether a NEW turn opens.
@@ -1414,26 +1414,26 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// utterance named the bot within the window (or the latch keeps an in-progress
 			// reply going). No controller → legacy (active = speak freely).
 			//
-			// LATCH tracks Maddy's CONTINUOUS audio, NOT conversation turns (Susan 2026-06-05
-			// "最后一句还是没听到" in ACTIVE mode): Lucy/879 interrupting mid-reply fired turn.end
-			// and reset the latch, so the tail got re-gated by the window and cut. Now the
-			// latch resets only on a real GAP in Maddy's own output (>1.5s) — i.e. its reply
+			// LATCH tracks the bot's CONTINUOUS audio, NOT conversation turns (fixes the
+			// last sentence being dropped in ACTIVE mode): a peer/relay interrupting mid-reply
+			// fired turn.end and reset the latch, so the tail got re-gated by the window and
+			// cut. Now the latch resets only on a real GAP in the bot's own output (>1.5s) — i.e. its reply
 			// actually finished — so an interruption can't sever an in-progress reply.
 			const _nowMs = Date.now();
 			if (_nowMs - ((s as any)._lastAudioTs || 0) > 1500) { (s as any)._turnAudioAllowed = false; (s as any)._audioPlayedThisTurn = false; (s as any)._recvThisTurn = 0; }
-			// #1456 observability (Susan 2026-06-04: "没记下来就补上"): count chunks RECEIVED from
+			// #1456 observability (record what isn't yet recorded): count chunks RECEIVED from
 			// Gemini this turn, NOT just chunks pushed. Without this, an ack suppressed from its
 			// FIRST chunk logged nothing — indistinguishable from "Gemini emitted no audio at all".
 			(s as any)._recvThisTurn = ((s as any)._recvThisTurn || 0) + 1;
-			// Sticky: open while she's addressing Maddy (_addressedToMe) and has spoken within
+			// Sticky: open while the controller is addressing the bot (_addressedToMe) and has spoken within
 			// the window (refreshed on every controller utterance, so it only lapses on a long
-			// silence or after she yields to a peer). The latch keeps an in-progress reply going.
-			// #1456 (Susan 2026-06-04, "修", confirmed via `✂ MUTED from start … addressedToMe=false
-		// sinceNamed=<epoch>`): ACTIVE-mode gate keys on the controller's SPEAKER-ID, not
-		// name-text. STT mangles "Maddy" → "Padmani"/"Hamdi" (the root of the whole mute saga),
+			// silence or after the controller yields to a peer). The latch keeps an in-progress reply going.
+			// #1456 (confirmed via the `✂ MUTED from start … addressedToMe=false
+		// sinceNamed=<epoch>` observability log): ACTIVE-mode gate keys on the controller's SPEAKER-ID, not
+		// name-text. STT mangles the bot's name (e.g. "Maddy" → "Padmani"/"Hamdi") — the root of the whole mute saga —
 		// so requiring a name-match to open is fundamentally unreliable. By speaker-id it is
-		// deterministic: in active mode Maddy speaks iff the CONTROLLER is who just spoke
-		// (s.lastSpeaker === VOICE_CONTROLLER) — a peer speaking keeps her muted ("answer the
+		// deterministic: in active mode the bot speaks iff the CONTROLLER is who just spoke
+		// (s.lastSpeaker === VOICE_CONTROLLER) — a peer speaking keeps it muted ("answer the
 		// owner only"). The latch keeps an in-progress reply going. An explicit standby flips
 		// meetingMode (handled by the meeting branch), so "go quiet" still works. Meeting-mode
 		// WAKE still uses the name-gate (separate branch); only active-mode output is by id.
@@ -1454,9 +1454,9 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 					console.log(`${ts()} [Audio] outbound chunks: ${outChunks} (last=${pcm48Stereo.length}B)`);
 				}
 			} else {
-				// #1456 OBSERVABILITY (Susan 2026-06-05: "别猜，没记下来就补上"): audio is
+				// #1456 OBSERVABILITY (don't guess — record the inputs): audio is
 				// SUPPRESSED. Record the EXACT gate inputs so the cause is CONFIRMED, never guessed.
-				// Two cases: (a) mid-reply cut ("最后一句没听到") — was playing, now gated; (b) muted
+				// Two cases: (a) mid-reply cut (last sentence dropped) — was playing, now gated; (b) muted
 				// from the FIRST chunk (the meeting-ack case) — Gemini DID emit audio but the gate
 				// never opened. Distinguishing them needs recv-count + forceAudible in the reason.
 				const _sinceNamed = _nowMs - ((s as any)._controllerNamedAt || 0);
@@ -1595,7 +1595,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 					(s as any)._ackEmitted = false;
 					console.log(`${ts()} [Meeting] enter-meeting cue — switching to meeting mode: "${item.content.slice(0, 60)}"`);
 					try { writeFileSync(VOICE_MODE_FILE, 'meeting'); } catch {}
-					// #1456 (Susan 2026-06-04 "maddy 没有 acknowledge meeting mode"): in
+					// #1456 (the bot did not acknowledge meeting mode): in
 					// meeting mode Gemini just goes silent and swallows the confirmation,
 					// so the user never hears an ack. allowAckAudible only un-suppresses
 					// the ack turn's audio — it doesn't make Gemini SPEAK one. Inject a
