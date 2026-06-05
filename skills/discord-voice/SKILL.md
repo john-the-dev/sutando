@@ -61,6 +61,7 @@ DISCORD_VOICE_SERVER=1 \
 Optional env:
 - `VOICE_MODEL` / `VOICE_NATIVE_AUDIO_MODEL` — mirrors `voice-agent.ts`.
 - `SUTANDO_WORKSPACE` — workspace root for tasks/results/data/logs **and the per-user config** (see below).
+- `SUTANDO_ALLOW_OPEN_FLOOR=1` — opt in to letting any speaker in the channel wake the bot by name (meeting-companion v2 consent question). Default off → owner-only addressing: only the owner may break the bot's silence by name, non-owners saying the bot's name are ignored.
 
 `DISCORD_VOICE_SERVER=1` flips the polymorphic `dismiss` tool (`src/meeting-tools.ts`) into "SIGTERM self" mode instead of its default Zoom AppleScript path. Without it, asking Sutando to "leave"/"dismiss" in the channel would try to leave a (non-existent) Zoom meeting.
 
