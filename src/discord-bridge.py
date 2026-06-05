@@ -2313,35 +2313,12 @@ async def _handle_discord_message(message, force=False):
             except Exception as e:
                 print(f"  [thread-engage] failed to update access.json: {e}", flush=True)
 
-        # Typed screen-push sub-command (e.g. "za warudo screen" / "stop screen").
-        # Route it to the live voice session in this channel via the dvoice pull
-        # namespace instead of summoning. Owner-only. Kept TEXT-only on purpose:
-        # spoken commands clash with a Zoom mic (Susan 2026-06-04). The session's
-        # channelScan picks up the marker and calls setScreenPush. Checked before
-        # the join phrase since "za warudo screen" is intentionally NOT a summon.
-        try:
-            if str(message.author.id) in load_allowed():
-                _sp_lo = (text or "").strip().lower()
-                _SP_OFF = ("za warudo stop screen", "stop screen", "stop watching my screen")
-                _SP_ON = ("za warudo screen", "zawarudo screen", "start screen push", "watch my screen")
-                _sp_marker = ("[screen-push:off]" if any(p in _sp_lo for p in _SP_OFF)
-                              else "[screen-push:on]" if any(p in _sp_lo for p in _SP_ON)
-                              else None)
-                if _sp_marker:
-                    from result_channel_key import discord_voice_key
-                    _sp_key = discord_voice_key(str(message.channel.id))
-                    _sp_path = RESULTS_DIR / f"{_sp_key}.task-{int(time.time() * 1000)}.txt"
-                    _sp_path.write_text(_sp_marker)
-                    print(f"  [screen-push] owner typed '{_sp_lo[:30]}' -> {_sp_marker} ({_sp_path.name})", flush=True)
-                    try:
-                        await message.channel.send(
-                            "👁 Screen-push on — sent to the voice session." if _sp_marker == "[screen-push:on]"
-                            else "⏹ Screen-push off.")
-                    except Exception:
-                        pass
-                    return
-        except Exception as _sp_e:
-            print(f"  [screen-push] route failed: {_sp_e}", flush=True)
+        # Text/magic-word screen-push REMOVED (#1427, Susan 2026-06-05). Screen
+        # sharing in a voice session is owned entirely by the voice-invoked
+        # join_discord_screen tool (src/vision-tools.ts) — typed phrases no longer
+        # start screen-push; only voice does. The old setScreenPush consumer was
+        # already gone, so this typed path was an orphan that still posted a
+        # "Screen-push on" message (fired on every bot in the channel).
 
         # Magic-word fast path: an owner saying the join phrase MUST bypass
         # requireMention — otherwise the magic word can't fire in any guild
