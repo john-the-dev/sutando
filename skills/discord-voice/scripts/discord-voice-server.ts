@@ -818,6 +818,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 			execution: 'inline',
 			async execute(args) {
 				const { mode } = args as { mode: 'active' | 'meeting' };
+				(s as any)._forceAudibleUntil = Date.now() + 6000;  // #1456: guarantee the mode-switch ack is heard (allowAck races)
 				if (mode === 'meeting') {
 					if (!s.meetingMode) {
 						s.meetingEntered = true; s.meetingMode = true; s.allowAckAudible = true; (s as any)._ackEmitted = false;
@@ -1424,6 +1425,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			const _withinNameWindow = (s as any)._turnAudioAllowed
 				|| ((s.gate?.lastAddressedToMe ?? true) && (_nowMs - ((s as any)._controllerNamedAt || 0) < _NAMEGATE_WINDOW));
 			const _audioOpen = s.allowAckAudible
+				|| (_nowMs < ((s as any)._forceAudibleUntil || 0))  // #1456: force-audible window after a mode switch (ack guaranteed heard)
 				|| (!s.meetingMode && (VOICE_CONTROLLER ? _withinNameWindow : true));
 			if (_audioOpen) {
 				(s as any)._turnAudioAllowed = true;  // latch — held across continuous audio
