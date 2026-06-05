@@ -1331,12 +1331,21 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// controller set → PRECISE per-stream gate: speak only if the controller's OWN
 			// utterance named the bot within the window (or the latch keeps an in-progress
 			// reply going). No controller → legacy (active = speak freely).
+			//
+			// LATCH tracks Maddy's CONTINUOUS audio, NOT conversation turns (Susan 2026-06-05
+			// "最后一句还是没听到" in ACTIVE mode): Lucy/879 interrupting mid-reply fired turn.end
+			// and reset the latch, so the tail got re-gated by the window and cut. Now the
+			// latch resets only on a real GAP in Maddy's own output (>1.5s) — i.e. its reply
+			// actually finished — so an interruption can't sever an in-progress reply.
+			const _nowMs = Date.now();
+			if (_nowMs - ((s as any)._lastAudioTs || 0) > 1500) (s as any)._turnAudioAllowed = false;
 			const _withinNameWindow = (s as any)._turnAudioAllowed
-				|| (Date.now() - ((s as any)._controllerNamedAt || 0) < _NAMEGATE_WINDOW);
+				|| (_nowMs - ((s as any)._controllerNamedAt || 0) < _NAMEGATE_WINDOW);
 			const _audioOpen = s.allowAckAudible
 				|| (!s.meetingMode && (VOICE_CONTROLLER ? _withinNameWindow : true));
 			if (_audioOpen) {
-				(s as any)._turnAudioAllowed = true;  // latch for the rest of this turn
+				(s as any)._turnAudioAllowed = true;  // latch — held across continuous audio
+				(s as any)._lastAudioTs = _nowMs;
 				pushAudio(pcm48Stereo);
 				outChunks++;
 				if (s.allowAckAudible) (s as any)._ackEmitted = true;
@@ -1387,10 +1396,10 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 	// Transcript mirroring + result-queue drain
 	let lastProcessedIdx = 0;
 	session.eventBus.subscribe('turn.end', () => {
-		// #1456: reset the per-turn audio latch so the NEXT turn must be freshly
-		// addressed (within window) to open — the latch only keeps an already-
-		// started reply playing through window expiry.
-		(s as any)._turnAudioAllowed = false;
+		// (Refactor 2026-06-05) The audio latch is NO LONGER reset here — turn.end fires
+		// when Lucy/879 interrupts, which prematurely cut Maddy's reply. The latch now
+		// resets on a real gap in Maddy's OWN output (see handleAudioOutput), so an
+		// interruption can't sever an in-progress reply.
 		// Watchdog: a turn completed — clear the hang counters.
 		(s as any).lastTurnActivityTs = Date.now();
 		(s as any).utterancesSinceTurn = 0;
