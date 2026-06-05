@@ -229,7 +229,7 @@ function _namesThisBot(text: string): boolean {
 
 // --- Screen sharing: REMOVED from discord-voice (#1427) -----
 // All screen-push machinery (setScreenPush, the 👁 indicators, vision-push.txt,
-// the "za warudo screen" phrases) is gone. Screen sharing in a Discord voice
+// the magic-word screen phrases) is gone. Screen sharing in a Discord voice
 // session is now owned entirely by the join_discord_screen inline tool
 // (src/vision-tools.ts), which the model calls on "join/share screen". The only
 // magic word that remains is "za warudo" (summon). discord-voice attaches its
@@ -1614,10 +1614,10 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 					console.log(`${ts()} [Meeting] wake-phrase detected — exiting meeting mode: "${item.content.slice(0, 60)}"`);
 					try { writeFileSync(VOICE_MODE_FILE, 'active'); } catch {}
 				}
-				// Screen-push voice phrases REMOVED (#1427): the only
-				// magic word is "za warudo" (summon). Screen sharing is now driven solely
-				// by the join_discord_screen inline tool (the model calls it on "join/share
-				// screen"), so there is no "za warudo screen" phrase here anymore.
+				// Screen-push voice phrases REMOVED (#1427): the only magic word is the
+				// configured summon phrase. Screen sharing is now driven solely by the
+				// join_discord_screen inline tool (the model calls it on "join/share
+				// screen"), so there is no screen-push magic phrase here anymore.
 				// Speak-gate (name-gate) — LEGACY (no controller) path only.
 				// (Refactor 2026-06-05) When a VOICE_CONTROLLER is set, meetingMode is NOT
 				// auto-flipped per mixed turn here — that fought the precise per-stream audio

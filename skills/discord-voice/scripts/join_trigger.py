@@ -117,14 +117,13 @@ def message_is_join_phrase(text: str, join_phrase: str | None = None) -> bool:
     if trimmed == phrase:
         return True
     if trimmed.startswith(phrase):
-        # Per Susan 2026-06-01: only a BARE "za warudo" spawns (exact match,
-        # modulo trailing punctuation). "za warudo <word>" is reserved for
-        # sub-commands that target an ALREADY-joined session — e.g.
-        # "za warudo screen" → in-session screen-push. Matching the bare-phrase
-        # prefix here would re-spawn the bot and kill the live session before
-        # the sub-command fires. So: summon iff what follows the phrase has no
-        # alphanumeric word (punctuation/whitespace only). This also subsumes
-        # the old word-boundary check ("za warudonow" → trailing "now" → no).
+        # Only a BARE join phrase spawns (exact match, modulo trailing
+        # punctuation). "<join phrase> <word>" is reserved for sub-commands that
+        # target an ALREADY-joined session. Matching the bare-phrase prefix here
+        # would re-spawn the bot and kill the live session before the sub-command
+        # fires. So: summon iff what follows the phrase has no alphanumeric word
+        # (punctuation/whitespace only). This also subsumes the old word-boundary
+        # check (a trailing alphanumeric run after the phrase → not a summon).
         remainder = trimmed[len(phrase):]
         return not any(c.isalnum() for c in remainder)
     return False

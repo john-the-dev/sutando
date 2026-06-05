@@ -567,8 +567,8 @@ export const startVisionTool: ToolDefinition = {
 
 // "join screen" in a Discord voice channel = stream THIS machine's screen into
 // the live session (frames flow to the model), same machinery as start_vision /
-// the "za warudo screen" push. A dedicated tool keeps the model from grabbing the
-// Zoom skill's join_zoom/summon for a screen request (#1427, Susan 2026-06-04).
+// the legacy magic-word screen push. A dedicated tool keeps the model from grabbing the
+// Zoom skill's join_zoom/summon for a screen request (#1427).
 export const joinDiscordScreenTool: ToolDefinition = {
 	name: 'join_discord_screen',
 	description:
