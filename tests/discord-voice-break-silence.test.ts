@@ -1,4 +1,4 @@
-// Owner-only addressing (meeting-companion v1 boundary, Mini's design): the bot
+// Owner-only addressing (meeting-companion v1 boundary): the bot
 // breaks its silence only when a turn is addressed to it by name AND the speaker
 // is the owner — unless open-floor (v2) is enabled. Pure decision extracted from
 // the discord-voice name-gate so it's testable without a live Gemini session.

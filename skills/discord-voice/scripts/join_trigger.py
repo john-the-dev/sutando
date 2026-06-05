@@ -343,10 +343,10 @@ def summon_is_for_me(message, self_user_id) -> bool:
 
     Multiple Sutando bots watch the same channels, and `message_is_join_phrase`
     strips leading @-mentions before matching — so a bare "za warudo" fires for
-    every bot at once, and "@Maddy za warudo" fired for whichever bridge saw it
-    (the wrong bot would join: Lucy answered a Maddy summon — #1427).
+    every bot at once, and "@<bot> za warudo" fired for whichever bridge saw it
+    (the wrong bot would join: one bot answered another bot's summon — #1427).
 
-    Rule (Susan 2026-06-03): answer iff THIS bot is @-mentioned, OR no OTHER
+    Rule (owner, 2026-06-03): answer iff THIS bot is @-mentioned, OR no OTHER
     Sutando bot is @-mentioned. A summon that names a different bot is meant for
     that bot, so we stay out. `self_user_id is None` (caller didn't supply an
     identity) preserves the pre-#1427 behavior — always answer.

@@ -2,7 +2,7 @@
 // See notes/multi-bot-voice-gate-redesign.md for the full design + test matrix.
 
 export interface GateConfig {
-	/** This instance's stand name, e.g. "Lucy". Empty disables the gate. */
+	/** This instance's stand name, e.g. "Echo". Empty disables the gate. */
 	instanceName: string;
 	/** Spoken-form aliases for instanceName (ASR variants). */
 	nameAliases?: string[];
@@ -78,7 +78,7 @@ export function isAddressedToOther(text: string, myNames: string[]): boolean {
 	const myLc = myNames.map(n => n.toLowerCase().trim()).filter(Boolean);
 	const lc = text.toLowerCase();
 	const patterns = [
-		// greet+name anywhere (also allow 1-2 word names like "Maddy Lou")
+		// greet+name anywhere (also allow 1-2 word names like "Echo Lou")
 		/\b(hi|hey|hello|yo|okay|ok)[,!:]?\s+([a-z][a-z'-]*(?:\s+[a-z][a-z'-]*)?)\b/gi,
 		// commaTag — require start-of-clause before name
 		/(^|[.!?]\s*)([a-z][a-z'-]*)\s*[,?]/gi,

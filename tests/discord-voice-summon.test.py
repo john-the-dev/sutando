@@ -21,7 +21,7 @@ CASES = [
     ("za warudo.", True),
     ("za warudo ", True),
     ("ZA WARUDO", True),
-    ("<@1494435872949665953> za warudo", True),
+    ("<@100000000000000001> za warudo", True),
     # "za warudo <word>" → reserved for sub-commands, must NOT summon
     ("za warudo screen", False),
     ("za warudo stop screen", False),
@@ -55,7 +55,7 @@ print(f"\nOK — {len(CASES)}/{len(CASES)} summon-match cases passed")
 # answer iff this bot is @-mentioned OR no other Sutando bot is named.
 from join_trigger import summon_is_for_me as _sfm  # noqa: E402
 
-LUCY, MADDY, HUMAN = 1494435872949665953, 1485656249705169031, 1025785494862315690
+ECHO, FOXTROT, HUMAN = 100000000000000001, 100000000000000002, 100000000000000003
 
 
 class _U:
@@ -70,16 +70,16 @@ class _Msg:
 
 GATE_CASES = [
     # (description, mentions, self_id, expected)
-    ("bare summon → Lucy joins", [], LUCY, True),
-    ("bare summon → Maddy joins", [], MADDY, True),
-    ("@Maddy → Lucy stays out", [_U(MADDY, True)], LUCY, False),
-    ("@Maddy → Maddy joins", [_U(MADDY, True)], MADDY, True),
-    ("@Lucy → Lucy joins", [_U(LUCY, True)], LUCY, True),
-    ("@Lucy → Maddy stays out", [_U(LUCY, True)], MADDY, False),
-    ("@human only → Lucy still joins", [_U(HUMAN, False)], LUCY, True),
-    ("@Lucy @Maddy → Lucy joins", [_U(LUCY, True), _U(MADDY, True)], LUCY, True),
-    ("@Lucy @Maddy → Maddy joins", [_U(LUCY, True), _U(MADDY, True)], MADDY, True),
-    ("self_id None → backward-compat join", [_U(MADDY, True)], None, True),
+    ("bare summon → Echo joins", [], ECHO, True),
+    ("bare summon → Foxtrot joins", [], FOXTROT, True),
+    ("@Foxtrot → Echo stays out", [_U(FOXTROT, True)], ECHO, False),
+    ("@Foxtrot → Foxtrot joins", [_U(FOXTROT, True)], FOXTROT, True),
+    ("@Echo → Echo joins", [_U(ECHO, True)], ECHO, True),
+    ("@Echo → Foxtrot stays out", [_U(ECHO, True)], FOXTROT, False),
+    ("@human only → Echo still joins", [_U(HUMAN, False)], ECHO, True),
+    ("@Echo @Foxtrot → Echo joins", [_U(ECHO, True), _U(FOXTROT, True)], ECHO, True),
+    ("@Echo @Foxtrot → Foxtrot joins", [_U(ECHO, True), _U(FOXTROT, True)], FOXTROT, True),
+    ("self_id None → backward-compat join", [_U(FOXTROT, True)], None, True),
 ]
 
 gate_fail = []

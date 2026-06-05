@@ -145,7 +145,7 @@ export function shouldLeaveOnOwnerExit(
 }
 
 /**
- * Owner-only addressing (meeting-companion v1 boundary, Mini's design): the bot
+ * Owner-only addressing (meeting-companion v1 boundary): the bot
  * breaks its silence for a turn ONLY when the turn is addressed to it by name
  * AND the speaker is the owner. Open-floor consultancy (anyone in the room may
  * address the owner's bot) is a v2 opt-in — when enabled, any addressed turn

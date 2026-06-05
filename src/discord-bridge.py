@@ -2313,7 +2313,7 @@ async def _handle_discord_message(message, force=False):
             except Exception as e:
                 print(f"  [thread-engage] failed to update access.json: {e}", flush=True)
 
-        # Text/magic-word screen-push REMOVED (#1427, Susan 2026-06-05). Screen
+        # Text/magic-word screen-push REMOVED (#1427, owner 2026-06-05). Screen
         # sharing in a voice session is owned entirely by the voice-invoked
         # join_discord_screen tool (src/vision-tools.ts) — typed phrases no longer
         # start screen-push; only voice does. The old setScreenPush consumer was

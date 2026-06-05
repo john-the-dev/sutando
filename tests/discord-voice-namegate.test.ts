@@ -11,55 +11,55 @@ import {
 
 // --- isAddressedBy: address vs mere-mention -------------------------------
 test('isAddressedBy: greeting + name addresses', () => {
-	assert.equal(isAddressedBy('hey Lucy', ['Lucy']), true);
-	assert.equal(isAddressedBy('hi, Lucy', ['Lucy']), true);
-	assert.equal(isAddressedBy('ok Lucy', ['Lucy']), true);
+	assert.equal(isAddressedBy('hey Echo', ['Echo']), true);
+	assert.equal(isAddressedBy('hi, Echo', ['Echo']), true);
+	assert.equal(isAddressedBy('ok Echo', ['Echo']), true);
 });
 test('isAddressedBy: comma/question tag addresses', () => {
-	assert.equal(isAddressedBy('Lucy, what time is it', ['Lucy']), true);
-	assert.equal(isAddressedBy('Lucy?', ['Lucy']), true);
+	assert.equal(isAddressedBy('Echo, what time is it', ['Echo']), true);
+	assert.equal(isAddressedBy('Echo?', ['Echo']), true);
 });
 test('isAddressedBy: imperative verb at clause start addresses', () => {
-	assert.equal(isAddressedBy('Lucy check the PR', ['Lucy']), true);
+	assert.equal(isAddressedBy('Echo check the PR', ['Echo']), true);
 });
 test('isAddressedBy: plain mention does NOT address', () => {
-	assert.equal(isAddressedBy('thanks Lucy', ['Lucy']), false);
-	assert.equal(isAddressedBy("Lucy's answer was good", ['Lucy']), false);
+	assert.equal(isAddressedBy('thanks Echo', ['Echo']), false);
+	assert.equal(isAddressedBy("Echo's answer was good", ['Echo']), false);
 });
 test('isAddressedBy: empty names / empty text never matches', () => {
-	assert.equal(isAddressedBy('Lucy, hi', []), false);
-	assert.equal(isAddressedBy('', ['Lucy']), false);
+	assert.equal(isAddressedBy('Echo, hi', []), false);
+	assert.equal(isAddressedBy('', ['Echo']), false);
 });
 
 // --- decideForTurn: the wake/silence state machine ------------------------
-const gate = () => createGate({ instanceName: 'Lucy', otherInstances: ['Maddy'] });
+const gate = () => createGate({ instanceName: 'Echo', otherInstances: ['Foxtrot'] });
 
 test('decideForTurn: addressed to me → allow (and sticks)', () => {
 	const g = gate();
-	assert.equal(decideForTurn(g, 'Lucy, what time is it'), 'allow');
+	assert.equal(decideForTurn(g, 'Echo, what time is it'), 'allow');
 	// follow-up with no name carries the sticky allow
 	assert.equal(decideForTurn(g, 'and the weather?'), 'allow');
 });
 test('decideForTurn: addressed to a peer → drop (and sticks)', () => {
 	const g = gate();
-	assert.equal(decideForTurn(g, 'Maddy, hello'), 'drop');
+	assert.equal(decideForTurn(g, 'Foxtrot, hello'), 'drop');
 	assert.equal(decideForTurn(g, 'how are you?'), 'drop'); // sticky drop
 });
 test('decideForTurn: my-name flips a sticky drop back to allow', () => {
 	const g = gate();
-	decideForTurn(g, 'Maddy, you handle it');      // drop
-	assert.equal(decideForTurn(g, 'actually Lucy, you do it'), 'allow');
+	decideForTurn(g, 'Foxtrot, you handle it');      // drop
+	assert.equal(decideForTurn(g, 'actually Echo, you do it'), 'allow');
 });
 test('decideForTurn: no peer configured → always allow (single-bot)', () => {
-	const g = createGate({ instanceName: 'Lucy', otherInstances: [] });
+	const g = createGate({ instanceName: 'Echo', otherInstances: [] });
 	assert.equal(decideForTurn(g, 'anything at all'), 'allow');
-	assert.equal(decideForTurn(g, 'Maddy, hi'), 'allow'); // no peer set → gate off
+	assert.equal(decideForTurn(g, 'Foxtrot, hi'), 'allow'); // no peer set → gate off
 });
 test('decideForTurn: primary defaults to allow on a cold opener', () => {
-	const g = createGate({ instanceName: 'Lucy', otherInstances: ['Maddy'], primary: true });
+	const g = createGate({ instanceName: 'Echo', otherInstances: ['Foxtrot'], primary: true });
 	assert.equal(decideForTurn(g, 'hello everyone'), 'allow'); // primary cold-open
 });
 test('decideForTurn: non-primary stays silent until named', () => {
-	const g = createGate({ instanceName: 'Lucy', otherInstances: ['Maddy'], primary: false });
+	const g = createGate({ instanceName: 'Echo', otherInstances: ['Foxtrot'], primary: false });
 	assert.equal(decideForTurn(g, 'hello everyone'), 'drop'); // not addressed, not primary
 });
