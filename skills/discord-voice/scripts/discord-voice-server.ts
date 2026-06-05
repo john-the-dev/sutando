@@ -809,8 +809,10 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 			name: 'switch_mode',
 			description:
 				'Switch THIS bot between active mode and silent meeting / note-taking mode. ' +
-				'Call switch_mode("meeting") when the user asks you to take notes, go silent, be quiet, or enter meeting/passive mode. ' +
-				'Call switch_mode("active") when the user asks you to come back, resume, or be active. ' +
+				'Call switch_mode("meeting") when the user asks you to take notes, go silent, be quiet, stand by / standby, hold on, wait, or enter meeting/passive mode. ' +
+				'Call switch_mode("active") when the user asks you to come back, resume, wake up, or be active. ' +
+				'IMPORTANT: only call this when the user is addressing YOU BY NAME in the command (e.g. "Hi Maddy, …" / "Maddy, …"). If they say a switch command WITHOUT your name, do NOT call it — it is meant for the other bot. ' +
+				'And only call it when they genuinely mean to switch your mode — not when "stand by" appears inside a narrative sentence ("…I told you to stand by so…"). ' +
 				'Prefer THIS tool over inferring the mode from raw words — speech-to-text mangles phrases like "meeting mode".',
 			parameters: z.object({ mode: z.enum(['active', 'meeting']) }),
 			execution: 'inline',
@@ -927,11 +929,15 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 				if (VOICE_CONTROLLER) {
 					const _win = Number(process.env.SUTANDO_NAMEGATE_WINDOW_MS) || 20000;
 					const _addressed = (s.gate?.lastAddressedToMe ?? true) && (Date.now() - ((s as any)._controllerNamedAt || 0) < _win);
-					// switch_mode is the MODE-control tool — it must work in EITHER mode (esp. to
-					// EXIT meeting), so exempt it from the `!meetingMode` clause; it only needs the
-					// controller to be addressing the bot. All other tools stay inert while silent.
+					// switch_mode requires the controller to have EXPLICITLY named THIS bot in the
+					// immediate command (≤10s) — NOT the sticky state — so a bare "switch to active
+					// mode" switches nobody, and only "Hi Maddy, switch …" switches Maddy (Susan
+					// 2026-06-05: "不要我一说 switch 两个全都 switch"). It's exempt from the !meetingMode
+					// clause so it can also EXIT meeting mode. Other tools stay inert while silent.
+					const _SWITCH_FRESH_MS = Number(process.env.SUTANDO_SWITCHMODE_FRESH_MS) || 10000;
+					const _namedFresh = Date.now() - ((s as any)._namedThisBotAt || 0) < _SWITCH_FRESH_MS;
 					const _allowed = s.allowAckAudible
-						|| (t.name === 'switch_mode' ? _addressed : (!s.meetingMode && _addressed));
+						|| (t.name === 'switch_mode' ? _namedFresh : (!s.meetingMode && _addressed));
 					if (!_allowed) {
 						console.log(`${ts()} [NameGate] tool '${t.name}' blocked — controller hasn't addressed the bot`);
 						return { status: 'silent', message: 'Gated: the bot is silent until the controller addresses it.' };
@@ -1092,6 +1098,10 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 		// because she named Maddy once and kept talking 41s without re-naming.
 		if (VOICE_CONTROLLER && userId === VOICE_CONTROLLER && s.gate) {
 			const _wasAddressed = s.gate.lastAddressedToMe;
+			// Track when the controller EXPLICITLY named THIS bot (not the sticky state) —
+			// switch_mode is gated on this so only "Hi Maddy, switch …" switches Maddy, and a
+			// bare "switch to active mode" (no name) switches nobody (Susan 2026-06-05).
+			if (_namesThisBot(transcript)) (s as any)._namedThisBotAt = Date.now();
 			decideForTurn(s.gate, transcript);  // updates s.gate.lastAddressedToMe in-place
 			if (s.gate.lastAddressedToMe) {
 				(s as any)._controllerNamedAt = Date.now();  // keep window fresh while she's with me (sticky)
