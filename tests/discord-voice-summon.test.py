@@ -7,6 +7,7 @@ the bug that re-spawned the bot mid-session and killed the live screen-push.
 
 Standalone (run by `npm run test:py`): exits non-zero on first failure.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -21,7 +22,7 @@ CASES = [
     ("za warudo.", True),
     ("za warudo ", True),
     ("ZA WARUDO", True),
-    ("<@100000000000000001> za warudo", True),
+    ("<@123> za warudo", True),
     # "za warudo <word>" → reserved for sub-commands, must NOT summon
     ("za warudo screen", False),
     ("za warudo stop screen", False),
@@ -55,7 +56,9 @@ print(f"\nOK — {len(CASES)}/{len(CASES)} summon-match cases passed")
 # answer iff this bot is @-mentioned OR no other Sutando bot is named.
 from join_trigger import summon_is_for_me as _sfm  # noqa: E402
 
-BOT_A, BOT_B, HUMAN = 100000000000000001, 100000000000000002, 100000000000000003
+SELF_ID = int(os.environ.get("SUTANDO_SELF_ID") or "100000000000000001")
+PEER_ID = int(os.environ.get("SUTANDO_PEER_ID") or "100000000000000002")
+HUMAN_ID = int(os.environ.get("SUTANDO_OWNER_ID") or "100000000000000003")
 
 
 class _U:
@@ -70,16 +73,16 @@ class _Msg:
 
 GATE_CASES = [
     # (description, mentions, self_id, expected)
-    ("bare summon → BotA joins", [], BOT_A, True),
-    ("bare summon → BotB joins", [], BOT_B, True),
-    ("@BotB → BotA stays out", [_U(BOT_B, True)], BOT_A, False),
-    ("@BotB → BotB joins", [_U(BOT_B, True)], BOT_B, True),
-    ("@BotA → BotA joins", [_U(BOT_A, True)], BOT_A, True),
-    ("@BotA → BotB stays out", [_U(BOT_A, True)], BOT_B, False),
-    ("@human only → BotA still joins", [_U(HUMAN, False)], BOT_A, True),
-    ("@BotA @BotB → BotA joins", [_U(BOT_A, True), _U(BOT_B, True)], BOT_A, True),
-    ("@BotA @BotB → BotB joins", [_U(BOT_A, True), _U(BOT_B, True)], BOT_B, True),
-    ("self_id None → backward-compat join", [_U(BOT_B, True)], None, True),
+    ("bare summon → self joins", [], SELF_ID, True),
+    ("bare summon → peer joins", [], PEER_ID, True),
+    ("@peer → self stays out", [_U(PEER_ID, True)], SELF_ID, False),
+    ("@peer → peer joins", [_U(PEER_ID, True)], PEER_ID, True),
+    ("@self → self joins", [_U(SELF_ID, True)], SELF_ID, True),
+    ("@self → peer stays out", [_U(SELF_ID, True)], PEER_ID, False),
+    ("@human only → self still joins", [_U(HUMAN_ID, False)], SELF_ID, True),
+    ("@self @peer → self joins", [_U(SELF_ID, True), _U(PEER_ID, True)], SELF_ID, True),
+    ("@self @peer → peer joins", [_U(SELF_ID, True), _U(PEER_ID, True)], PEER_ID, True),
+    ("self_id None → backward-compat join", [_U(PEER_ID, True)], None, True),
 ]
 
 gate_fail = []
