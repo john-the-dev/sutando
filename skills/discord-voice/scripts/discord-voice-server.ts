@@ -141,7 +141,11 @@ const SUTANDO_MEETING_MODE = process.env.SUTANDO_MEETING_MODE === '1' || (() => 
 	// JOINS name-gated/silent and only speaks when addressed by name.
 	try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); return si.meetingMode === true; } catch { return false; }
 })();
-const STANDBY_PHRASES = (process.env.SUTANDO_STANDBY_PHRASES ?? 'standby,stand by,hold on,wait,one sec,待命,你待命')
+// (Susan 2026-06-05) Tightened to DELIBERATE standby commands only. Removed
+// conversational fillers 'hold on'/'wait'/'one sec' — she says those constantly in
+// normal speech and they were false-triggering meeting mode (caught via the new
+// sqlite mode-switch log). Meeting mode = an explicit command, not a filler.
+const STANDBY_PHRASES = (process.env.SUTANDO_STANDBY_PHRASES ?? 'standby,stand by,待命,你待命')
 	.split(',').map(s => s.trim()).filter(Boolean);
 // #1427/#1456 (Susan 2026-06-04): the SINGLE Discord user id allowed to CONTROL
 // meeting mode (enter via standby, wake/exit). When set, enter/wake cues only fire
@@ -186,10 +190,14 @@ function _isWakePhrase(text: string): boolean {
 }
 // Enter-meeting cues (#1427): the bot joins active and switches to silent
 // meeting/note-taker mode only when the user cues it with one of these.
-const ENTER_MEETING_PHRASES = ['take notes', 'meeting mode', 'be silent', 'go silent',
-	'stand by', 'standby', 'hold on',
-	'passive mode', 'take meeting notes', 'start the meeting', 'start meeting', 'take meeting note',
-	'记笔记', '会议模式', '安静', '记录模式'];
+// (Susan 2026-06-05) DELIBERATE mode-switch commands only. Removed the note-CONTENT
+// and filler phrases that conflated "record this" / "wait a sec" with "switch to silent
+// mode": 'take notes', 'take meeting note(s)', '记笔记', '记录模式', 'hold on'. Asking the
+// bot to write something down (add_to_vault) must NOT also flip it into meeting mode.
+const ENTER_MEETING_PHRASES = ['meeting mode', 'be silent', 'go silent',
+	'stand by', 'standby', 'passive mode',
+	'start the meeting', 'start meeting',
+	'会议模式', '安静', '静音'];
 function _isEnterMeetingPhrase(text: string): boolean {
 	const lower = text.toLowerCase();
 	return ENTER_MEETING_PHRASES.some(p => lower.includes(p));
@@ -1417,7 +1425,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// Direct standby/silence commands flip THIS bot to meeting regardless of
 				// naming — they're control commands, not addressed-to-a-peer cues. Note-
 				// taking cues ("take notes"/"meeting mode") still require naming (cross-bot).
-				const _directStandby = ['standby', 'stand by', 'hold on', 'be silent', 'go silent'].some(p => item.content.toLowerCase().includes(p));
+				const _directStandby = ['standby', 'stand by', 'be silent', 'go silent'].some(p => item.content.toLowerCase().includes(p));
 				// #1456: only the designated controller (Susan) may flip meeting mode —
 				// a relay account (Lucy/879), a peer, or the bot's own echo cannot.
 				// Robustness (Susan 2026-06-04): require the controller to be the SOLE
