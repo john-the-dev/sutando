@@ -38,7 +38,7 @@ import { recordConversation, recordSession, recordToolCall } from '../../../src/
 import { resultBelongsTo, discordVoiceKey } from '../../../src/result-channel-key.js';
 import { personalPath } from '../../../src/util_paths.js';
 import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed, shouldLeaveOnOwnerExit, breakSilenceAllowed } from './access-tier.js';
-import { createGate, decideForTurn, type GateState } from './name-gate.js';
+import { createGate, decideForTurn, isStandby, type GateState } from './name-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
 _dotenvConfig({ path: join(process.env.HOME ?? '', '.claude/channels/discord/.env'), override: false });
@@ -1071,10 +1071,18 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 				body: JSON.stringify({
 					contents: [{
 						parts: [
-							{ text: 'Transcribe this audio verbatim. Return ONLY the transcript text, nothing else. If silence/no speech, return empty.' },
+							// #1427 semantic addressing: besides the verbatim transcript, the
+							// model judges whether the speaker is CALLING/addressing an assistant
+							// named STAND_NAME — tolerating speech-to-text garble of the name
+							// ("hi Maddy" often comes through as "hi May"), WITHOUT firing on the
+							// name appearing as an unrelated word ("may I…", "on Monday") or a
+							// "go quiet"/standby command. Replaces the brittle string name-match.
+							{ text:
+								`Transcribe this audio verbatim. Then decide: is the speaker directly CALLING ON or ADDRESSING an assistant named "${STAND_NAME || 'the assistant'}" to get its attention or have it act/respond? Account for speech-to-text errors that garble the name into a similar-sounding word — treat a clearly-intended call to that assistant as addressed=true. Do NOT set addressed=true when the name merely appears as an ordinary unrelated word, when the speaker is only telling it to be quiet / stand by, or when addressing someone else. Reply with ONLY a JSON object, no prose: {"transcript":"<verbatim>","addressed":true|false}. If silence/no speech: {"transcript":"","addressed":false}.` },
 							{ inlineData: { mimeType: 'audio/wav', data: audioData } },
 						],
 					}],
+					generationConfig: { responseMimeType: 'application/json' },
 				}),
 			},
 		);
@@ -1084,7 +1092,19 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 			console.log(`${ts()} [STT] no transcript for ${userId}: ${reason}`);
 			return;
 		}
-		const transcript = (data.candidates[0].content?.parts?.[0]?.text ?? '').trim();
+		const _raw = (data.candidates[0].content?.parts?.[0]?.text ?? '').trim();
+		// Parse the {transcript, addressed} JSON; fall back to treating the whole
+		// reply as the transcript (addressed=false) if the model didn't return JSON.
+		let transcript = _raw;
+		let _aiAddressed = false;
+		try {
+			const _m = _raw.match(/\{[\s\S]*\}/);
+			if (_m) {
+				const _j = JSON.parse(_m[0]) as { transcript?: string; addressed?: boolean };
+				transcript = String(_j.transcript ?? '').trim();
+				_aiAddressed = _j.addressed === true;
+			}
+		} catch { /* non-JSON reply — keep _raw as transcript, addressed=false */ }
 		if (!transcript) return; // skip empty/whitespace
 		// #1456 PRECISE name-gate: the gate must key off EXACTLY who spoke — not a
 		// loose "if anyone named the bot" rule. It keys ONLY off the CONTROLLER's OWN clean per-
@@ -1103,8 +1123,15 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 			// Track when the controller EXPLICITLY named THIS bot (not the sticky state) —
 			// switch_mode is gated on this so only "Hi <bot name>, switch …" switches this bot, and a
 			// bare "switch to active mode" (no name) switches nobody.
-			if (_namesThisBot(transcript)) (s as any)._namedThisBotAt = Date.now();
+			if (_aiAddressed || _namesThisBot(transcript)) (s as any)._namedThisBotAt = Date.now();
 			decideForTurn(s.gate, transcript);  // updates s.gate.lastAddressedToMe in-place
+			// AI-semantic wake (#1427): the model judged the controller is addressing
+			// THIS bot — tolerating ASR garble of the name ("hi Maddy"→"hi May") that the
+			// string matcher in decideForTurn misses. Open the gate, UNLESS this turn is a
+			// standby command (decideForTurn already dropped it — don't fight that).
+			if (_aiAddressed && !isStandby(transcript, s.gate.standbyVariants)) {
+				s.gate.lastAddressedToMe = true;
+			}
 			if (s.gate.lastAddressedToMe) {
 				(s as any)._controllerNamedAt = Date.now();  // keep window fresh while she's with me (sticky)
 				// Fresh name (false→true) wakes from meeting mode — unless THIS utterance is a
