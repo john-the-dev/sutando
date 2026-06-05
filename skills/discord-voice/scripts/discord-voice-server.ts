@@ -824,7 +824,11 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 						(s as any)._pendingMeeting = true; s.allowAckAudible = true; (s as any)._ackEmitted = false;
 						console.log(`${ts()} [Meeting] switch_mode → speak ack first, meeting pending`);
 					}
-					return { status: 'meeting_mode', instruction: 'Say ONE short spoken sentence OUT LOUD confirming you are switching to silent note-taking (e.g. "Got it — going silent and taking notes."), THEN stop talking and only listen.' };
+					// #1456 (Susan 2026-06-04): do NOT tell Gemini it is going silent — when the
+					// model thinks it is entering silent mode it emits the ack as TEXT-ONLY (no audio),
+					// so the confirmation is never heard. Ask for a NORMAL spoken reply; the CODE
+					// engages silence at turn.end (deferred _pendingMeeting), AFTER the ack is voiced.
+					return { status: 'meeting_mode', instruction: 'Reply OUT LOUD with ONE short, normal sentence acknowledging you will take notes (e.g. "Got it, I\'ll take notes."). Speak it naturally — exactly as you would voice any other reply. Do NOT say you are going silent, stopping, or being quiet; just the brief spoken acknowledgement.' };
 				}
 				if (s.meetingMode || s.meetingEntered) {
 					s.meetingEntered = false; s.meetingMode = false; s.allowAckAudible = true; (s as any)._ackEmitted = false;
@@ -1416,7 +1420,11 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// latch resets only on a real GAP in Maddy's own output (>1.5s) — i.e. its reply
 			// actually finished — so an interruption can't sever an in-progress reply.
 			const _nowMs = Date.now();
-			if (_nowMs - ((s as any)._lastAudioTs || 0) > 1500) { (s as any)._turnAudioAllowed = false; (s as any)._audioPlayedThisTurn = false; }
+			if (_nowMs - ((s as any)._lastAudioTs || 0) > 1500) { (s as any)._turnAudioAllowed = false; (s as any)._audioPlayedThisTurn = false; (s as any)._recvThisTurn = 0; }
+			// #1456 observability (Susan 2026-06-04: "没记下来就补上"): count chunks RECEIVED from
+			// Gemini this turn, NOT just chunks pushed. Without this, an ack suppressed from its
+			// FIRST chunk logged nothing — indistinguishable from "Gemini emitted no audio at all".
+			(s as any)._recvThisTurn = ((s as any)._recvThisTurn || 0) + 1;
 			// Sticky: open while she's addressing Maddy (_addressedToMe) and has spoken within
 			// the window (refreshed on every controller utterance, so it only lapses on a long
 			// silence or after she yields to a peer). The latch keeps an in-progress reply going.
@@ -1436,17 +1444,24 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				if (outChunks === 1 || outChunks % 50 === 0) {
 					console.log(`${ts()} [Audio] outbound chunks: ${outChunks} (last=${pcm48Stereo.length}B)`);
 				}
-			} else if ((s as any)._wasPlaying) {
-				// #1456 OBSERVABILITY (Susan 2026-06-05: "别猜，没记下来就补上"): audio was
-				// playing and is now SUPPRESSED — this IS the "最后一句没听到" cutoff. Record
-				// the EXACT reason to sqlite + log so the cause is CONFIRMED, never guessed.
-				(s as any)._wasPlaying = false;
+			} else {
+				// #1456 OBSERVABILITY (Susan 2026-06-05: "别猜，没记下来就补上"): audio is
+				// SUPPRESSED. Record the EXACT gate inputs so the cause is CONFIRMED, never guessed.
+				// Two cases: (a) mid-reply cut ("最后一句没听到") — was playing, now gated; (b) muted
+				// from the FIRST chunk (the meeting-ack case) — Gemini DID emit audio but the gate
+				// never opened. Distinguishing them needs recv-count + forceAudible in the reason.
 				const _sinceNamed = _nowMs - ((s as any)._controllerNamedAt || 0);
-				// Granular reason (Susan 2026-06-05: "别猜"; vague "gate closed (other)" wasn't
-				// enough to confirm). Dump every gate input so the cause is unambiguous from the row.
-				const _reason = `meetingMode=${s.meetingMode} allowAck=${!!s.allowAckAudible} addressedToMe=${s.gate?.lastAddressedToMe ?? 'n/a'} sinceNamed=${_sinceNamed}ms/win=${_NAMEGATE_WINDOW}ms`;
-				console.log(`${ts()} [Audio] ✂ SUPPRESSED mid-reply — ${_reason} (chunks so far=${outChunks})`);
-				try { recordConversation('discord-agent', `✂ audio cut mid-reply — ${_reason}`, s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
+				const _forceAudible = _nowMs < ((s as any)._forceAudibleUntil || 0);
+				const _reason = `meetingMode=${s.meetingMode} allowAck=${!!s.allowAckAudible} forceAudible=${_forceAudible} addressedToMe=${s.gate?.lastAddressedToMe ?? 'n/a'} sinceNamed=${_sinceNamed}ms/win=${_NAMEGATE_WINDOW}ms recv=${(s as any)._recvThisTurn}`;
+				if ((s as any)._wasPlaying) {
+					(s as any)._wasPlaying = false;
+					console.log(`${ts()} [Audio] ✂ SUPPRESSED mid-reply — ${_reason} (chunks so far=${outChunks})`);
+					try { recordConversation('discord-agent', `✂ audio cut mid-reply — ${_reason}`, s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
+				} else if ((s as any)._recvThisTurn === 1) {
+					// Muted from the very first chunk of this turn — Gemini emitted audio, gate closed.
+					console.log(`${ts()} [Audio] ✂ MUTED from start — ${_reason}`);
+					try { recordConversation('discord-agent', `✂ audio muted from start — ${_reason}`, s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
+				}
 			}
 		} catch (err) {
 			console.error(`${ts()} [Audio] outbound convert failed:`, err);
