@@ -820,13 +820,11 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 				const { mode } = args as { mode: 'active' | 'meeting' };
 				(s as any)._forceAudibleUntil = Date.now() + 6000;  // #1456: guarantee the mode-switch ack is heard (allowAck races)
 				if (mode === 'meeting') {
-					if (!s.meetingMode) {
-						s.meetingEntered = true; s.meetingMode = true; s.allowAckAudible = true; (s as any)._ackEmitted = false;
-						try { recordConversation('discord-agent', '⇄ MODE → meeting (switch_mode tool)', s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
-						try { writeFileSync(VOICE_MODE_FILE, 'meeting'); } catch {}
-						console.log(`${ts()} [Meeting] switch_mode tool → meeting`);
+					if (!s.meetingMode && !(s as any)._pendingMeeting) {
+						(s as any)._pendingMeeting = true; s.allowAckAudible = true; (s as any)._ackEmitted = false;
+						console.log(`${ts()} [Meeting] switch_mode → speak ack first, meeting pending`);
 					}
-					return { status: 'meeting_mode', instruction: 'Briefly confirm OUT LOUD in one short sentence that you are switching to silent note-taking, then stay silent and only listen. The only tool you may call unprompted is save_meeting_note.' };
+					return { status: 'meeting_mode', instruction: 'Say ONE short spoken sentence OUT LOUD confirming you are switching to silent note-taking (e.g. "Got it — going silent and taking notes."), THEN stop talking and only listen.' };
 				}
 				if (s.meetingMode || s.meetingEntered) {
 					s.meetingEntered = false; s.meetingMode = false; s.allowAckAudible = true; (s as any)._ackEmitted = false;
@@ -1493,6 +1491,16 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 	// Transcript mirroring + result-queue drain
 	let lastProcessedIdx = 0;
 	session.eventBus.subscribe('turn.end', () => {
+		// #1456: engage DEFERRED meeting silence now that the spoken ack turn has finished
+		// (switch_mode → meeting kept us active so Gemini could SAY the confirmation; real
+		// silence starts here). force-audible (set in switch_mode) keeps any ack tail playing.
+		if ((s as any)._pendingMeeting && ((s as any)._audioPlayedThisTurn || Date.now() >= ((s as any)._forceAudibleUntil || 0))) {
+			(s as any)._pendingMeeting = false;
+			s.meetingMode = true; s.meetingEntered = true;
+			try { recordConversation('discord-agent', '⇄ MODE → meeting (after ack)', s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
+			try { writeFileSync(VOICE_MODE_FILE, 'meeting'); } catch {}
+			console.log(`${ts()} [Meeting] deferred meeting engaged after ack`);
+		}
 		// (Refactor 2026-06-05) The audio latch is NO LONGER reset here — turn.end fires
 		// when Lucy/879 interrupts, which prematurely cut Maddy's reply. The latch now
 		// resets on a real gap in Maddy's OWN output (see handleAudioOutput), so an
