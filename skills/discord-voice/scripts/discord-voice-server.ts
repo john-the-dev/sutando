@@ -869,7 +869,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 				// not just meetingMode. Gemini ignores the "do NOT call tools" prompt and
 				// fired `work` while gated (Susan "maddy 还在"); this enforces it deterministically.
 				if (VOICE_CONTROLLER) {
-					const _win = Number(process.env.SUTANDO_NAMEGATE_WINDOW_MS) || 12000;
+					const _win = Number(process.env.SUTANDO_NAMEGATE_WINDOW_MS) || 20000;
 					const _allowed = s.allowAckAudible
 						|| (!s.meetingMode && (Date.now() - ((s as any)._controllerNamedAt || 0) < _win));
 					if (!_allowed) {
@@ -1025,7 +1025,11 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 		// gate reads this window. Also wake immediately if currently silent.
 		if (VOICE_CONTROLLER && userId === VOICE_CONTROLLER && _namesThisBot(transcript)) {
 			(s as any)._controllerNamedAt = Date.now();
-			if (s.meetingMode) { s.meetingMode = false; s.allowAckAudible = true; (s as any)._ackEmitted = false; }
+			if (s.meetingMode) {
+				s.meetingMode = false; s.allowAckAudible = true; (s as any)._ackEmitted = false;
+				// #1456 (Susan 2026-06-05): log mode switches to sqlite so the timeline shows WHEN/WHY it changed.
+				try { recordConversation('discord-agent', '⇄ MODE → active (controller named the bot)', s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
+			}
 			console.log(`${ts()} [NameGate] controller named the bot in OWN utterance: "${transcript.slice(0, 50)}"`);
 		}
 		const spk = s.speakerNameCache.get(userId);
@@ -1303,7 +1307,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// while addressed (within window), let the WHOLE turn play — the window
 			// expiring mid-reply must NOT cut off later sentences. The latch is reset
 			// at turn.end, so the window only governs whether a NEW turn opens.
-			const _NAMEGATE_WINDOW = Number(process.env.SUTANDO_NAMEGATE_WINDOW_MS) || 12000;
+			const _NAMEGATE_WINDOW = Number(process.env.SUTANDO_NAMEGATE_WINDOW_MS) || 20000;
 			// Coherent gate (refactor 2026-06-05): allowAckAudible (entry/wake ack) always
 			// passes. Else in MEETING mode → fully silent (note-taker). In ACTIVE mode + a
 			// controller set → PRECISE per-stream gate: speak only if the controller's OWN
@@ -1427,6 +1431,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				if (_byController && !s.meetingEntered && _isEnterMeetingPhrase(item.content) && (!s.gate || _namesThisBot(item.content) || _directStandby)) {
 					s.meetingEntered = true;
 					s.meetingMode = true;
+					try { recordConversation('discord-agent', '⇄ MODE → meeting (standby cue)', s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
 					// #1427: let the bot's acknowledgement be HEARD before silence
 					// engages — without this, the same turn that sets meetingMode=true
 					// also suppresses the ack (Susan 2026-06-04).
@@ -1450,6 +1455,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				if (_byController && s.meetingEntered && _isWakePhrase(item.content) && !_isEnterMeetingPhrase(item.content)) {
 					s.meetingEntered = false;
 					s.meetingMode = false;
+					try { recordConversation('discord-agent', '⇄ MODE → active (wake phrase)', s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
 					console.log(`${ts()} [Meeting] wake-phrase detected — exiting meeting mode: "${item.content.slice(0, 60)}"`);
 					try { writeFileSync(VOICE_MODE_FILE, 'active'); } catch {}
 				}
