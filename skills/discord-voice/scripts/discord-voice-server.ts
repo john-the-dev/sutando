@@ -1441,6 +1441,13 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 					(s as any)._ackEmitted = false;
 					console.log(`${ts()} [Meeting] enter-meeting cue — switching to meeting mode: "${item.content.slice(0, 60)}"`);
 					try { writeFileSync(VOICE_MODE_FILE, 'meeting'); } catch {}
+					// #1456 (Susan 2026-06-04 "maddy 没有 acknowledge meeting mode"): in
+					// meeting mode Gemini just goes silent and swallows the confirmation,
+					// so the user never hears an ack. allowAckAudible only un-suppresses
+					// the ack turn's audio — it doesn't make Gemini SPEAK one. Inject a
+					// prompt (role:user, natural phrasing to avoid fabrication leak) so it
+					// produces one short spoken confirmation, then the gate re-silences it.
+					try { injectSystemMessage(s, "You are now switching to silent note-taking mode. Reply with ONE short spoken sentence confirming it (for example: \"Got it — I'll take notes silently from here.\"), then stay silent and only listen."); } catch {}
 				}
 				// Wake-phrase detection: exit meeting mode back to active. BUT skip if the
 				// SAME utterance also carries an enter/standby cue (#1427, Susan 2026-06-04):
