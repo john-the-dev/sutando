@@ -1013,6 +1013,16 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 		}
 		const transcript = (data.candidates[0].content?.parts?.[0]?.text ?? '').trim();
 		if (!transcript) return; // skip empty/whitespace
+		// #1456 PRECISE name-gate (Susan 2026-06-04: "exactly 是我说的，不要什么只要
+		// 有一个说了之类的"): the gate keys ONLY off the CONTROLLER's OWN clean per-
+		// user utterance — 879/Lucy naming the bot can NOT open it, because this is
+		// the controller's separate Discord stream. Stamp the time; the audio-output
+		// gate reads this window. Also wake immediately if currently silent.
+		if (VOICE_CONTROLLER && userId === VOICE_CONTROLLER && _namesThisBot(transcript)) {
+			(s as any)._controllerNamedAt = Date.now();
+			if (s.meetingMode) { s.meetingMode = false; s.allowAckAudible = true; (s as any)._ackEmitted = false; }
+			console.log(`${ts()} [NameGate] controller named the bot in OWN utterance: "${transcript.slice(0, 50)}"`);
+		}
 		const spk = s.speakerNameCache.get(userId);
 		recordConversation('discord-user', transcript, s.sessionId, {
 			speakerId: userId,
@@ -1295,11 +1305,17 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		try {
 			const pcm24Mono = Buffer.from(data, 'base64');
 			const pcm48Stereo = upsample24MonoTo48Stereo(pcm24Mono);
-			// In meeting mode, suppress audio output — keep transcription + sqlite running.
-			// EXCEPTION (#1427): when allowAckAudible is set (just entered meeting mode),
-			// let this one turn through so the "entering note mode" confirmation is HEARD;
-			// mark _ackEmitted so turn.end can clear the one-shot after it actually played.
-			if (!s.meetingMode || s.allowAckAudible) {
+			// #1456 PRECISE name-gate at the AUDIO output (Susan 2026-06-04). When a
+			// controller is configured, the bot speaks ONLY if the CONTROLLER named it
+			// in their own utterance within the window (per-user STT set _controllerNamedAt)
+			// — deterministic, at output time, ignores the mixed turn entirely so 879/Lucy
+			// can't open it. allowAckAudible still lets an entry/wake ack through. Without a
+			// controller → legacy meeting-mode suppression.
+			const _NAMEGATE_WINDOW = Number(process.env.SUTANDO_NAMEGATE_WINDOW_MS) || 12000;
+			const _audioOpen = VOICE_CONTROLLER
+				? (s.allowAckAudible || (Date.now() - ((s as any)._controllerNamedAt || 0) < _NAMEGATE_WINDOW))
+				: (!s.meetingMode || s.allowAckAudible);
+			if (_audioOpen) {
 				pushAudio(pcm48Stereo);
 				outChunks++;
 				if (s.allowAckAudible) (s as any)._ackEmitted = true;
