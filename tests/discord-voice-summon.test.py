@@ -55,7 +55,7 @@ print(f"\nOK — {len(CASES)}/{len(CASES)} summon-match cases passed")
 # answer iff this bot is @-mentioned OR no other Sutando bot is named.
 from join_trigger import summon_is_for_me as _sfm  # noqa: E402
 
-ECHO, FOXTROT, HUMAN = 100000000000000001, 100000000000000002, 100000000000000003
+BOT_A, BOT_B, HUMAN = 100000000000000001, 100000000000000002, 100000000000000003
 
 
 class _U:
@@ -70,16 +70,16 @@ class _Msg:
 
 GATE_CASES = [
     # (description, mentions, self_id, expected)
-    ("bare summon → Echo joins", [], ECHO, True),
-    ("bare summon → Foxtrot joins", [], FOXTROT, True),
-    ("@Foxtrot → Echo stays out", [_U(FOXTROT, True)], ECHO, False),
-    ("@Foxtrot → Foxtrot joins", [_U(FOXTROT, True)], FOXTROT, True),
-    ("@Echo → Echo joins", [_U(ECHO, True)], ECHO, True),
-    ("@Echo → Foxtrot stays out", [_U(ECHO, True)], FOXTROT, False),
-    ("@human only → Echo still joins", [_U(HUMAN, False)], ECHO, True),
-    ("@Echo @Foxtrot → Echo joins", [_U(ECHO, True), _U(FOXTROT, True)], ECHO, True),
-    ("@Echo @Foxtrot → Foxtrot joins", [_U(ECHO, True), _U(FOXTROT, True)], FOXTROT, True),
-    ("self_id None → backward-compat join", [_U(FOXTROT, True)], None, True),
+    ("bare summon → BotA joins", [], BOT_A, True),
+    ("bare summon → BotB joins", [], BOT_B, True),
+    ("@BotB → BotA stays out", [_U(BOT_B, True)], BOT_A, False),
+    ("@BotB → BotB joins", [_U(BOT_B, True)], BOT_B, True),
+    ("@BotA → BotA joins", [_U(BOT_A, True)], BOT_A, True),
+    ("@BotA → BotB stays out", [_U(BOT_A, True)], BOT_B, False),
+    ("@human only → BotA still joins", [_U(HUMAN, False)], BOT_A, True),
+    ("@BotA @BotB → BotA joins", [_U(BOT_A, True), _U(BOT_B, True)], BOT_A, True),
+    ("@BotA @BotB → BotB joins", [_U(BOT_A, True), _U(BOT_B, True)], BOT_B, True),
+    ("self_id None → backward-compat join", [_U(BOT_B, True)], None, True),
 ]
 
 gate_fail = []
