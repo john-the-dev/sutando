@@ -1346,12 +1346,25 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			if (_audioOpen) {
 				(s as any)._turnAudioAllowed = true;  // latch — held across continuous audio
 				(s as any)._lastAudioTs = _nowMs;
+				(s as any)._wasPlaying = true;
 				pushAudio(pcm48Stereo);
 				outChunks++;
 				if (s.allowAckAudible) (s as any)._ackEmitted = true;
 				if (outChunks === 1 || outChunks % 50 === 0) {
 					console.log(`${ts()} [Audio] outbound chunks: ${outChunks} (last=${pcm48Stereo.length}B)`);
 				}
+			} else if ((s as any)._wasPlaying) {
+				// #1456 OBSERVABILITY (Susan 2026-06-05: "别猜，没记下来就补上"): audio was
+				// playing and is now SUPPRESSED — this IS the "最后一句没听到" cutoff. Record
+				// the EXACT reason to sqlite + log so the cause is CONFIRMED, never guessed.
+				(s as any)._wasPlaying = false;
+				const _sinceNamed = _nowMs - ((s as any)._controllerNamedAt || 0);
+				const _reason = s.meetingMode ? 'meetingMode=true'
+					: VOICE_CONTROLLER && _sinceNamed >= _NAMEGATE_WINDOW
+						? `name-window expired (${_sinceNamed}ms ≥ ${_NAMEGATE_WINDOW}ms since you last named me)`
+						: 'gate closed (other)';
+				console.log(`${ts()} [Audio] ✂ SUPPRESSED mid-reply — ${_reason} (chunks so far=${outChunks})`);
+				try { recordConversation('discord-agent', `✂ audio cut mid-reply — ${_reason}`, s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
 			}
 		} catch (err) {
 			console.error(`${ts()} [Audio] outbound convert failed:`, err);
