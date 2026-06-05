@@ -800,6 +800,40 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 		// dismiss = SIGTERM self so cleanupSession() handler runs.
 		// Pushed BEFORE the inline-tools merge loop so the dedupe-by-name
 		// keeps THIS one and drops the core dismissTool.
+		// #1456 (Susan 2026-06-05): switch_mode TOOL — Gemini calls it on INTENT, so a mode
+		// switch no longer depends on phrase-matching the ASR transcript (which garbled
+		// "meeting mode" → "switch to me" and silently failed to flip the flag). Mirrors
+		// voice-agent's switchModeTool. The tool-gate below allows it whenever the controller
+		// is addressing the bot, in either mode (so it can also EXIT meeting mode).
+		tools.push({
+			name: 'switch_mode',
+			description:
+				'Switch THIS bot between active mode and silent meeting / note-taking mode. ' +
+				'Call switch_mode("meeting") when the user asks you to take notes, go silent, be quiet, or enter meeting/passive mode. ' +
+				'Call switch_mode("active") when the user asks you to come back, resume, or be active. ' +
+				'Prefer THIS tool over inferring the mode from raw words — speech-to-text mangles phrases like "meeting mode".',
+			parameters: z.object({ mode: z.enum(['active', 'meeting']) }),
+			execution: 'inline',
+			async execute(args) {
+				const { mode } = args as { mode: 'active' | 'meeting' };
+				if (mode === 'meeting') {
+					if (!s.meetingMode) {
+						s.meetingEntered = true; s.meetingMode = true; s.allowAckAudible = true; (s as any)._ackEmitted = false;
+						try { recordConversation('discord-agent', '⇄ MODE → meeting (switch_mode tool)', s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
+						try { writeFileSync(VOICE_MODE_FILE, 'meeting'); } catch {}
+						console.log(`${ts()} [Meeting] switch_mode tool → meeting`);
+					}
+					return { status: 'meeting_mode', instruction: 'Briefly confirm OUT LOUD in one short sentence that you are switching to silent note-taking, then stay silent and only listen. The only tool you may call unprompted is save_meeting_note.' };
+				}
+				if (s.meetingMode || s.meetingEntered) {
+					s.meetingEntered = false; s.meetingMode = false; s.allowAckAudible = true; (s as any)._ackEmitted = false;
+					try { recordConversation('discord-agent', '⇄ MODE → active (switch_mode tool)', s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
+					try { writeFileSync(VOICE_MODE_FILE, 'active'); } catch {}
+					console.log(`${ts()} [Meeting] switch_mode tool → active`);
+				}
+				return { status: 'active_mode', instruction: 'Back to active mode. Respond normally and use tools as needed.' };
+			},
+		});
 		tools.push({
 			name: 'dismiss',
 			description:
@@ -875,6 +909,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 	//                session — owner can rejoin via DM)
 	//   open       — inlineTools + get_task_status (read-only surface)
 	const ownerOnlyNames = new Set<string>(ownerOnlyTools.map(t => t.name));
+	ownerOnlyNames.add('switch_mode');  // #1456: classify as owner-tier so the controller-gate wrapper applies (only the controller may switch the bot's mode)
 	const teamNames = new Set<string>(configurableTools.map(t => t.name));
 	for (let i = 0; i < tools.length; i++) {
 		const t = tools[i];
@@ -891,8 +926,12 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 				// fired `work` while gated (Susan "maddy 还在"); this enforces it deterministically.
 				if (VOICE_CONTROLLER) {
 					const _win = Number(process.env.SUTANDO_NAMEGATE_WINDOW_MS) || 20000;
+					const _addressed = (s.gate?.lastAddressedToMe ?? true) && (Date.now() - ((s as any)._controllerNamedAt || 0) < _win);
+					// switch_mode is the MODE-control tool — it must work in EITHER mode (esp. to
+					// EXIT meeting), so exempt it from the `!meetingMode` clause; it only needs the
+					// controller to be addressing the bot. All other tools stay inert while silent.
 					const _allowed = s.allowAckAudible
-						|| (!s.meetingMode && (s.gate?.lastAddressedToMe ?? true) && (Date.now() - ((s as any)._controllerNamedAt || 0) < _win));
+						|| (t.name === 'switch_mode' ? _addressed : (!s.meetingMode && _addressed));
 					if (!_allowed) {
 						console.log(`${ts()} [NameGate] tool '${t.name}' blocked — controller hasn't addressed the bot`);
 						return { status: 'silent', message: 'Gated: the bot is silent until the controller addresses it.' };
