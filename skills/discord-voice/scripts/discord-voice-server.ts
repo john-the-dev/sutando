@@ -1311,11 +1311,17 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// — deterministic, at output time, ignores the mixed turn entirely so 879/Lucy
 			// can't open it. allowAckAudible still lets an entry/wake ack through. Without a
 			// controller → legacy meeting-mode suppression.
+			// Per-turn LATCH (Susan 2026-06-04: "第二句我没听到"): once a reply STARTS
+			// while addressed (within window), let the WHOLE turn play — the window
+			// expiring mid-reply must NOT cut off later sentences. The latch is reset
+			// at turn.end, so the window only governs whether a NEW turn opens.
 			const _NAMEGATE_WINDOW = Number(process.env.SUTANDO_NAMEGATE_WINDOW_MS) || 12000;
 			const _audioOpen = VOICE_CONTROLLER
-				? (s.allowAckAudible || (Date.now() - ((s as any)._controllerNamedAt || 0) < _NAMEGATE_WINDOW))
+				? (s.allowAckAudible || (s as any)._turnAudioAllowed
+					|| (Date.now() - ((s as any)._controllerNamedAt || 0) < _NAMEGATE_WINDOW))
 				: (!s.meetingMode || s.allowAckAudible);
 			if (_audioOpen) {
+				(s as any)._turnAudioAllowed = true;  // latch for the rest of this turn
 				pushAudio(pcm48Stereo);
 				outChunks++;
 				if (s.allowAckAudible) (s as any)._ackEmitted = true;
@@ -1366,6 +1372,10 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 	// Transcript mirroring + result-queue drain
 	let lastProcessedIdx = 0;
 	session.eventBus.subscribe('turn.end', () => {
+		// #1456: reset the per-turn audio latch so the NEXT turn must be freshly
+		// addressed (within window) to open — the latch only keeps an already-
+		// started reply playing through window expiry.
+		(s as any)._turnAudioAllowed = false;
 		// Watchdog: a turn completed — clear the hang counters.
 		(s as any).lastTurnActivityTs = Date.now();
 		(s as any).utterancesSinceTurn = 0;
