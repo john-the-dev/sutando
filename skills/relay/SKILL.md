@@ -30,7 +30,7 @@ workspace/relay/
 - **File naming:** `relay-{epoch}.md` — sortable + greppable, matches the `task-{epoch}.txt` shape.
 - **Multiple files allowed:** `/relay` always creates a NEW file by default. `--append` appends to the LATEST unprocessed `relay-*.md` instead of creating a new one.
 - **Consumption:** catchup-after-startup reads ALL unprocessed `relay-*.md` files in mtime order (oldest first), prints them as section 0 of its briefing, then `mv`s each one to `processed/` (mirroring the result-watcher drain pattern).
-- **Cleanup:** kept indefinitely on local disk. Tiny files (~200-500 bytes each); a year of relay notes is < 1 MB. Sync via the existing memory-sync engine for fleet visibility.
+- **Cleanup:** kept indefinitely on local disk. Tiny files (~200-500 bytes each); a year of relay notes is < 1 MB. Sync via the workspace-sync engine (`scripts/sync-workspace.sh`) for fleet visibility — the legacy `sync-memory.sh` flow is deprecated in v0.3.0 and removed in v0.4.0.
 
 ## What to write
 

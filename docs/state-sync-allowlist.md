@@ -168,6 +168,6 @@ This is the rough shape for when code actually lands; not part of this PR.
 
 - [`docs/workspace-design.md`](workspace-design.md) — 3-space model. This proposal sits inside the State space and tunes its sync rule from "none" to "opt-in allowlist."
 - [`docs/workspace-contract.md`](workspace-contract.md) — implementation reference. Will need a line referencing this doc once the fleet/ path is real.
-- [`docs/memory-sync.md`](memory-sync.md) — Memory sync mechanics. The fleet sync rides on the same transport in v1.
+- [`docs/workspace-sync.md`](workspace-sync.md) — Workspace sync mechanics (canonical as of v0.3.0). The fleet sync rides on the same transport in v1.
 
 Tracks #872. RFC #858 Decision 4.
