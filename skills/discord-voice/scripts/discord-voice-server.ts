@@ -1467,7 +1467,12 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		const _withinNameWindow = (s as any)._turnAudioAllowed || _controllerIsSpeaker;
 			const _audioOpen = s.allowAckAudible
 				|| (_nowMs < ((s as any)._forceAudibleUntil || 0))  // #1456: force-audible window after a mode switch (ack guaranteed heard)
-				|| (!s.meetingMode && (VOICE_CONTROLLER ? _withinNameWindow : true));
+				|| (!s.meetingMode && (VOICE_CONTROLLER ? _withinNameWindow : true))
+				// Meeting mode wakes on NAME: stay audible while the gate marks the bot as
+				// addressed (s.gate.lastAddressedToMe — set true by a name-summon, false by
+				// standby). Without this branch, a meeting-mode bot stayed muted even when
+				// summoned (2026-06-06 live meeting: flood of "MUTED from start … addressedToMe=true").
+				|| (s.meetingMode && s.gate?.lastAddressedToMe === true);
 			if (_audioOpen) {
 				(s as any)._turnAudioAllowed = true;  // latch — held across continuous audio
 				(s as any)._lastAudioTs = _nowMs;
