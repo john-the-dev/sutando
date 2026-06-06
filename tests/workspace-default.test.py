@@ -57,12 +57,16 @@ class TestWorkspaceDefault(unittest.TestCase):
         elif "SUTANDO_WORKSPACE" in os.environ:
             del os.environ["SUTANDO_WORKSPACE"]
 
-    def test_default_is_dot_sutando_workspace_under_home(self):
+    def test_default_is_sutando_workspace_under_home(self):
+        # Post-v0.8 (#1440 + Mini opinion-requested 2026-06-06): the legacy
+        # `~/.sutando/workspace/` namespace is retired; `default_workspace_dir`
+        # now returns `~/sutando-workspace/` for ad-hoc invocations outside a
+        # checkout. NOT the production default — that's `<repo>/workspace/`
+        # via `src.sutando_config.resolve_workspace`.
         d = default_workspace_dir()
-        self.assertEqual(d.name, "workspace")
-        self.assertEqual(d.parent.name, ".sutando")
-        self.assertEqual(d.parent.parent, Path.home())
-        self.assertEqual(d, Path.home() / ".sutando" / "workspace")
+        self.assertEqual(d.name, "sutando-workspace")
+        self.assertEqual(d.parent, Path.home())
+        self.assertEqual(d, Path.home() / "sutando-workspace")
 
     def test_resolve_uses_env_when_test_mode_set(self):
         # v0.8: `$SUTANDO_WORKSPACE` is no longer honored in production.
