@@ -1,11 +1,22 @@
 """Canonical workspace-directory resolution for Sutando services.
 
 All runtime artifacts (tasks/, results/, state/, data/, build_log.md, ...) live
-under the workspace dir. Components MUST consult `SUTANDO_WORKSPACE` first;
-when unset, fall back to `~/.sutando/workspace/` — a hidden, OS-neutral home-
-relative path that stays out of Sutando.app's `~/Library/Application Support/
-sutando/` (which owns Chromium-style cache: Cache/, GPUCache/, Cookies/,
-blob_storage/, etc.).
+under the workspace dir. Post-v0.8 (#1440), components MUST resolve via the M0
+helper (`scripts/sutando-config.sh workspace` from shell, or
+`from src.sutando_config import resolve_workspace` from Python) which reads
+`sutando.config.local.json` (per-clone, gitignored) and defaults to
+`<repo>/workspace/`.
+
+`$SUTANDO_WORKSPACE` is no longer honored for workspace resolution as of v0.8;
+if set, it is still detected to fire a one-time deprecation warning and trigger
+one-time auto-migration via per-source sentinels (PR #1478), but the resolver
+ignores its value. The ad-hoc no-config-no-repo-root last-ditch fallback is
+`~/sutando-workspace/` (was `~/.sutando/workspace/` pre-v0.8 — namespace
+retired per Mini opinion-requested 2026-06-06).
+
+This module is the historic Python wrapper; new code should call
+`src.sutando_config.resolve_workspace` directly. The `default_workspace_dir`
+function is retained for tests only — it is no longer the production default.
 
 Historic anti-pattern: bridges fell back to `Path(__file__).resolve().parent.parent`
 which resolved to the repo root, polluting `git status` with runtime artifacts
@@ -20,7 +31,7 @@ import sys
 from pathlib import Path
 
 
-_DEFAULT_SUBPATH = (".sutando", "workspace")
+_DEFAULT_SUBPATH = ("sutando-workspace",)  # post-v0.8 fallback for tests + ad-hoc invocations
 # Loose status/state .json files that historically sat at the workspace root.
 # Per the workspace-design model they belong under `state/` alongside the other
 # machine-local status files (state/cores/, state/subscriptions.json, …). The
@@ -44,7 +55,12 @@ _LEGACY_DIRS = ("tasks", "results", "state", "notes")  # the runtime-state dirs 
 
 
 def default_workspace_dir() -> Path:
-    """Return `~/.sutando/workspace/`."""
+    """Return `~/sutando-workspace/` — the post-v0.8 last-ditch fallback for
+    ad-hoc invocations outside a checkout. NOT the production default; that
+    is `<repo>/workspace/` per #1440, resolved by
+    `src.sutando_config.resolve_workspace`. Used by tests for mocking and by
+    callers that need a deterministic path when no config + no repo root.
+    """
     return Path.home().joinpath(*_DEFAULT_SUBPATH)
 
 
