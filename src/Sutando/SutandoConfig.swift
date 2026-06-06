@@ -225,7 +225,13 @@ enum SutandoConfig {
         } else if let r = root {
             resolved = (r as NSString).appendingPathComponent(hardcodedWorkspaceDefaultRel)
         } else {
-            resolved = NSHomeDirectory() + "/.sutando/workspace"
+            // Last-ditch fallback for ad-hoc invocations outside a checkout.
+            // Post-v0.8 (#1440 + Mini opinion-requested 2026-06-06), the legacy
+            // `.sutando/workspace/` namespace is gone; use the unhidden
+            // `~/sutando-workspace/` default instead so the deprecated
+            // `.sutando/` alias doesn't live on indefinitely. Mirrors
+            // `src/sutando_config.py`'s no-config-no-repo-root branch.
+            resolved = NSHomeDirectory() + "/sutando-workspace"
         }
 
         // .env drift warning (mirrors the Python + TS twins)

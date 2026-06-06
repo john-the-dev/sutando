@@ -342,11 +342,12 @@ def resolve_workspace(repo_root: Optional[Path] = None) -> Path:
     if cfg_path:
         resolved = Path(cfg_path).expanduser().resolve()
     elif root is None:
-        # No config and no repo root — fall back to the historic default so we
-        # don't break ad-hoc invocations outside a checkout. workspace_default.py
-        # has the same behavior; preserving it here avoids regressions on
-        # services that import this loader before the cutover.
-        resolved = Path.home().joinpath(".sutando", "workspace").resolve()
+        # No config and no repo root — last-ditch fallback for ad-hoc invocations
+        # outside a checkout. Post-v0.8 (#1440 + Mini opinion-requested 2026-06-06),
+        # the legacy `.sutando/workspace/` namespace is gone; use the unhidden
+        # `~/sutando-workspace/` default instead so the deprecated `.sutando/`
+        # alias doesn't live on indefinitely. workspace_default.py mirrors this.
+        resolved = Path.home().joinpath("sutando-workspace").resolve()
     else:
         resolved = (root / _HARDCODED_WORKSPACE_DEFAULT_REL).resolve()
 

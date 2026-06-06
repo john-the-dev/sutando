@@ -39,10 +39,13 @@ if [ -f "$__HELPER" ]; then
   # shellcheck source=workspace_resolve.sh
   source "$__HELPER"
   resolve_workspace_or_die
-elif [ -n "${SUTANDO_WORKSPACE:-}" ]; then
-  WORKSPACE="${SUTANDO_WORKSPACE/#\~/$HOME}"
 else
-  echo "session-handoff: cannot resolve workspace — workspace_resolve.sh not found at \$REPO/src/ or alongside this script, and \$SUTANDO_WORKSPACE is not set." >&2
+  # Post-v0.8 (#1440 + Mini opinion-requested 2026-06-06): no env-var
+  # fallback. `$SUTANDO_WORKSPACE` is no longer honored for workspace
+  # resolution; if the M0 helper isn't reachable, session-handoff can't
+  # save meaningful state. Fail loud rather than risk writing
+  # session-state.md to the wrong workspace.
+  echo "session-handoff: cannot resolve workspace — workspace_resolve.sh not found at \$REPO/src/ or alongside this script. Verify the sutando checkout has the M0 helper." >&2
   exit 1
 fi
 unset __HELPER
