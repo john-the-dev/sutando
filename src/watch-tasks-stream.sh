@@ -24,15 +24,14 @@ __SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 __REPO_ROOT="$(cd "$__SCRIPT_DIR/.." && pwd)"
 
 # Resolve TASKS_DIR. Priority: explicit positional arg → canonical M0 loader.
-# Post-v0.8 (#1440 + Mini opinion-requested 2026-06-06) the legacy
-# `$SUTANDO_WORKSPACE` env-var fallback and hardcoded `~/.sutando/workspace/`
-# fallback are gone: the bridges (discord-bridge.py, telegram-bridge.py,
-# dm-result.py — see PRs #708/#720/#722/#723) write to the resolved workspace,
-# and if this watcher diverged from that resolution owner DMs would land
-# silently. Diagnosed 2026-05-15 (~3 dropped DMs over 17 min) and again
-# 2026-05-16 (~45 min silent gap when the Monitor was started without
-# `$SUTANDO_WORKSPACE` exported into its env). Single resolution path = no
-# divergence.
+# Post-v0.8 (#1440 + Mini opinion-requested 2026-06-06) the legacy env-var
+# fallback and hardcoded pre-v0.8 default fallback are gone: the bridges
+# (discord-bridge.py, telegram-bridge.py, dm-result.py — see PRs
+# #708/#720/#722/#723) write to the resolved workspace, and if this watcher
+# diverged from that resolution owner DMs would land silently. Diagnosed
+# 2026-05-15 (~3 dropped DMs over 17 min) and again 2026-05-16 (~45 min
+# silent gap when the Monitor was started without the env var exported
+# into its env). Single resolution path = no divergence.
 if [ -n "${1:-}" ]; then
   TASKS_DIR="$1"
 elif [ -f "$__REPO_ROOT/scripts/sutando-config.sh" ]; then

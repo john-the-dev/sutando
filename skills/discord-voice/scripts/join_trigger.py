@@ -42,8 +42,11 @@ DEFAULT_JOIN_PHRASE = "za warudo"
 
 def _resolve_workspace() -> Path:
     """Resolve the Sutando workspace dir the same way the rest of the fleet
-    does. Prefers the canonical helper; falls back to the documented default
-    (`$SUTANDO_WORKSPACE` env, else `~/.sutando/workspace/`)."""
+    does. Prefers the canonical helper (`workspace_default.resolve_workspace`);
+    post-v0.8 (#1440) `$SUTANDO_WORKSPACE` is no longer honored for resolution
+    and the default is `<repo>/workspace/`. The except block below keeps the
+    env-var awareness as a last-ditch fallback only for the rare ad-hoc case
+    where the helper import fails — the resolver itself ignores the env var."""
     try:
         sys.path.insert(0, str(_REPO_ROOT / "src"))
         from workspace_default import resolve_workspace  # type: ignore
