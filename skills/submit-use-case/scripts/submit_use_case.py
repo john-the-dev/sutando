@@ -85,17 +85,16 @@ def suggest_reframes(title: str) -> list[str]:
 def is_chi_fleet() -> bool:
     """Detect whether the runner is on Chi's Sutando fleet.
 
-    Two signals (either suffices):
-      1. /Users/wangchi/.sutando/workspace/ exists (canonical fleet workspace)
-      2. SUTANDO_FLEET_OWNER env var equals 'chi'
+    Single signal: `SUTANDO_FLEET_OWNER=chi` in env (Chi sets this in his
+    `.env` once per host). The prior path-existence probe to a hardcoded
+    Chi-specific workspace path is gone post-#1440 — the workspace is
+    in-repo now, so the path never exists.
 
     Default behavior off-fleet: DON'T touch git config. OSS contributors must
     sign the CLA under their own identity — that's the whole point of the
     CLA-Assistant channel.
     """
-    if os.environ.get("SUTANDO_FLEET_OWNER", "").lower() == "chi":
-        return True
-    return Path("/Users/wangchi/.sutando/workspace").exists()
+    return os.environ.get("SUTANDO_FLEET_OWNER", "").lower() == "chi"
 
 
 # --- idempotency probes -----------------------------------------------------
