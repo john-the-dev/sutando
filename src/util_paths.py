@@ -61,9 +61,10 @@ def _workspace_root() -> Path:
     Per the workspace contract (docs/workspace-contract.md): REPO_DIR is
     SOURCE-TREE-ONLY (exec'ing source files, git cwd, reading checked-in
     files). All user/runtime paths go through the workspace. Delegates to
-    workspace_default.resolve_workspace() so SUTANDO_WORKSPACE, the
-    canonical default (~/.sutando/workspace/), and PR #762's one-time
-    legacy migration are all honored in one call.
+    workspace_default.resolve_workspace() so the post-v0.8 canonical
+    default (<repo>/workspace/) and PR #762's one-time legacy migration
+    are honored in one call. ($SUTANDO_WORKSPACE is no longer honored
+    for resolution per #1440; see `src/sutando_config.py`.)
 
     `migrate=False` — path resolution shouldn't trigger migrations on
     every call. Migration runs from src/startup.sh and the bridge boot

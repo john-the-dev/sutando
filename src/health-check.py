@@ -844,10 +844,11 @@ def run_all_checks() -> list[dict]:
     else:
         checks.append({"name": "memory-dir", "status": "ok", "detail": "not yet created (normal for new installs)"})
 
-    # Notes — canonical home is shared private dir post-migration.
+    # Notes — canonical home is the resolved workspace post-migration.
     # Pass WORKSPACE_DIR (not REPO_DIR) so the check resolves to
-    # ~/.sutando/workspace/notes rather than <repo>/notes — the notes/
-    # .gitkeep was removed from the repo in #793's workspace migration.
+    # <workspace>/notes rather than <repo>/notes — the notes/.gitkeep was
+    # removed from the repo in #793's workspace migration. Post-v0.8
+    # (#1440) the workspace defaults to <repo>/workspace/.
     checks.append(check_directory(Path(shared_personal_path("notes", WORKSPACE_DIR)), "notes-dir"))
 
     # Notes split-brain: both <repo>/notes/ and <workspace>/notes/ with overlapping files (#1266)

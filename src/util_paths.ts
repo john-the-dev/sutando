@@ -12,10 +12,10 @@
 //
 // Both fall back to `<workspace>/<filename>` so existing installs keep working
 // until they migrate. The `workspace` arg is optional; when omitted, the
-// helpers resolve to `$SUTANDO_WORKSPACE` (default `~/.sutando/workspace/`)
-// via resolveWorkspace() — NOT process.cwd(). Pre-#839 fixes the fallback was
-// cwd, which silently produced the wrong path on hosts where the caller's
-// cwd drifted from the workspace dir.
+// helpers resolve via `resolveWorkspace()` — post-v0.8 (#1440) the default is
+// `<repo>/workspace/` and `$SUTANDO_WORKSPACE` is no longer honored — NOT
+// process.cwd(). Pre-#839 fixes the fallback was cwd, which silently produced
+// the wrong path on hosts where the caller's cwd drifted from the workspace dir.
 //
 // Env var `SUTANDO_MEMORY_DIR` is the canonical name post-#858 / #870. The
 // legacy alias `SUTANDO_PRIVATE_DIR` is honored as a fallback for one release
