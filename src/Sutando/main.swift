@@ -1475,10 +1475,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     //   1. $SUTANDO_MEMORY_DIR/skills/personal-deictic/ax-read  (private, richer
     //      — includes screenshot + cursor for deictic phrases)
     //   2. $SUTANDO_PRIVATE_DIR/skills/personal-deictic/ax-read (legacy alias, PR #876)
-    //   3. ~/.sutando/memory-sync/skills/personal-deictic/ax-read (default private)
-    //   4. <repo>/skills/context-drop/ax-read                    (public fallback,
+    //   3. <repo>/skills/context-drop/ax-read                    (public fallback,
     //      text-only — ships in this repo so public-repo installs get the same
     //      ⌃C experience without needing the private personal-deictic skill)
+    //
+    // Post-v0.3.0 (#1440 + Mini opinion-requested 2026-06-06): the pre-v0.3.0
+    // `~/.sutando/memory-sync/skills/personal-deictic/ax-read` default-private
+    // path is gone — the legacy `.sutando/memory-sync/` clone is deprecated
+    // (sync-memory.sh removed in v0.4.0). $SUTANDO_MEMORY_DIR is honored
+    // explicitly via candidate 1 when set.
     //
     // Returns nil when no binary is found; callers fall back to the in-process
     // legacy AX path.
@@ -1489,7 +1494,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let candidates = [
             env["SUTANDO_MEMORY_DIR"].map { $0 + privateSuffix },
             env["SUTANDO_PRIVATE_DIR"].map { $0 + privateSuffix },
-            NSString(string: "~/.sutando/memory-sync" + privateSuffix).expandingTildeInPath,
             repoRoot + "/skills/context-drop/ax-read",
         ].compactMap { $0 }
         let fm = FileManager.default
