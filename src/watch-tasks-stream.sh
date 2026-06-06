@@ -23,28 +23,24 @@ set -u
 __SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 __REPO_ROOT="$(cd "$__SCRIPT_DIR/.." && pwd)"
 
-# Resolve TASKS_DIR. Priority: explicit positional arg → canonical loader
-# (env + config + default) — matching `workspace_default.resolve_workspace()`,
-# the shared contract every bridge already follows via the M0 cutover.
-# The bridges (discord-bridge.py, telegram-bridge.py, dm-result.py — see PRs
-# #708/#720/#722/#723) write to the resolved workspace; if this watcher fell
-# back to `<repo>/tasks/` instead, the bridges would write to one dir and the
-# watcher would poll another, so owner DMs land silently. Diagnosed 2026-05-15
-# (~3 dropped DMs over 17 min) and again 2026-05-16 (~45 min silent gap when
-# the Monitor was started without SUTANDO_WORKSPACE exported into its env) —
-# second incident motivated replacing the legacy `<repo>/tasks` fallback with
-# the workspace default so the divergence can't happen even when callers
-# forget to export. M0 cutover delegates this to scripts/sutando-config.sh,
-# with the inline legacy-default fallback retained for non-checkout installs.
+# Resolve TASKS_DIR. Priority: explicit positional arg → canonical M0 loader.
+# Post-v0.8 (#1440 + Mini opinion-requested 2026-06-06) the legacy
+# `$SUTANDO_WORKSPACE` env-var fallback and hardcoded `~/.sutando/workspace/`
+# fallback are gone: the bridges (discord-bridge.py, telegram-bridge.py,
+# dm-result.py — see PRs #708/#720/#722/#723) write to the resolved workspace,
+# and if this watcher diverged from that resolution owner DMs would land
+# silently. Diagnosed 2026-05-15 (~3 dropped DMs over 17 min) and again
+# 2026-05-16 (~45 min silent gap when the Monitor was started without
+# `$SUTANDO_WORKSPACE` exported into its env). Single resolution path = no
+# divergence.
 if [ -n "${1:-}" ]; then
   TASKS_DIR="$1"
 elif [ -f "$__REPO_ROOT/scripts/sutando-config.sh" ]; then
   __WS="$(bash "$__REPO_ROOT/scripts/sutando-config.sh" workspace)"
   TASKS_DIR="$__WS/tasks"
-elif [ -n "${SUTANDO_WORKSPACE:-}" ]; then
-  TASKS_DIR="$SUTANDO_WORKSPACE/tasks"
 else
-  TASKS_DIR="$HOME/.sutando/workspace/tasks"
+  echo "watch-tasks-stream: cannot resolve workspace — scripts/sutando-config.sh not found at \$__REPO_ROOT. Verify the sutando checkout is intact." >&2
+  exit 1
 fi
 mkdir -p "$TASKS_DIR"
 # Canonicalize watched dir for the parent-dir filter below. fswatch always
@@ -62,14 +58,9 @@ TASKS_DIR_ABS="$(cd "$TASKS_DIR" && pwd -P)"
 #
 # Same workspace resolution as TASKS_DIR (above): M0 cutover routes through
 # the canonical loader. Living under state/ matches the workspace contract
-# in CLAUDE.md (loose status/state files belong there).
-if [ -f "$__REPO_ROOT/scripts/sutando-config.sh" ]; then
-  STATE_DIR="$(bash "$__REPO_ROOT/scripts/sutando-config.sh" workspace)/state"
-elif [ -n "${SUTANDO_WORKSPACE:-}" ]; then
-  STATE_DIR="${SUTANDO_WORKSPACE/#\~/$HOME}/state"
-else
-  STATE_DIR="$HOME/.sutando/workspace/state"
-fi
+# in CLAUDE.md (loose status/state files belong there). Post-v0.8 the legacy
+# env-var + hardcoded fallbacks are gone — fail-loud if helper missing.
+STATE_DIR="$(bash "$__REPO_ROOT/scripts/sutando-config.sh" workspace)/state"
 mkdir -p "$STATE_DIR"
 PID_FILE="$STATE_DIR/watch-tasks-stream.pid"
 echo "$$" > "$PID_FILE"
