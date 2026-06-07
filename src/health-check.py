@@ -657,6 +657,73 @@ def _extract_body(text: str, start: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Battery and memory health checks
+# -------------------------
+
+def check_battery() -> dict:
+    """Check power source and battery level (macOS only). Issue #1486."""
+    name = "battery"
+    warn_pct = int(os.environ.get("SUTANDO_BATTERY_WARN_PCT", "20"))
+    try:
+        result = subprocess.run(
+            ["pmset", "-g", "batt"],
+            capture_output=True, text=True, timeout=5
+        )
+        output = result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return {"name": name, "status": "ok", "detail": "pmset not available (not macOS or VM)"}
+
+    if "AC Power" in output:
+        # Plugged in — no concern, but extract percentage if available
+        import re
+        m = re.search(r'(\d+)%', output)
+        pct = int(m.group(1)) if m else None
+        detail = f"AC power" + (f", {pct}% charged" if pct is not None else "")
+        return {"name": name, "status": "ok", "detail": detail}
+
+    if "Battery Power" in output or "'Battery Power'" in output:
+        import re
+        m = re.search(r'(\d+)%', output)
+        pct = int(m.group(1)) if m else None
+        if pct is None:
+            return {"name": name, "status": "warn", "detail": "on battery — level unknown"}
+        if pct <= warn_pct:
+            return {"name": name, "status": "fail", "detail": f"on battery at {pct}% — critically low (threshold {warn_pct}%)"}
+        return {"name": name, "status": "warn", "detail": f"on battery at {pct}% — no AC power"}
+
+    return {"name": name, "status": "ok", "detail": "power state unknown"}
+
+def check_memory() -> dict:
+    """Warn when system memory is critically low — OOM kills crash mid-task. Issue #1485."""
+    name = "memory"
+    warn_mb = int(os.environ.get("SUTANDO_MEMORY_WARN_FREE_MB", "500"))
+    fail_mb = int(os.environ.get("SUTANDO_MEMORY_FAIL_FREE_MB", "200"))
+    try:
+        result = subprocess.run(
+            ["top", "-l", "1", "-s", "0", "-n", "0"],
+            capture_output=True, text=True, timeout=10
+        )
+        output = result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return {"name": name, "status": "ok", "detail": "top not available (non-macOS or VM)"}
+
+    import re as _re
+    m = _re.search(r'PhysMem:.+?(\d+)([MGT])\s+unused', output)
+    if not m:
+        return {"name": name, "status": "ok", "detail": "memory info unavailable"}
+
+    val, unit = int(m.group(1)), m.group(2)
+    free_mb = val * 1024 if unit == "G" else (val * 1024 if unit == "T" else val)
+
+    if free_mb <= fail_mb:
+        return {"name": name, "status": "fail",
+                "detail": f"{free_mb}M free — critically low (threshold {fail_mb}M)"}
+    if free_mb <= warn_mb:
+        return {"name": name, "status": "warn",
+                "detail": f"{free_mb}M free — low (threshold {warn_mb}M)"}
+    return {"name": name, "status": "ok", "detail": f"{free_mb}M free"}
+
+
 # Stuck-loop / dead-watcher detection
 # ---------------------------------------------------------------------------
 # These two checks together catch the failure mode observed 2026-05-06 where
@@ -1126,12 +1193,81 @@ def run_all_checks() -> list[dict]:
             # with the cause so it's debuggable, not a routine "app is down."
             checks.append({"name": "sutando-app", "status": "warn", "detail": f"detection failed (pgrep: {pgrep_err or 'unknown error'}) — actual app state unknown"})
 
-    # Stuck-loop / queue-pileup detection — consequence-level signals that
+    # Battery and memory health checks
+# -------------------------
+
+def check_battery() -> dict:
+    """Check power source and battery level (macOS only). Issue #1486."""
+    name = "battery"
+    warn_pct = int(os.environ.get("SUTANDO_BATTERY_WARN_PCT", "20"))
+    try:
+        result = subprocess.run(
+            ["pmset", "-g", "batt"],
+            capture_output=True, text=True, timeout=5
+        )
+        output = result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return {"name": name, "status": "ok", "detail": "pmset not available (not macOS or VM)"}
+
+    if "AC Power" in output:
+        # Plugged in — no concern, but extract percentage if available
+        import re
+        m = re.search(r'(\d+)%', output)
+        pct = int(m.group(1)) if m else None
+        detail = f"AC power" + (f", {pct}% charged" if pct is not None else "")
+        return {"name": name, "status": "ok", "detail": detail}
+
+    if "Battery Power" in output or "'Battery Power'" in output:
+        import re
+        m = re.search(r'(\d+)%', output)
+        pct = int(m.group(1)) if m else None
+        if pct is None:
+            return {"name": name, "status": "warn", "detail": "on battery — level unknown"}
+        if pct <= warn_pct:
+            return {"name": name, "status": "fail", "detail": f"on battery at {pct}% — critically low (threshold {warn_pct}%)"}
+        return {"name": name, "status": "warn", "detail": f"on battery at {pct}% — no AC power"}
+
+    return {"name": name, "status": "ok", "detail": "power state unknown"}
+
+def check_memory() -> dict:
+    """Warn when system memory is critically low — OOM kills crash mid-task. Issue #1485."""
+    name = "memory"
+    warn_mb = int(os.environ.get("SUTANDO_MEMORY_WARN_FREE_MB", "500"))
+    fail_mb = int(os.environ.get("SUTANDO_MEMORY_FAIL_FREE_MB", "200"))
+    try:
+        result = subprocess.run(
+            ["top", "-l", "1", "-s", "0", "-n", "0"],
+            capture_output=True, text=True, timeout=10
+        )
+        output = result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return {"name": name, "status": "ok", "detail": "top not available (non-macOS or VM)"}
+
+    import re as _re
+    m = _re.search(r'PhysMem:.+?(\d+)([MGT])\s+unused', output)
+    if not m:
+        return {"name": name, "status": "ok", "detail": "memory info unavailable"}
+
+    val, unit = int(m.group(1)), m.group(2)
+    free_mb = val * 1024 if unit == "G" else (val * 1024 if unit == "T" else val)
+
+    if free_mb <= fail_mb:
+        return {"name": name, "status": "fail",
+                "detail": f"{free_mb}M free — critically low (threshold {fail_mb}M)"}
+    if free_mb <= warn_mb:
+        return {"name": name, "status": "warn",
+                "detail": f"{free_mb}M free — low (threshold {warn_mb}M)"}
+    return {"name": name, "status": "ok", "detail": f"{free_mb}M free"}
+
+
+# Stuck-loop / queue-pileup detection — consequence-level signals that
     # fire whether the watcher died, the proactive loop crashed mid-pass, or
     # both. Independent of which mechanism died.
     loop_stale_sec = int(os.environ.get("SUTANDO_HEALTH_LOOP_STALE_SEC", "600"))
     queue_age_sec = int(os.environ.get("SUTANDO_HEALTH_QUEUE_AGE_SEC", "300"))
     queue_count = int(os.environ.get("SUTANDO_HEALTH_QUEUE_COUNT", "3"))
+    checks.append(check_battery())
+    checks.append(check_memory())
     checks.append(check_core_proactive_loop(threshold_sec=loop_stale_sec))
     checks.append(check_task_queue(threshold_count=queue_count, threshold_age_sec=queue_age_sec))
 
