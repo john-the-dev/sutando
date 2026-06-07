@@ -19,7 +19,7 @@
 import { readFileSync, unlinkSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, execSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createServer, type Server } from 'node:http';
 import { z } from 'zod';
@@ -436,8 +436,59 @@ export function submitFrame(data: Buffer, mimeType: string = 'image/jpeg'): { ok
 async function captureAndSend(source: VisionSource): Promise<{ ok: boolean; error?: string }> {
 	const sendFile = getSendFile();
 	if (!sendFile) return { ok: false, error: 'no active voice session' };
+
+	// Selection-first path (issue #1425): exact text beats frame-eyeballing,
+	// same logic as screen-companion vision_query (PR #1409). Try AX selected
+	// text (native apps), then Chrome JS (browser content). If found, send
+	// both selection AND frame so model has visual + exact text context.
+	// Timeout 800ms per probe (keeps total budget ≤ 1.6s).
+	let selectedText: string | null = null;
+	try {
+		const ax = execSync(
+			`osascript -e 'try
+  tell application "System Events" to tell (first process whose frontmost is true)
+    return value of attribute "AXSelectedText" of (first UI element whose AXFocused is true)
+  end tell
+on error
+  return ""
+end try'`,
+			{ encoding: 'utf-8', timeout: 800 }
+		).trim();
+		if (ax) selectedText = ax;
+	} catch (err) {
+		const e = err as NodeJS.ErrnoException & { signal?: string };
+		if (e.signal === 'SIGTERM' || e.code === 'ETIMEDOUT') {
+			console.error(`${ts()} [Vision] AX probe timed out — AX permission may be denied`);
+		}
+	}
+
+	if (!selectedText) {
+		try {
+			const js = execSync(
+				`osascript -e 'try
+  tell application "Google Chrome" to tell active tab of front window to execute javascript "window.getSelection().toString()"
+on error
+  return ""
+end try'`,
+				{ encoding: 'utf-8', timeout: 800 }
+			).trim();
+			if (js) selectedText = js;
+		} catch { /* Chrome not front, JS disabled, or no selection */ }
+	}
+
 	const frame = await source.capture();
 	sendFile(frame.data.toString('base64'), frame.mimeType);
+
+	// If we found selected text, send it as a follow-up context update (no
+	// generation trigger via turnComplete=false) so the model receives both
+	// the frame AND the exact selection.
+	if (selectedText && sessionRef?.transport?.sendContent) {
+		sessionRef.transport.sendContent(
+			[{ role: 'user', text: `[Selected text from screen]: ${selectedText}` }],
+			false
+		);
+	}
+
 	return { ok: true };
 }
 
