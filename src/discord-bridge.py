@@ -59,6 +59,21 @@ from util_paths import shared_personal_path  # noqa: E402
 from task_priority import default_priority_for_source  # noqa: E402
 from task_archive import find_task_file  # noqa: E402
 from result_markers import parse_markers  # noqa: E402
+# Checklist skill helpers (optional — gracefully absent if skill not installed)
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "skills" / "checklist-respond" / "scripts"))
+    from checklist_render import (  # noqa: E402
+        parse_checklist_marker,
+        build_view_spec,
+        load_state,
+        save_state,
+        apply_click,
+        render_vote_summary,
+        parse_custom_id,
+    )
+    _CHECKLIST_SKILL_AVAILABLE = True
+except ImportError:
+    _CHECKLIST_SKILL_AVAILABLE = False
 REPO = resolve_workspace()
 
 # discord-voice "magic word" join trigger (issue: za-warudo summon). The
@@ -2149,6 +2164,126 @@ async def on_message_edit(before, after):
     await _handle_discord_message(after, force=True)
 
 
+# ---------------------------------------------------------------------------
+# Discord checklist interaction handler (issue #1104)
+# Handles button clicks on messages posted with [checklist] marker.
+# No-op when checklist skill is not installed (_CHECKLIST_SKILL_AVAILABLE=False).
+# ---------------------------------------------------------------------------
+
+async def _post_checklist(channel, text: str, items: list, original_body: str) -> None:
+    """Post a message with Discord button components for a checklist.
+
+    Preserves original text below the buttons (owner pref: mis-fires are a non-event).
+    """
+    if not _CHECKLIST_SKILL_AVAILABLE:
+        await channel.send(original_body)
+        return
+
+    view = discord.ui.View(timeout=None)
+    # Placeholder message id — we need to send first, then update with real id.
+    # Build buttons with a temp prefix; on_interaction uses the real message id.
+    for idx, item in enumerate(items[:25]):  # Discord UI limit
+        btn = discord.ui.Button(
+            label=item[:80],
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"ck:pending:{idx}",
+        )
+        view.add_item(btn)
+
+    content = original_body + ("\n\n" if original_body else "") + "━━━━━━━━━━\n" + "\n".join(f"• {i}" for i in items)
+    msg = await channel.send(content, view=view)
+
+    # Rebuild view with real message id in custom_ids
+    view2 = discord.ui.View(timeout=None)
+    for idx, item in enumerate(items[:25]):
+        btn = discord.ui.Button(
+            label=item[:80],
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"ck:{msg.id}:{idx}",
+        )
+        view2.add_item(btn)
+    await msg.edit(view=view2)
+
+    # Persist initial state
+    state_dir = REPO / "state"
+    save_state(state_dir, str(msg.id), {"items": items, "votes": {}})
+
+
+@client.event
+async def on_interaction(interaction: discord.Interaction) -> None:
+    """Handle Discord button clicks for checklist items (issue #1104).
+
+    Allowlist-gated: only allowed senders can click. Unknown buttons are ignored.
+    """
+    if not _CHECKLIST_SKILL_AVAILABLE:
+        return
+    try:
+        custom_id = interaction.data.get("custom_id", "")
+        parsed = parse_custom_id(custom_id)
+        if parsed is None:
+            return  # not our button
+
+        msg_id, item_idx = parsed
+        clicker_id = str(interaction.user.id)
+
+        # Access control — only allowlisted users can interact
+        if clicker_id not in load_allowed():
+            await interaction.response.send_message("Not authorised.", ephemeral=True)
+            return
+
+        state_dir = REPO / "state"
+        state = load_state(state_dir, msg_id)
+        if not state:
+            await interaction.response.defer()
+            return
+
+        state = apply_click(state, item_idx, clicker_id, interaction.user.display_name, state.get("items", []))
+        save_state(state_dir, msg_id, state)
+
+        # Rebuild the view with updated button styles (checked = green, unchecked = grey)
+        items: list[str] = state.get("items", [])
+        voted_indices = {int(k) for k, v in state.get("votes", {}).items() if v}
+        view = discord.ui.View(timeout=None)
+        for idx, item in enumerate(items[:25]):
+            checked = idx in voted_indices
+            btn = discord.ui.Button(
+                label=item[:80],
+                style=discord.ButtonStyle.success if checked else discord.ButtonStyle.secondary,
+                custom_id=f"ck:{msg_id}:{idx}",
+            )
+            view.add_item(btn)
+
+        # Update the message with vote summary appended
+        summary = render_vote_summary(state)
+        orig_content = interaction.message.content or ""
+        # Strip old summary block if present (marked by ━━ separator)
+        sep = "━━━━━━━━━━"
+        if sep in orig_content:
+            orig_content = orig_content[:orig_content.index(sep)].rstrip()
+        new_content = orig_content + f"\n\n{sep}\n{summary}" if orig_content else summary
+        await interaction.response.edit_message(content=new_content, view=view)
+    except Exception as e:
+        print(f"  [checklist] on_interaction error: {e}", flush=True)
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+
+
+async def _maybe_post_checklist(channel, text: str) -> bool:
+    """Check if text has a [checklist] marker; if so, post as buttons and return True."""
+    if not _CHECKLIST_SKILL_AVAILABLE:
+        return False
+    result = parse_checklist_marker(text)
+    if result is None:
+        return False
+    items, body = result
+    if not items:
+        return False
+    await _post_checklist(channel, text, items, body)
+    return True
+
+
 async def _handle_discord_message(message, force=False):
     if message.author == client.user:
         return
@@ -3281,6 +3416,11 @@ async def poll_results():
                     files = [a.value for a in _parsed.actions if a.kind == "attach"]
 
                     # Send text — fence-aware chunker preserves triple-backtick code blocks
+                    # Checklist marker intercept: if [checklist] present, render as
+                    # Discord buttons and skip the normal send path. (#1104)
+                    if clean_text and await _maybe_post_checklist(channel, clean_text):
+                        clean_text = None  # already sent as checklist
+
                     # First chunk uses message_reference (if set); subsequent chunks
                     # are fresh — Discord allows only one reply-anchor per message,
                     # and split-chunk continuation isn't itself a reply.
