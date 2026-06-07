@@ -48,6 +48,7 @@ import { loadVoiceConfig, resolveOwnerMode } from '../../../src/voice-config.js'
 import { execSync, spawn } from 'node:child_process';
 import { VoiceSession, type ToolDefinition, type MainAgent } from 'bodhi-realtime-agent';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { GoogleGenAI } from '@google/genai';
 import { z } from 'zod';
 import { Client, GatewayIntentBits, ChannelType } from 'discord.js';
 import {
@@ -303,6 +304,71 @@ function upsample24MonoTo48Stereo(pcm: Buffer): Buffer {
 		out[off + 2] = v; out[off + 3] = v;
 	}
 	return Buffer.from(out.buffer, out.byteOffset, out.byteLength);
+}
+
+// --- Per-speaker ASR (recording layer only, parallel to Gemini Live) --------
+
+const _perSpeakerGenAI = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+
+/**
+ * Transcribe a single utterance from one speaker using Gemini Flash
+ * (generateContent with inline audio). Called from subscribeUser's
+ * resampler.on('end') after each utterance completes.
+ *
+ * The per-user resampled PCM is 16 kHz mono s16le — send as WAV with
+ * a minimal 44-byte header so Gemini accepts the MIME type `audio/wav`.
+ *
+ * Best-effort: errors are logged but never propagate.
+ */
+async function transcribeUtterance(
+	pcmChunks: Buffer[],
+	userId: string,
+	sessionId: string,
+): Promise<void> {
+	if (pcmChunks.length === 0) return;
+	try {
+		const pcm = Buffer.concat(pcmChunks);
+		const sampleRate = 16000;
+		const channels = 1;
+		const bitsPerSample = 16;
+		const byteRate = sampleRate * channels * (bitsPerSample / 8);
+		const blockAlign = channels * (bitsPerSample / 8);
+		const dataSize = pcm.length;
+		const header = Buffer.alloc(44);
+		header.write('RIFF', 0, 'ascii');
+		header.writeUInt32LE(36 + dataSize, 4);
+		header.write('WAVE', 8, 'ascii');
+		header.write('fmt ', 12, 'ascii');
+		header.writeUInt32LE(16, 16);
+		header.writeUInt16LE(1, 20);
+		header.writeUInt16LE(channels, 22);
+		header.writeUInt32LE(sampleRate, 24);
+		header.writeUInt32LE(byteRate, 28);
+		header.writeUInt16LE(blockAlign, 32);
+		header.writeUInt16LE(bitsPerSample, 34);
+		header.write('data', 36, 'ascii');
+		header.writeUInt32LE(dataSize, 40);
+		const wav = Buffer.concat([header, pcm]);
+		const b64 = wav.toString('base64');
+
+		const resp = await _perSpeakerGenAI.models.generateContent({
+			model: 'gemini-2.0-flash',
+			contents: [{
+				role: 'user',
+				parts: [
+					{ inlineData: { mimeType: 'audio/wav', data: b64 } },
+					{ text: 'Transcribe this audio exactly. Output only the transcript, no commentary.' },
+				],
+			}],
+		});
+		const transcript = resp.text?.trim();
+		if (transcript) {
+			recordConversation('discord-user', transcript, sessionId, userId);
+			console.log(`${ts()} [ASR] ${userId}: "${transcript.slice(0, 80)}"`);
+		}
+	} catch (e) {
+		console.error(`${ts()} [ASR] transcription failed for ${userId}:`, e);
+	}
 }
 
 // --- Active session ---------------------------------------------------------
@@ -717,11 +783,13 @@ function subscribeUser(s: DiscordVoiceSession, userId: string): void {
 	opusStream.pipe(decoder).pipe(resampler);
 
 	let chunks = 0;
+	const _asrBuffer: Buffer[] = [];
 	resampler.on('data', (pcm16Mono: Buffer) => {
 		chunks++;
 		try { (s.voiceSession as any).handleAudioFromClient(pcm16Mono); } catch {}
 		(s as any)._noteSpoken?.();
 		s.lastUserAudioAt = Date.now();
+		_asrBuffer.push(pcm16Mono);
 		if (chunks === 1) console.log(`${ts()} [Voice] first chunk: ${pcm16Mono.length}B`);
 	});
 	resampler.on('end', () => {
@@ -732,6 +800,13 @@ function subscribeUser(s: DiscordVoiceSession, userId: string): void {
 		// a hang apart from a normal pause.
 		(s as any).lastSpeakStopTs = Date.now();
 		(s as any).utterancesSinceTurn = ((s as any).utterancesSinceTurn || 0) + 1;
+		// Per-speaker ASR: transcribe this utterance and record with the
+		// speaker's userId so multi-human turns are attributed correctly in
+		// the discord_voice table. Runs in parallel to the Gemini Live turn
+		// — this is the recording layer only. (#1456)
+		if (_asrBuffer.length > 0) {
+			void transcribeUtterance(_asrBuffer.splice(0), userId, s.sessionId);
+		}
 		triggerSilenceBurst(s);
 	});
 	resampler.on('error', (e) => {

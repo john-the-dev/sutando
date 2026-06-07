@@ -105,6 +105,17 @@ function init(): void {
 				if (!hasKind) {
 					db.exec('ALTER TABLE discord_voice RENAME TO discord_voice_legacy');
 					console.log('[conversation-store] renamed legacy discord_voice → discord_voice_legacy (different schema)');
+				} else {
+					// Add speaker_id column if missing (introduced in #1456 per-speaker ASR).
+					const hasSpeakerId = cols.some(c => c.name === 'speaker_id');
+					if (!hasSpeakerId) {
+						try {
+							db.exec('ALTER TABLE discord_voice ADD COLUMN speaker_id TEXT');
+							console.log('[conversation-store] added speaker_id column to discord_voice');
+						} catch (e) {
+							console.error('[conversation-store] speaker_id migration failed (non-fatal):', e);
+						}
+					}
 				}
 			}
 		} catch (e) {
@@ -145,11 +156,13 @@ function init(): void {
 				kind        TEXT    NOT NULL,
 				text        TEXT,
 				duration_ms INTEGER,
-				session_id  TEXT
+				session_id  TEXT,
+				speaker_id  TEXT
 			);
 			CREATE INDEX IF NOT EXISTS idx_discord_voice_ts ON discord_voice(ts_unix);
 			CREATE INDEX IF NOT EXISTS idx_discord_voice_kind_ts ON discord_voice(kind, ts_unix);
 			CREATE INDEX IF NOT EXISTS idx_discord_voice_session ON discord_voice(session_id, ts_unix);
+			CREATE INDEX IF NOT EXISTS idx_discord_voice_speaker ON discord_voice(speaker_id, ts_unix);
 
 			-- Per-session rollup. Kept — different concern from the per-event log.
 			-- Per-tool-call rows live in surface tables (kind='tool_call'),
@@ -239,7 +252,7 @@ function init(): void {
 				FROM phone ORDER BY ts_unix DESC;
 			CREATE VIEW v_discord_voice AS
 				SELECT id, datetime(ts_unix,'unixepoch','localtime') AS time,
-					ts_unix, kind, text, duration_ms, session_id
+					ts_unix, kind, text, duration_ms, session_id, speaker_id
 				FROM discord_voice ORDER BY ts_unix DESC;
 			CREATE VIEW v_sessions AS
 				SELECT datetime(ts_unix,'unixepoch','localtime') AS time,
@@ -267,7 +280,7 @@ function init(): void {
 			'INSERT INTO phone (ts_unix, kind, text, duration_ms, session_id) VALUES (?, ?, ?, ?, ?)',
 		);
 		turnStmt['discord-voice'] = db.prepare(
-			'INSERT INTO discord_voice (ts_unix, kind, text, duration_ms, session_id) VALUES (?, ?, ?, ?, ?)',
+			'INSERT INTO discord_voice (ts_unix, kind, text, duration_ms, session_id, speaker_id) VALUES (?, ?, ?, ?, ?, ?)',
 		);
 		sessionInsertStmt = db.prepare(`
 			INSERT INTO sessions (
@@ -443,13 +456,17 @@ function migrateLegacyIfNeeded(d: DatabaseSync): void {
 /** Record a conversation turn. Source is derived from `role` (`phone-*` →
  *  phone, `discord-*` → discord_voice, otherwise voice); `kind` is
  *  normalized (user / agent / peer / SESSION_END / other). Best-effort. */
-export function recordConversation(role: string, text: string, sessionId?: string): void {
+export function recordConversation(role: string, text: string, sessionId?: string, speakerId?: string): void {
 	init();
 	const source = sourceFromRole(role);
 	const stmt = turnStmt[source];
 	if (!stmt) return;
 	try {
-		stmt.run(Date.now() / 1000, kindFromRole(role), text, null, sessionId ?? null);
+		if (source === 'discord-voice') {
+			stmt.run(Date.now() / 1000, kindFromRole(role), text, null, sessionId ?? null, speakerId ?? null);
+		} else {
+			stmt.run(Date.now() / 1000, kindFromRole(role), text, null, sessionId ?? null);
+		}
 	} catch (e) {
 		console.error('[conversation-store] insert failed:', e);
 	}
