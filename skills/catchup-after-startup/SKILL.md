@@ -1,12 +1,12 @@
 ---
 name: catchup-after-startup
-description: "Rebuild last-session context from everything persisted to disk (session-state.md, conversation.log, sqlite, PRs, tasks, build_log). Run as the first action of a fresh session so the conversation buffer has context before the user types. Recall half of issue #1032."
+description: "Lazy startup context rebuild from persisted disk state (sqlite voice/phone, session-state.md, PRs, tasks, build_log). Invoke on-demand when the owner's first message implies continuity with a prior voice/phone session. Recall half of issue #1032."
 user-invocable: true
 ---
 
 # Catchup
 
-Reconstruct "what was happening before this session started" by reading everything Sutando persists across restarts. Designed to run as the **first** action of a fresh Sutando session, so the conversation buffer carries context before the user types anything.
+Reconstruct "what was happening before this session started" by reading everything Sutando persists across restarts. **Lazy invocation** (as of [#1388](https://github.com/sonichi/sutando/issues/1388)): do NOT fire unconditionally on every fresh session. Invoke only when the owner's first message implies continuity with a prior voice/phone session (e.g. "what were we talking about?", "continue that"). For all other starts, `/resume` + `session-state.md` (written by `session-handoff.sh`) are sufficient.
 
 This is the **recall half** of [#1032](https://github.com/sonichi/sutando/issues/1032) (episodic event memory). The capture half — wiring `event_log.py` into every lifecycle point — is the other half of that issue and remains a separate followup. Catchup ships now because almost all the recoverable signal is already on disk; it just needs to be assembled in one place.
 
@@ -89,21 +89,18 @@ python3 -c 'import json; s=json.load(open("'"$HOME"'/.claude/settings.json")); h
 
 **Without the hook** catchup still works — you just lose the last few minutes of the previous session's narrative when that session ended outside a compact. The rest (open PRs, in-flight tasks, sqlite, conversation.log, build_log) is real-time persisted and recovers regardless.
 
-## Wiring for auto-invocation (operator-side, NOT in this PR)
+## When to invoke
 
-The skill ships as the slash command only. **Auto-firing on every fresh session is the operator's choice** — this PR doesn't modify any loop or hook to call `/catchup-after-startup` for you. Wire it yourself wherever your proactive-loop / startup-orchestrator skill defines its on-activation block. Sample snippet for a personal proactive-loop SKILL.md:
+This skill is **lazy** — do NOT wire it to auto-fire on every fresh session start. It costs tokens unconditionally and most starts don't need it (covered by `/resume` + `session-state.md`).
 
-```markdown
-## Session-start catchup (FIRST action of a fresh session)
+**Invoke when** the owner's first message implies continuity with a prior voice/phone session:
+- "what were we talking about?" / "continue that"
+- "what did I say earlier on the call?"
+- Any reference to prior voice or phone content with no live context
 
-If this is the first proactive-loop pass after a fresh session start
-(cold start, no prior context about what was happening), run
-`/catchup-after-startup` BEFORE anything else. Read the briefing into
-context, then proceed with the normal loop. Skip on subsequent passes
-within the same session.
-```
-
-Also useful to invoke manually after a `/pull-and-restart` (services restart but the conversation buffer is the same) or after a context compaction (layer the briefing onto the new compacted context).
+**Also useful:**
+- After a `/pull-and-restart` (services restart but conversation buffer is same) — if prior voice context is relevant
+- On demand via `/catchup-after-startup 24` or `/catchup-after-startup 168` to widen the window
 
 ## Dependency note: sqlite section requires #1051's per-surface schema
 
