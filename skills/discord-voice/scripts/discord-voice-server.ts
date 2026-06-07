@@ -718,6 +718,12 @@ function subscribeUser(s: DiscordVoiceSession, userId: string): void {
 
 	let chunks = 0;
 	resampler.on('data', (pcm16Mono: Buffer) => {
+		// Defense-in-depth: never pipe our own TTS output back to Gemini as
+		// user input. Discord echoes the bot's own speaking event back to its
+		// receiver; if the isBot check above raced (fetch error → isBot=false),
+		// this guard catches the audio before it reaches handleAudioFromClient.
+		// (#1465)
+		if (userId === s.client.user?.id) return;
 		chunks++;
 		try { (s.voiceSession as any).handleAudioFromClient(pcm16Mono); } catch {}
 		(s as any)._noteSpoken?.();
@@ -1081,9 +1087,6 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 
 	// Subscribe to anyone currently speaking, and to anyone who starts.
 	connection.receiver.speaking.on('start', async (userId) => {
-		// Attribute this speaker to the in-progress turn. The gate resolves
-		// the turn's effective tier across the whole set (cleared on turn.end).
-		s.turnSpeakers.add(userId);
 		// Bot/human discrimination (#1096). Discord's gateway exposes `User.bot`;
 		// without this check the receiver would happily pipe peer-bot audio to
 		// Gemini, which both wastes API quota and causes attribution errors
@@ -1106,6 +1109,12 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			console.log(`${ts()} [Voice] ignoring bot user ${userId} (not in SUTANDO_ALLOWED_BOT_USER_IDS)`);
 			return;
 		}
+		// Attribute this speaker to the in-progress turn only after confirming
+		// they are not a filtered bot. Bots excluded above must not pollute
+		// turnSpeakers — effectiveTier() reads that set to gate tool access,
+		// and a bot userId resolves to a non-owner tier, potentially blocking
+		// the owner's tools during overlapping speech. (#1465)
+		s.turnSpeakers.add(userId);
 		subscribeUser(s, userId);
 	});
 	// Start the constant-rate ticker that flushes audio to Gemini every 20ms.
