@@ -97,7 +97,7 @@ print(personal_path('pending-questions.md', Path('$REPO')))
   fi
   echo ""
 
-  # Tasks in flight
+  # Tasks in flight — tasks live in workspace, not repo
   echo "## Tasks"
   ls "$WORKSPACE_DIR/tasks/"*.txt 2>/dev/null | head -5 || echo "None pending"
   echo ""
