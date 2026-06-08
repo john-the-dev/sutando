@@ -707,6 +707,22 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 					}, 5_000);
 					continue;
 				}
+				// [no-send] / [REPLIED] markers: agent signalled delivery already
+				// happened through another path. Archive silently — no voice
+				// narration, no forwarding. Mirrors result_markers.py skip logic.
+				if (/^\s*\[no-send\]/i.test(result) || /^\s*\[REPLIED\]/i.test(result)) {
+					const marker = /^\s*\[no-send\]/i.test(result) ? 'no-send' : 'REPLIED';
+					console.log(`${ts()} [TaskBridge] ${taskId} has [${marker}] marker; archiving silently`);
+					_sendTaskStatus?.(taskId, 'done', `[${marker}]`, result);
+					_deliveredResults.add(file);
+					_pendingTasks.delete(taskId);
+					setTimeout(() => {
+						archiveFile(path, 'results', taskId);
+						const taskFile = join(TASK_DIR, `${taskId}.txt`);
+						if (existsSync(taskFile)) archiveFile(taskFile, 'tasks', taskId);
+					}, 5_000);
+					continue;
+				}
 				// Voice client offline → forward voice-task results to Discord DM
 				// via a proactive-result-*.txt file (poll_proactive in
 				// discord-bridge.py picks it up and DMs the owner). Skips files
