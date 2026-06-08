@@ -21,6 +21,11 @@ jobs:
       - name: UTC timestamp check
         run: python3 scripts/check-utc-z-strftime.py
 
+      # AGENTS.md is auto-generated from CLAUDE.md. Fail if it drifts.
+      # Regenerate with: bash scripts/agents-md-sync.sh
+      - name: AGENTS.md in sync with CLAUDE.md
+        run: bash scripts/agents-md-sync.sh --check
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
