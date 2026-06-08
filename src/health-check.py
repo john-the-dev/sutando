@@ -773,6 +773,49 @@ def check_task_queue(threshold_count: int = 3, threshold_age_sec: int = 300) -> 
     return {"name": name, "status": "ok", "detail": f"{len(files)} task(s), oldest {oldest_age}s"}
 
 
+def check_system_memory() -> dict:
+    """Warn when RAM is critically low — OOM guard (closes #1485).
+
+    Fires when psutil reports >= SUTANDO_MEMORY_WARN_THRESHOLD_PCT used
+    (default 80).  On macOS, also checks the compressor (compressed-swap)
+    size: a compressor larger than 50% of total RAM indicates severe pressure
+    even when psutil's 'available' (free + inactive) still looks non-zero.
+    """
+    name = "system-memory"
+    try:
+        import psutil
+    except ImportError:
+        return {"name": name, "status": "warn", "detail": "psutil not installed (pip install psutil)"}
+
+    threshold_pct = int(os.environ.get("SUTANDO_MEMORY_WARN_THRESHOLD_PCT", "80"))
+    mem = psutil.virtual_memory()
+    total_gb = mem.total / 1024 ** 3
+    avail_gb = mem.available / 1024 ** 3
+    used_pct = mem.percent
+
+    status = "warn" if used_pct >= threshold_pct else "ok"
+    detail = f"{used_pct:.0f}% used ({avail_gb:.1f}/{total_gb:.0f} GB avail)"
+
+    if sys.platform == "darwin":
+        try:
+            vm_out = subprocess.check_output(["vm_stat"], text=True, timeout=3)
+            comp_pages = 0
+            for line in vm_out.splitlines():
+                if "Pages stored in compressor:" in line:
+                    comp_pages = int(line.split(":")[1].strip().rstrip("."))
+                    break
+            if comp_pages:
+                comp_gb = comp_pages * 16384 / 1024 ** 3
+                detail += f"; compressor {comp_gb:.1f} GB"
+                if comp_gb > total_gb * 0.5:
+                    detail += " (severe pressure)"
+                    status = "warn"
+        except Exception:
+            pass
+
+    return {"name": name, "status": status, "detail": detail}
+
+
 def check_notes_split_brain() -> "dict | None":
     """Detect notes/ split-brain (#1266): overlapping .md files in both
     <repo>/notes/ and <workspace>/notes/ — fires only when the two paths differ."""
@@ -1133,6 +1176,7 @@ def run_all_checks() -> list[dict]:
     queue_count = int(os.environ.get("SUTANDO_HEALTH_QUEUE_COUNT", "3"))
     checks.append(check_core_proactive_loop(threshold_sec=loop_stale_sec))
     checks.append(check_task_queue(threshold_count=queue_count, threshold_age_sec=queue_age_sec))
+    checks.append(check_system_memory())
 
     return checks
 
