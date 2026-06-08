@@ -23,8 +23,8 @@ describe('conversation-server — anti-hallucination on work-tool results (sonic
 	it('detects truly-empty results via result.length === 0', () => {
 		assert.match(
 			SRC,
-			/const\s+isEmpty\s*=\s*result\.length\s*===\s*0/,
-			'must detect empty results with strict-equal length check on the trimmed result string.',
+			/const\s+isEmpty\s*=\s*\w+\.length\s*===\s*0/,
+			'must detect empty results with strict-equal length check on the result string (variable may be renamed e.g. resultForNarration after marker-stripping).',
 		);
 	});
 
