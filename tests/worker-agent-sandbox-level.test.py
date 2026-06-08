@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Tests for sandboxLevel support in src/worker-agent.ts (PR #1544 / issue #1501).
+Tests for in-band access_tier enforcement in src/worker-agent.ts (PR #1544 / issue #1501).
 
-The ExecutionOptions interface must expose a sandboxLevel field so callers
-(e.g. task-bridge) can pass 'read-only' for non-owner access tiers instead of
-the default 'workspace-write'. Without this, all Codex tasks run with
-workspace-write access regardless of access_tier — violating the CLAUDE.md
-access-control model that requires 'codex exec --sandbox read-only' for
-team / other tiers.
+CodexWorker.execute() applies a three-tier sandbox-level resolution so callers
+don't need to thread the access_tier through the call site:
+  1. Explicit caller override via options.sandboxLevel (highest priority)
+  2. access_tier header in task file: owner → workspace-write, team/other → read-only
+  3. Fail-safe default: read-only when access_tier is absent (unknown = non-owner)
 
 Cases:
   a) ExecutionOptions interface declares sandboxLevel field
   b) sandboxLevel type is 'read-only' | 'workspace-write' union
-  c) CodexWorker passes sandboxLevel to '-s' arg (not hardcoded 'workspace-write')
-  d) 'workspace-write' is the default when sandboxLevel is omitted
-  e) 'read-only' literal appears as a valid level (for non-owner tier use)
+  c) CodexWorker parses access_tier from task content (reads task file header)
+  d) 'read-only' is the fail-safe default when access_tier is absent
+  e) owner access_tier maps to 'workspace-write'
+  f) Caller-explicit sandboxLevel overrides task-file tier
+  g) 'read-only' literal appears (used for non-owner tiers)
 
 Run: python3 tests/worker-agent-sandbox-level.test.py
 Exit code: 0 on pass, 1 on fail.
@@ -48,7 +49,6 @@ def case_b_sandbox_level_type():
     """sandboxLevel type must be the union 'read-only' | 'workspace-write'."""
     fails = []
     src = _source()
-    # Accept either order of the union
     has_type = (
         ("'read-only' | 'workspace-write'" in src or '"read-only" | "workspace-write"' in src)
         or
@@ -59,49 +59,94 @@ def case_b_sandbox_level_type():
     return fails
 
 
-def case_c_codex_worker_uses_sandbox_level():
-    """CodexWorker must use the sandboxLevel option, not hardcode 'workspace-write'."""
+def case_c_parses_access_tier_from_task():
+    """CodexWorker must parse access_tier header from the task file content."""
     fails = []
     src = _source()
-    # The '-s' arg must reference the options variable, not a literal string
     codex_class_start = src.find("class CodexWorker")
     if codex_class_start == -1:
         fails.append("c) CodexWorker class not found")
         return fails
     codex_section = src[codex_class_start:]
-    # Accept either 'sandboxLevel' or 'sandbox' variable name in the args array
-    uses_var = re.search(r"'-s',\s*(sandbox\w*|options\??\.\w*sandbox\w*)", codex_section, re.IGNORECASE)
-    has_hardcode = re.search(r"'-s',\s*'workspace-write'", codex_section)
-    if has_hardcode:
-        fails.append("c) CodexWorker still hardcodes '-s', 'workspace-write' — sandboxLevel option not used")
-    if not uses_var and not has_hardcode:
-        # Also accept the form where sandbox is computed separately then passed
-        if "sandbox" not in codex_section.lower():
-            fails.append("c) no sandbox variable found in CodexWorker — options.sandboxLevel not threaded through")
+    # Must match access_tier: from the task content
+    has_tier_parse = (
+        "access_tier" in codex_section
+        and re.search(r"taskContent\.match\(.*access_tier", codex_section)
+    )
+    if not has_tier_parse:
+        fails.append("c) CodexWorker does not parse access_tier from task file content — non-owner tasks would escalate to owner sandbox")
     return fails
 
 
-def case_d_workspace_write_is_default():
-    """'workspace-write' must be the default sandbox level (used when option is absent)."""
+def case_d_fail_safe_default_is_read_only():
+    """'read-only' must be the fail-safe default when access_tier is absent."""
     fails = []
     src = _source()
-    # The null-coalescing default must be 'workspace-write'
-    has_default = (
-        "?? 'workspace-write'" in src
-        or '?? "workspace-write"' in src
-        or "sandboxLevel ?? 'workspace-write'" in src.replace('\n', ' ')
-    )
-    if not has_default:
-        fails.append("d) 'workspace-write' default not found — non-owner tasks could escalate to owner-tier access")
+    codex_class_start = src.find("class CodexWorker")
+    if codex_class_start == -1:
+        fails.append("d) CodexWorker class not found")
+        return fails
+    codex_section = src[codex_class_start:]
+    # The else-branch (tier not 'owner') must map to 'read-only'
+    # Accept patterns like: sandbox = tier === 'owner' ? 'workspace-write' : 'read-only'
+    has_fail_safe = re.search(r"'owner'.*'workspace-write'.*'read-only'", codex_section) or \
+                    re.search(r"'read-only'.*\).*fail.safe", codex_section, re.IGNORECASE)
+    if not has_fail_safe:
+        fails.append("d) fail-safe 'read-only' default not found — tasks with no access_tier header could get workspace-write")
     return fails
 
 
-def case_e_read_only_literal_present():
-    """'read-only' must appear as a valid literal (used by non-owner tiers)."""
+def case_e_owner_maps_to_workspace_write():
+    """access_tier 'owner' must map to 'workspace-write'."""
+    fails = []
+    src = _source()
+    codex_class_start = src.find("class CodexWorker")
+    if codex_class_start == -1:
+        fails.append("e) CodexWorker class not found")
+        return fails
+    codex_section = src[codex_class_start:]
+    has_owner_map = re.search(r"'owner'.*'workspace-write'", codex_section) or \
+                    re.search(r"tier\s*===\s*['\"]owner['\"].*workspace-write", codex_section)
+    if not has_owner_map:
+        fails.append("e) owner tier → 'workspace-write' mapping not found in CodexWorker")
+    return fails
+
+
+def case_f_caller_override_takes_precedence():
+    """Explicit caller sandboxLevel must guard the task-file tier parse (if/else structure)."""
+    fails = []
+    src = _source()
+    codex_class_start = src.find("class CodexWorker")
+    if codex_class_start == -1:
+        fails.append("f) CodexWorker class not found")
+        return fails
+    codex_section = src[codex_class_start:]
+    # The structure must be: if options.sandboxLevel !== undefined → use it
+    #                         else → parse access_tier from task file
+    # Verify the if-guard and else-branch coexist in the right order.
+    has_guard = re.search(
+        r"options\??\.sandboxLevel\s*!==\s*undefined",
+        codex_section,
+    )
+    if not has_guard:
+        fails.append("f) 'options?.sandboxLevel !== undefined' guard not found — caller override path missing")
+    # Also confirm that access_tier parse is inside an else block (not standalone)
+    has_else_parse = re.search(
+        r"else\s*\{[^}]*access_tier[^}]*\}",
+        codex_section,
+        re.DOTALL,
+    )
+    if not has_else_parse:
+        fails.append("f) access_tier parse not found inside an else block — override and auto-detect are not mutually exclusive")
+    return fails
+
+
+def case_g_read_only_literal_present():
+    """'read-only' must appear as a valid literal (used for non-owner tiers)."""
     fails = []
     src = _source()
     if "'read-only'" not in src and '"read-only"' not in src:
-        fails.append("e) 'read-only' literal not found — non-owner tier can't pass this level to execute()")
+        fails.append("g) 'read-only' literal not found — non-owner tier can't produce this level")
     return fails
 
 
@@ -113,9 +158,11 @@ def main() -> int:
     cases = [
         ("a", case_a_interface_has_sandbox_level),
         ("b", case_b_sandbox_level_type),
-        ("c", case_c_codex_worker_uses_sandbox_level),
-        ("d", case_d_workspace_write_is_default),
-        ("e", case_e_read_only_literal_present),
+        ("c", case_c_parses_access_tier_from_task),
+        ("d", case_d_fail_safe_default_is_read_only),
+        ("e", case_e_owner_maps_to_workspace_write),
+        ("f", case_f_caller_override_takes_precedence),
+        ("g", case_g_read_only_literal_present),
     ]
     all_failures = []
     for label, fn in cases:

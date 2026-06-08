@@ -121,8 +121,18 @@ export class CodexWorker implements WorkerAgent {
 		const cwd = options?.cwd || this.workspace;
 		const timeoutMs = options?.timeoutMs || 0;
 
-		// Sandbox level: 'read-only' for non-owner tiers, 'workspace-write' for owner.
-		const sandbox = options?.sandboxLevel ?? 'workspace-write';
+		// Sandbox level — three-tier resolution (in-band enforcement per CLAUDE.md):
+		// 1. Caller-explicit override via options.sandboxLevel (highest priority)
+		// 2. access_tier header in task file: owner → workspace-write, team/other → read-only
+		// 3. Fail-safe default: read-only when access_tier is absent (unknown = non-owner)
+		let sandbox: 'read-only' | 'workspace-write';
+		if (options?.sandboxLevel !== undefined) {
+			sandbox = options.sandboxLevel;
+		} else {
+			const tierMatch = taskContent.match(/^access_tier:\s*(\S+)/m);
+			const tier = tierMatch?.[1]?.toLowerCase();
+			sandbox = tier === 'owner' ? 'workspace-write' : 'read-only';
+		}
 		const args = [
 			'exec',
 			'-C', cwd,
