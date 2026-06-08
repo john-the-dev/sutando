@@ -122,11 +122,14 @@ def run():
             else:
                 passed += 1
 
-            # 5. tierMap has unknown value → fail-open to "owner"
+            # 5. tierMap has unknown value → degrade to "other" (split-default)
+            # A misspelled tier value (e.g. "superadmin") is unrecognised; the
+            # safe fallback when tierMap is present is "other", not "owner" —
+            # same as the "mapped but value invalid" case (issue #937).
             _set({"allowFrom": ["alice"], "tierMap": {"alice": "superadmin"}})
             result = bridge._resolve_access_tier("alice")
-            if result != "owner":
-                fails.append("5. unknown tier value: expected 'owner' fallback, got {!r}".format(result))
+            if result != "other":
+                fails.append("5. unknown tier value: expected 'other' (safe fallback), got {!r}".format(result))
             else:
                 passed += 1
 
@@ -146,11 +149,22 @@ def run():
             else:
                 passed += 1
 
-            # 8. Sender not in tierMap but file has other entries → "owner" (default)
+            # 8. Split-default: tierMap present, sender not in it → "other" (#937)
+            # The admin consciously created tierMap for some users. An unlisted
+            # sender must NOT silently get owner-tier — that would be silent
+            # privilege escalation. Degrade to "other" (fail-safe).
             _set({"allowFrom": ["alice", "bob"], "tierMap": {"bob": "team"}})
             result = bridge._resolve_access_tier("alice")
+            if result != "other":
+                fails.append("8. split-default: tierMap present, sender missing → expected 'other', got {!r}".format(result))
+            else:
+                passed += 1
+
+            # 8b. Only when tierMap is absent entirely → "owner" (backward compat)
+            _set({"allowFrom": ["alice", "bob"]})  # no tierMap key at all
+            result = bridge._resolve_access_tier("alice")
             if result != "owner":
-                fails.append("8. not-in-tierMap: expected 'owner', got {!r}".format(result))
+                fails.append("8b. no-tierMap: expected 'owner' (backward compat), got {!r}".format(result))
             else:
                 passed += 1
 

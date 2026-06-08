@@ -271,19 +271,27 @@ def _resolve_proactive_owner_id(env_override: str | None, access_data: dict) -> 
 def _resolve_access_tier(sender_id: str) -> str:
     """Return the access tier for an already-allowlisted Telegram sender.
 
-    Lookup order:
+    Split-default (mirrors slack-bridge.py PR #925 / issue #937):
       1. `tierMap[sender_id]` in access.json — explicit admin assignment.
-      2. Default "owner" — backward compat: existing allowFrom members without
-         a tierMap entry were implicitly owner-tier before this feature landed.
+      2. tierMap present but sender missing → "other" (fail-safe: operator
+         added tierMap for some users but forgot this one; safest assumption
+         is non-owner rather than silent privilege escalation).
+      3. tierMap absent entirely → "owner" (backward compat: pre-tierMap
+         configs treated all allowFrom members as owner-tier).
 
     Only call this AFTER confirming sender_id is in allowFrom.
     """
     try:
         data = json.loads(ACCESS_FILE.read_text())
-        tier_map = data.get("tierMap") or {}
-        tier = tier_map.get(sender_id)
-        if tier in ("owner", "team", "other"):
-            return tier
+        tier_map = data.get("tierMap")
+        if tier_map:
+            tier = tier_map.get(sender_id)
+            if tier in ("owner", "team", "other"):
+                return tier
+            # tierMap present but sender not mapped — degrade to "other"
+            print(f"  [tier-map] WARNING: sender {sender_id} in allowFrom but missing from tierMap; defaulting to 'other'")
+            return "other"
+        # tierMap absent entirely — pre-tierMap config, all users are owner
     except Exception:
         pass
     return "owner"
