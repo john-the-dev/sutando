@@ -2210,7 +2210,7 @@ async def _post_checklist(channel, text: str, items: list, original_body: str) -
 
 
 @client.event
-async def on_interaction(interaction: discord.Interaction) -> None:
+async def on_interaction(interaction: "discord.Interaction") -> None:
     """Handle Discord button clicks for checklist items (issue #1104).
 
     Allowlist-gated: only allowed senders can click. Unknown buttons are ignored.
