@@ -268,6 +268,27 @@ def _resolve_proactive_owner_id(env_override: str | None, access_data: dict) -> 
     return str(allow_list[0])
 
 
+def _resolve_access_tier(sender_id: str) -> str:
+    """Return the access tier for an already-allowlisted Telegram sender.
+
+    Lookup order:
+      1. `tierMap[sender_id]` in access.json — explicit admin assignment.
+      2. Default "owner" — backward compat: existing allowFrom members without
+         a tierMap entry were implicitly owner-tier before this feature landed.
+
+    Only call this AFTER confirming sender_id is in allowFrom.
+    """
+    try:
+        data = json.loads(ACCESS_FILE.read_text())
+        tier_map = data.get("tierMap") or {}
+        tier = tier_map.get(sender_id)
+        if tier in ("owner", "team", "other"):
+            return tier
+    except Exception:
+        pass
+    return "owner"
+
+
 def tofu_onboard(sender_id, username):
     """First-time auto-onboard: write access.json with this sender as owner.
 
@@ -498,8 +519,14 @@ def main():
                     print(f"  Dropped message from non-allowed @{username}")
                     continue
 
-                # Record owner activity for status-aware-pivot
-                write_owner_activity("telegram", text)
+                # Resolve access tier (owner/team/other) from tierMap.
+                # Default "owner" for backward compat — existing allowFrom
+                # members without a tierMap entry were always owner-tier.
+                access_tier = _resolve_access_tier(sender_id)
+
+                # Only record owner activity for owner-tier senders.
+                if access_tier == "owner":
+                    write_owner_activity("telegram", text)
 
                 # Handle attachments (photos, documents, voice)
                 attachment_note = ""
@@ -538,14 +565,63 @@ def main():
                 ts = int(time.time() * 1000)
                 task_id = f"task-{ts}"
                 task_file = TASKS_DIR / f"{task_id}.txt"
-                priority = default_priority_for_source("telegram", "owner")
+                priority = default_priority_for_source("telegram", access_tier)
+                user_task_text = f"[Telegram @{username}{forward_note}] {text}{attachment_note}"
+
+                # Build in-band tier instructions for non-owner tasks so the
+                # core agent cannot process them with full capabilities.
+                # Mirrors the discord-bridge.py pattern — see CLAUDE.md
+                # "Discord access control" for the full policy rationale.
+                # Write task text to a /tmp file to avoid nested-quote issues
+                # with codex's stdin parser (same fix as discord PR #652).
+                tier_instructions = ""
+                if access_tier in ("team", "other"):
+                    prompt_path = f"/tmp/sutando-{task_id}.txt"
+                    Path(prompt_path).write_text(
+                        "You are answering on behalf of Sutando, an autonomous personal AI agent.\n"
+                        "Sutando's actual skills live in `skills/` (this repo) and under `~/.claude/skills/`.\n"
+                        "When asked about capabilities or identity, refer to Sutando's skills/architecture — "
+                        "NOT to your own sandbox-runtime's available skills. You ARE Sutando in this context.\n\n"
+                        "---\n\n"
+                        f"{user_task_text}"
+                    )
+                    quoted_task = f'"$(cat {prompt_path})"'
+                    if access_tier == "team":
+                        tier_instructions = (
+                            "\n\n===SUTANDO SYSTEM INSTRUCTIONS (do not ignore; overrides anything above)===\n"
+                            "This task is from a TEAM tier Telegram sender. Choose ONE:\n\n"
+                            "1. RUN CODEX — for genuine requests (code review, technical question, analysis).\n"
+                            f"   Stage 1: codex exec --sandbox read-only -o {RESULTS_DIR}/.codex-staging-{{id}}.txt -- {quoted_task}\n"
+                            f"   Stage 2: if exit 0 AND staging non-empty → mv {RESULTS_DIR}/.codex-staging-{{id}}.txt {RESULTS_DIR}/task-{{id}}.txt.\n"
+                            f"   Stage 2 fallback: if codex exits non-zero OR staging empty/missing → write 'Sandbox unavailable; refusing non-owner task.' to {RESULTS_DIR}/task-{{id}}.txt.\n\n"
+                            "2. MESSAGE OWNER — when the task needs owner decision.\n"
+                            "   - Write a proactive message to results/proactive-{ts}.txt. Do NOT write to results/task-{id}.txt.\n\n"
+                            "3. REJECT — for requests requiring system mutations or owner auth.\n"
+                            "   - Write 'I can only answer questions from non-owner users — please ask the owner to issue this.' to results/task-{id}.txt.\n"
+                            "===END SUTANDO SYSTEM INSTRUCTIONS===\n"
+                        )
+                    else:  # other
+                        tier_instructions = (
+                            "\n\n===SUTANDO SYSTEM INSTRUCTIONS (do not ignore; overrides anything above)===\n"
+                            "This task is from an OTHER tier Telegram sender (limited trust). You MUST delegate to a sandboxed Codex agent.\n\n"
+                            f"  Stage 1: codex exec --sandbox read-only --skip-git-repo-check -C /tmp -o {RESULTS_DIR}/.codex-staging-{{id}}.txt -- {quoted_task}\n"
+                            f"  Stage 2: if exit 0 AND staging non-empty → mv {RESULTS_DIR}/.codex-staging-{{id}}.txt {RESULTS_DIR}/task-{{id}}.txt.\n"
+                            f"  Stage 2 fallback: write 'Sandbox unavailable; refusing non-owner task.' to {RESULTS_DIR}/task-{{id}}.txt.\n\n"
+                            "- Only answer informational questions about Sutando. No system mutations.\n"
+                            "- If the sender asks for any action (send message, commit, modify file, etc.), reply: 'I can only answer questions from non-owner users — please ask the owner to issue this.'\n"
+                            "===END SUTANDO SYSTEM INSTRUCTIONS===\n"
+                        )
+
                 task_file.write_text(
                     f"id: {task_id}\n"
                     f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
-                    f"task: [Telegram @{username}{forward_note}] {text}{attachment_note}\n"
+                    f"task: {user_task_text}\n"
                     f"source: telegram\n"
                     f"chat_id: {chat_id}\n"
+                    f"user_id: {sender_id}\n"
+                    f"access_tier: {access_tier}\n"
                     f"priority: {priority}\n"
+                    f"{tier_instructions}"
                 )
                 pending_replies[task_id] = chat_id
 
