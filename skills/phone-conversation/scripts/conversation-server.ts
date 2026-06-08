@@ -450,8 +450,12 @@ function delegateTask(callSession: CallSession, taskDescription: string): Promis
 			archivePhoneFile(resultPath, 'results', taskId);
 			archivePhoneFile(taskPath, 'tasks', taskId);
 			// Cache result so duplicate requests get instant replay
+			// Strip [channel: <id>] redirect — phone can't route to Discord/Slack
+			// channels; narrate remaining content (mirrors Telegram's behavior).
+			const resultForNarration = result.replace(/^\s*\[channel:[^\]]+\]\s*\n?/i, '').trim() || result;
+			if (resultForNarration !== result) console.log(`${ts()} [Phone] [channel:] redirect stripped from task result`);
 			if (!callSession.taskResultCache) callSession.taskResultCache = new Map();
-			callSession.taskResultCache.set(taskDescription, result);
+			callSession.taskResultCache.set(taskDescription, resultForNarration);
 			// Anti-hallucination wrapping. See sonichi/sutando#1244 — Gemini
 			// was filling silence with plausible-sounding fabrications when
 			// the work tool returned empty/sparse content. Two layers:
@@ -459,10 +463,10 @@ function delegateTask(callSession: CallSession, taskDescription: string): Promis
 			// has an explicit "say nothing" signal instead of an empty string
 			// it can pattern-fill; (2) an explicit "items present verbatim"
 			// guardrail on every result.
-			const isEmpty = result.length === 0;
+			const isEmpty = resultForNarration.length === 0;
 			const injectedText = isEmpty
 				? `[Task result for "${taskDescription}"]\nRESULT_EMPTY — the tool returned no items.\n\nTell the caller plainly that there is nothing to report (e.g. "nothing scheduled", "your inbox is empty", "no matches"). Do NOT invent, guess, or extrapolate any items. Use only the literal RESULT_EMPTY signal.`
-				: `[Task result for "${taskDescription}"]\n${result}\n\nReport this result to the caller now. Only reference items that appear verbatim in the result above — do NOT invent, fabricate, or extrapolate items that aren't there.`;
+				: `[Task result for "${taskDescription}"]\n${resultForNarration}\n\nReport this result to the caller now. Only reference items that appear verbatim in the result above — do NOT invent, fabricate, or extrapolate items that aren't there.`;
 			// Queue result — will be injected on next turn.end to avoid interrupting speech
 			callSession.resultQueue.push({ text: injectedText });
 			return;

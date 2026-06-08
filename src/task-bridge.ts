@@ -678,7 +678,11 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 						continue;
 					}
 					console.log(`${ts()} [TaskBridge] Voice-only result: ${file} (${result.slice(0, 80)})`);
-					onResult(result);
+					// Strip [channel: <id>] redirect — voice can't route to Discord/Slack
+					// channels. Narrate remaining content; mirrors Telegram's behavior.
+					const _voiceNarration = result.replace(/^\s*\[channel:[^\]]+\]\s*\n?/i, '').trim() || result;
+					if (_voiceNarration !== result) console.log(`${ts()} [TaskBridge] [channel:] redirect stripped from voice-only result`);
+					onResult(_voiceNarration);
 					_deliveredResults.add(file);
 					setTimeout(() => archiveFile(path, 'results', `voice-${Date.now()}`), 10_000);
 					continue;
@@ -787,7 +791,11 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 					_deliveredResults.add(file);
 					_pendingTasks.delete(taskId);
 					logConversation('core-agent', `[task:${taskId}] ${result.slice(0, LOG_LINE_MAX_CHARS)}`);
-					onResult(result);
+					// Strip [channel: <id>] redirect — voice can't route to Discord/Slack
+					// channels. Narrate remaining content; mirrors Telegram's behavior.
+					const _narration = result.replace(/^\s*\[channel:[^\]]+\]\s*\n?/i, '').trim() || result;
+					if (_narration !== result) console.log(`${ts()} [TaskBridge] [channel:] redirect stripped from task result`);
+					onResult(_narration);
 					// Notify agent-api directly, then delete file
 					try {
 						fetch('http://localhost:7843/task-done', {

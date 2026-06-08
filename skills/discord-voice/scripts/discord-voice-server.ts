@@ -399,10 +399,14 @@ function delegateTask(s: DiscordVoiceSession, taskDescription: string): Promise<
 			console.log(`${ts()} [Task] result ${taskId} (${Date.now() - startTime}ms): ${result.slice(0, 200)}`);
 			s.events.push({ event: `task_result:${taskId}:${Date.now() - startTime}ms`, timestamp: new Date().toISOString() });
 			try { unlinkSync(resultPath); } catch {}
+			// Strip [channel: <id>] redirect — voice session can't route to
+			// Discord/Slack channels; narrate remaining content (mirrors Telegram).
+			const resultForNarration = result.replace(/^\s*\[channel:[^\]]+\]\s*\n?/i, '').trim() || result;
+			if (resultForNarration !== result) console.log(`${ts()} [Task] ${taskId} [channel:] redirect stripped`);
 			if (!s.taskResultCache) s.taskResultCache = new Map();
-			s.taskResultCache.set(taskDescription, result);
+			s.taskResultCache.set(taskDescription, resultForNarration);
 			s.resultQueue.push({
-				text: `[Task result for "${taskDescription}"]\n${result}\n\nReport this result to the user now.`,
+				text: `[Task result for "${taskDescription}"]\n${resultForNarration}\n\nReport this result to the user now.`,
 			});
 			return;
 		}
