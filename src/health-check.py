@@ -37,7 +37,7 @@ except ImportError:  # non-POSIX (e.g. Windows) — the lock degrades to a no-op
 
 REPO_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
-from util_paths import shared_personal_path  # noqa: E402
+from util_paths import personal_path, shared_personal_path  # noqa: E402
 from workspace_default import resolve_workspace, status_read_path  # noqa: E402
 
 # Workspace = runtime-state root (tasks/, results/, state/). REPO_DIR stays the
@@ -773,6 +773,30 @@ def check_task_queue(threshold_count: int = 3, threshold_age_sec: int = 300) -> 
     return {"name": name, "status": "ok", "detail": f"{len(files)} task(s), oldest {oldest_age}s"}
 
 
+def check_stand_identity() -> dict:
+    """Warn when stand-identity.json is missing from all reader paths (#1543 layer 2).
+
+    personal_path() checks $SUTANDO_MEMORY_DIR/machine-<host>/ then <workspace>/
+    in that order. If neither exists the Stand name falls back to the literal
+    "Sutando" default — a symptom of the v0.8 migration misclassifying the file
+    (rehome-state → state/) rather than landing it at the workspace root where
+    the reader expects it (fixed in #1540 / #1542).
+    """
+    name = "stand-identity"
+    si = personal_path("stand-identity.json", WORKSPACE_DIR)
+    if si.exists():
+        return {"name": name, "status": "ok", "detail": str(si)}
+    return {
+        "name": name,
+        "status": "warn",
+        "detail": (
+            "stand-identity.json not found at any reader path — Stand name falls back to 'Sutando'. "
+            "If you ran v0.8 migrate before fix #1540, check whether the file landed in "
+            f"{WORKSPACE_DIR}/state/ and move it to {WORKSPACE_DIR}/."
+        ),
+    }
+
+
 def check_notes_split_brain() -> "dict | None":
     """Detect notes/ split-brain (#1266): overlapping .md files in both
     <repo>/notes/ and <workspace>/notes/ — fires only when the two paths differ."""
@@ -1133,6 +1157,7 @@ def run_all_checks() -> list[dict]:
     queue_count = int(os.environ.get("SUTANDO_HEALTH_QUEUE_COUNT", "3"))
     checks.append(check_core_proactive_loop(threshold_sec=loop_stale_sec))
     checks.append(check_task_queue(threshold_count=queue_count, threshold_age_sec=queue_age_sec))
+    checks.append(check_stand_identity())
 
     return checks
 
