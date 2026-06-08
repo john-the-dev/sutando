@@ -399,6 +399,13 @@ function delegateTask(s: DiscordVoiceSession, taskDescription: string): Promise<
 			console.log(`${ts()} [Task] result ${taskId} (${Date.now() - startTime}ms): ${result.slice(0, 200)}`);
 			s.events.push({ event: `task_result:${taskId}:${Date.now() - startTime}ms`, timestamp: new Date().toISOString() });
 			try { unlinkSync(resultPath); } catch {}
+			// Skip markers: agent signalled delivery happened via another path.
+			// File already deleted above; skip injection into this voice session.
+			if (/^\s*\[(?:deduped:\s*task-|no-send|REPLIED)]/i.test(result)) {
+				const markerMatch = result.match(/^\s*\[([^\]]+)]/);
+				console.log(`${ts()} [Task] ${taskId} skip marker [${markerMatch?.[1] ?? '?'}]; archived silently`);
+				return;
+			}
 			if (!s.taskResultCache) s.taskResultCache = new Map();
 			s.taskResultCache.set(taskDescription, result);
 			s.resultQueue.push({

@@ -449,6 +449,13 @@ function delegateTask(callSession: CallSession, taskDescription: string): Promis
 			// task-bridge.ts archiveFile() audit-trail pattern (#1235).
 			archivePhoneFile(resultPath, 'results', taskId);
 			archivePhoneFile(taskPath, 'tasks', taskId);
+			// Skip markers: agent signalled delivery happened via another path.
+			// Files already archived above; skip injection into this call session.
+			if (/^\s*\[(?:deduped:\s*task-|no-send|REPLIED)]/i.test(result)) {
+				const markerMatch = result.match(/^\s*\[([^\]]+)]/);
+				console.log(`${ts()} [Task] ${taskId} skip marker [${markerMatch?.[1] ?? '?'}]; archived silently`);
+				return;
+			}
 			// Cache result so duplicate requests get instant replay
 			if (!callSession.taskResultCache) callSession.taskResultCache = new Map();
 			callSession.taskResultCache.set(taskDescription, result);
