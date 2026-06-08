@@ -450,10 +450,14 @@ function delegateTask(callSession: CallSession, taskDescription: string): Promis
 			archivePhoneFile(resultPath, 'results', taskId);
 			archivePhoneFile(taskPath, 'tasks', taskId);
 			// Cache result so duplicate requests get instant replay
-			// Strip [channel: <id>] redirect — phone can't route to Discord/Slack
-			// channels; narrate remaining content (mirrors Telegram's behavior).
-			const resultForNarration = result.replace(/^\s*\[channel:[^\]]+\]\s*\n?/i, '').trim() || result;
-			if (resultForNarration !== result) console.log(`${ts()} [Phone] [channel:] redirect stripped from task result`);
+			// Strip delivery-routing markers — phone can't route to Discord/Slack
+			// channels or attach files. [file:/send:/attach:] can appear anywhere.
+			// Narrate remaining content; mirrors Telegram's behavior.
+			const resultForNarration = result
+				.replace(/^\s*\[channel:[^\]]+\]\s*\n?/i, '')
+				.replace(/\[(?:file|send|attach):[^\]]+\]/gi, '')
+				.trim() || result;
+			if (resultForNarration !== result) console.log(`${ts()} [Phone] delivery markers stripped from task result`);
 			if (!callSession.taskResultCache) callSession.taskResultCache = new Map();
 			callSession.taskResultCache.set(taskDescription, resultForNarration);
 			// Anti-hallucination wrapping. See sonichi/sutando#1244 — Gemini

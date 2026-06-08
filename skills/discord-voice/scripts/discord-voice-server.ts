@@ -399,10 +399,14 @@ function delegateTask(s: DiscordVoiceSession, taskDescription: string): Promise<
 			console.log(`${ts()} [Task] result ${taskId} (${Date.now() - startTime}ms): ${result.slice(0, 200)}`);
 			s.events.push({ event: `task_result:${taskId}:${Date.now() - startTime}ms`, timestamp: new Date().toISOString() });
 			try { unlinkSync(resultPath); } catch {}
-			// Strip [channel: <id>] redirect — voice session can't route to
-			// Discord/Slack channels; narrate remaining content (mirrors Telegram).
-			const resultForNarration = result.replace(/^\s*\[channel:[^\]]+\]\s*\n?/i, '').trim() || result;
-			if (resultForNarration !== result) console.log(`${ts()} [Task] ${taskId} [channel:] redirect stripped`);
+			// Strip delivery-routing markers — voice session can't route to
+			// Discord/Slack channels or attach files. Narrate remaining content
+			// (mirrors Telegram). [file:/send:/attach:] can appear anywhere.
+			const resultForNarration = result
+				.replace(/^\s*\[channel:[^\]]+\]\s*\n?/i, '')
+				.replace(/\[(?:file|send|attach):[^\]]+\]/gi, '')
+				.trim() || result;
+			if (resultForNarration !== result) console.log(`${ts()} [Task] ${taskId} delivery markers stripped`);
 			if (!s.taskResultCache) s.taskResultCache = new Map();
 			s.taskResultCache.set(taskDescription, resultForNarration);
 			s.resultQueue.push({
