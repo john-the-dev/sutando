@@ -45,6 +45,12 @@ export interface ExecutionOptions {
 	cwd?: string;
 	/** Additional environment variables */
 	env?: Record<string, string>;
+	/**
+	 * Codex sandbox level. Pass 'read-only' for non-owner access tiers
+	 * (team / other) per CLAUDE.md access-control model; default is
+	 * 'workspace-write' for owner tasks.
+	 */
+	sandboxLevel?: 'read-only' | 'workspace-write';
 }
 
 /**
@@ -115,11 +121,12 @@ export class CodexWorker implements WorkerAgent {
 		const cwd = options?.cwd || this.workspace;
 		const timeoutMs = options?.timeoutMs || 0;
 
-		// Use workspace-write sandbox by default (safer than full access)
+		// Sandbox level: 'read-only' for non-owner tiers, 'workspace-write' for owner.
+		const sandbox = options?.sandboxLevel ?? 'workspace-write';
 		const args = [
 			'exec',
 			'-C', cwd,
-			'-s', 'workspace-write',
+			'-s', sandbox,
 			'--skip-git-repo-check',
 			'-o', resultFile,
 			'--',
