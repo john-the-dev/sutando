@@ -773,6 +773,48 @@ def check_task_queue(threshold_count: int = 3, threshold_age_sec: int = 300) -> 
     return {"name": name, "status": "ok", "detail": f"{len(files)} task(s), oldest {oldest_age}s"}
 
 
+def check_battery() -> "dict | None":
+    """Warn when running on battery power or battery level is critically low (closes #1486).
+
+    macOS only — returns None on other platforms (caller skips it).
+    Fires warn when:
+      - Power source is Battery AND level < SUTANDO_BATTERY_WARN_PCT (default 20)
+      - Power source is Battery (any level) — informs the operator even above threshold
+    Returns ok with detail when on AC power.
+    """
+    if sys.platform != "darwin":
+        return None
+
+    name = "battery"
+    warn_pct = int(os.environ.get("SUTANDO_BATTERY_WARN_PCT", "20"))
+    try:
+        out = subprocess.check_output(["pmset", "-g", "batt"], text=True, timeout=5)
+    except Exception as e:
+        return {"name": name, "status": "warn", "detail": f"pmset failed: {e}"}
+
+    on_battery = "Battery Power" in out
+    pct: "int | None" = None
+    for line in out.splitlines():
+        if "%" in line:
+            try:
+                pct = int(line.split("%")[0].strip().split()[-1])
+            except (ValueError, IndexError):
+                pass
+            break
+
+    pct_str = f"{pct}%" if pct is not None else "unknown%"
+    if not on_battery:
+        return {"name": name, "status": "ok", "detail": f"AC power ({pct_str})"}
+
+    if pct is not None and pct <= warn_pct:
+        return {
+            "name": name,
+            "status": "warn",
+            "detail": f"on battery, {pct_str} — at or below {warn_pct}% threshold (SUTANDO_BATTERY_WARN_PCT)",
+        }
+    return {"name": name, "status": "warn", "detail": f"on battery ({pct_str}) — consider plugging in"}
+
+
 def check_notes_split_brain() -> "dict | None":
     """Detect notes/ split-brain (#1266): overlapping .md files in both
     <repo>/notes/ and <workspace>/notes/ — fires only when the two paths differ."""
@@ -1133,6 +1175,9 @@ def run_all_checks() -> list[dict]:
     queue_count = int(os.environ.get("SUTANDO_HEALTH_QUEUE_COUNT", "3"))
     checks.append(check_core_proactive_loop(threshold_sec=loop_stale_sec))
     checks.append(check_task_queue(threshold_count=queue_count, threshold_age_sec=queue_age_sec))
+    _battery = check_battery()
+    if _battery is not None:
+        checks.append(_battery)
 
     return checks
 
