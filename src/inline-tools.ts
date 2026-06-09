@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { resolveWorkspace, statusPath, statusReadPath } from './workspace_default.js';
+import { VOICE_CONFIG_DEFAULTS, loadVoiceConfig } from './voice-config.js';
 
 // Tasks/, results/, state/, dynamic-content.json are per-user runtime state
 // — live under $SUTANDO_WORKSPACE. Pre-fix, sites below resolved against
@@ -682,6 +683,40 @@ export const getCoreStatusTool: ToolDefinition = {
 	},
 };
 
+// Read the live voice-agent config to report whether Google Search (Web grounding)
+// is currently enabled. Lets the voice agent answer "is search on?" truthfully
+// after context compaction, when the system-prompt reminder may have rolled off.
+// Reads the same config file that switch_voice_config writes.
+export const getVoiceSearchStateTool: ToolDefinition = {
+	name: 'get_voice_search_state',
+	description:
+		'Check whether Google Search (Web grounding) is currently enabled for this voice session. ' +
+		'Use when the user asks "is search on?", "is Google Search enabled?", "do you have web access?", ' +
+		'"can you look things up?", or similar questions about search capability. ' +
+		'Returns current state and a hint for enabling if off. Instant config read.',
+	parameters: z.object({}),
+	execution: 'inline',
+	async execute() {
+		const configPath = join(resolveWorkspace(), 'config', 'voice-agent.json');
+		let googleSearch: boolean;
+		try {
+			const cfg = loadVoiceConfig(configPath);
+			googleSearch = cfg.googleSearch;
+		} catch {
+			googleSearch = VOICE_CONFIG_DEFAULTS.googleSearch;
+		}
+		if (googleSearch) {
+			return {
+				google_search: true,
+				description: 'Google Search (Web grounding) is ON. You can answer questions about current events, weather, news, and other real-time information directly.',
+			};
+		}
+		return {
+			google_search: false,
+			description: 'Google Search (Web grounding) is OFF. To enable, say "switch to search mode" — that switches the voice config to search-on and restarts. Or the owner can update the config at $SUTANDO_WORKSPACE/config/voice-agent.json.',
+		};
+	},
+};
 
 // Slide control — navigate presentation slides
 export const slideControlTool: ToolDefinition = {
@@ -1111,7 +1146,7 @@ export const inlineTools = assertUniqueToolNames([
 	pressKeyTool, scrollTool, switchTabTool, closeTabTool, openUrlTool,
 	switchAppTool, captureScreenTool, typeTextTool,
 	volumeTool, brightnessTool, clipboardTool,
-	cancelTaskTool, toggleTasksTool, getCurrentTimeTool, getCoreStatusTool,
+	cancelTaskTool, toggleTasksTool, getCurrentTimeTool, getCoreStatusTool, getVoiceSearchStateTool,
 	joinGmeetTool, lookupMeetingIdTool, callContactTool,
 	describeScreenTool, clickTool, pointAtTool, scrollAndDescribeTool, screenRecordTool, openFileTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool, ...(_presenterActive ? [slideControlTool, fullscreenTool] : []),
 	showViewTool, readNoteTool, saveNoteTool, deleteNoteTool,
@@ -1125,6 +1160,7 @@ export const inlineTools = assertUniqueToolNames([
 export const anyCallerTools = [
 	getCurrentTimeTool,
 	getCoreStatusTool,
+	getVoiceSearchStateTool,
 	...personalTools.anyCaller,
 ];
 
