@@ -50,7 +50,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { mkdirSync, writeFileSync, copyFileSync, appendFileSync, unlinkSync, existsSync, readFileSync, readdirSync, renameSync, symlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { voiceApiKey } from '../../../src/voice-key.js';
+import { voiceKeyWithTier } from '../../../src/voice-key.js';
 import { loadVoiceConfig } from '../../../src/voice-config.js';
 import { hostname } from 'node:os';
 import { resolveWorkspace } from '../../../src/workspace_default.js';
@@ -109,10 +109,10 @@ function detachVisionFromCall(): void {
 
 // --- Config ---
 
-// Voice surfaces share the GEMINI_VOICE_API_KEY → GEMINI_API_KEY fallback
-// chain via voiceApiKey() (src/voice-key.ts). VOICE-key path isolates voice
-// billing onto a paid-tier key; MAIN-key fallback preserves single-key setup.
-const GEMINI_API_KEY = voiceApiKey();
+// voiceKeyWithTier() (src/voice-key.ts): GEMINI_KEY_PAID → paid tier;
+// GEMINI_KEY_FREE / legacy vars → free tier. Tier drives model + googleSearch
+// defaults when no config file exists.
+const { key: GEMINI_API_KEY, tier: VOICE_KEY_TIER } = voiceKeyWithTier();
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID ?? '';
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN ?? '';
 const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER ?? '';
@@ -191,7 +191,7 @@ if (!existsSync(PHONE_VOICE_CONFIG_PATH)) {
 		console.warn(`${new Date().toISOString().slice(11, 23)} [phone-conversation] could not seed config at ${PHONE_VOICE_CONFIG_PATH}: ${(e as Error).message} — using built-in defaults`);
 	}
 }
-const PHONE_VOICE_CONFIG = loadVoiceConfig(PHONE_VOICE_CONFIG_PATH);
+const PHONE_VOICE_CONFIG = loadVoiceConfig(PHONE_VOICE_CONFIG_PATH, VOICE_KEY_TIER);
 const VOICE_NATIVE_AUDIO_MODEL = PHONE_VOICE_CONFIG.model;
 const PHONE_GOOGLE_SEARCH = PHONE_VOICE_CONFIG.googleSearch;
 

@@ -82,13 +82,13 @@ function assertGeminiKey(name: string, value: string): void {
 	}
 }
 
-import { voiceApiKey } from './voice-key.js';
+import { voiceKeyWithTier } from './voice-key.js';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? '';
 assertGeminiKey('GEMINI_API_KEY', GEMINI_API_KEY);
-// Voice surfaces use the shared GEMINI_VOICE_API_KEY → GEMINI_API_KEY chain
-// via voiceApiKey() (src/voice-key.ts). The VOICE-key fallback path isolates
-// voice billing onto a paid-tier key when set; unset still works.
-const GEMINI_VOICE_API_KEY = voiceApiKey();
+// voiceKeyWithTier() (src/voice-key.ts): GEMINI_KEY_PAID → paid tier;
+// GEMINI_KEY_FREE / legacy vars → free tier. Tier drives the default model +
+// googleSearch combo when no config file exists.
+const { key: GEMINI_VOICE_API_KEY, tier: VOICE_KEY_TIER } = voiceKeyWithTier();
 if (process.env.GEMINI_VOICE_API_KEY) {
 	assertGeminiKey('GEMINI_VOICE_API_KEY', process.env.GEMINI_VOICE_API_KEY);
 }
@@ -197,7 +197,7 @@ if (!existsSync(VOICE_AGENT_CONFIG_PATH)) {
 		console.warn(`${new Date().toISOString().slice(11, 23)} [voice-agent] could not seed config at ${VOICE_AGENT_CONFIG_PATH}: ${(e as Error).message} — using built-in defaults`);
 	}
 }
-const VOICE_AGENT_CONFIG = loadVoiceConfig(VOICE_AGENT_CONFIG_PATH);
+const VOICE_AGENT_CONFIG = loadVoiceConfig(VOICE_AGENT_CONFIG_PATH, VOICE_KEY_TIER);
 const VOICE_NATIVE_AUDIO_MODEL = VOICE_AGENT_CONFIG.model;
 const VOICE_GOOGLE_SEARCH = VOICE_AGENT_CONFIG.googleSearch;
 const VOICE_NAME = process.env.VOICE_NAME || 'Puck';

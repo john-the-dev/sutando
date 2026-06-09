@@ -43,7 +43,7 @@ _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, overri
 _dotenvConfig({ path: join(process.env.HOME ?? '', '.claude/channels/discord/.env'), override: false });
 
 import { fileURLToPath } from 'node:url';
-import { voiceApiKey } from '../../../src/voice-key.js';
+import { voiceKeyWithTier } from '../../../src/voice-key.js';
 import { loadVoiceConfig, resolveOwnerMode } from '../../../src/voice-config.js';
 import { execSync, spawn } from 'node:child_process';
 import { VoiceSession, type ToolDefinition, type MainAgent } from 'bodhi-realtime-agent';
@@ -74,9 +74,10 @@ import {
 
 // --- Config ---
 
-// Voice surfaces share the GEMINI_VOICE_API_KEY → GEMINI_API_KEY fallback
-// chain via voiceApiKey() (src/voice-key.ts).
-const GEMINI_API_KEY = voiceApiKey();
+// voiceKeyWithTier() (src/voice-key.ts): GEMINI_KEY_PAID → paid tier;
+// GEMINI_KEY_FREE / legacy vars → free tier. Tier drives model + googleSearch
+// defaults when no config file exists.
+const { key: GEMINI_API_KEY, tier: VOICE_KEY_TIER } = voiceKeyWithTier();
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN ?? '';
 const WORKSPACE_DIR = resolveWorkspace();
 // Operational/diagnostic log — the [Setup]/[Voice]/[Tool]/[VoiceSession]/
@@ -128,7 +129,7 @@ if (!existsSync(DISCORD_VOICE_CONFIG_PATH)) {
 		console.warn(`${new Date().toISOString().slice(11, 23)} [discord-voice] could not seed config at ${DISCORD_VOICE_CONFIG_PATH}: ${(e as Error).message} — using built-in defaults`);
 	}
 }
-const DISCORD_VOICE_CONFIG = loadVoiceConfig(DISCORD_VOICE_CONFIG_PATH);
+const DISCORD_VOICE_CONFIG = loadVoiceConfig(DISCORD_VOICE_CONFIG_PATH, VOICE_KEY_TIER);
 const VOICE_NATIVE_AUDIO_MODEL = DISCORD_VOICE_CONFIG.model;
 const DISCORD_VOICE_GOOGLE_SEARCH = DISCORD_VOICE_CONFIG.googleSearch;
 

@@ -1,10 +1,10 @@
 /**
  * Per-surface voice configuration loader.
  *
- * `loadVoiceConfig(path)` is path-agnostic — each caller decides where its
- * config lives and passes the absolute path in. The config is per-user DATA
- * (model + grounding prefs the operator tunes), not code, so it does NOT live
- * in the git repo — it lives in the workspace:
+ * `loadVoiceConfig(path, tier?)` is path-agnostic — each caller decides where
+ * its config lives and passes the absolute path in. The config is per-user
+ * DATA (model + grounding prefs the operator tunes), not code, so it does NOT
+ * live in the git repo — it lives in the workspace:
  *
  *   - voice-agent        → `$SUTANDO_WORKSPACE/config/voice-agent.json`
  *   - phone-conversation → `$SUTANDO_WORKSPACE/config/phone-conversation.json`
@@ -22,17 +22,15 @@
  *     "channels": { "<voice_channel_id>": { "owner_mode": true } }
  *   }
  *
- * Missing file → defaults. Partial file → fill in missing keys from defaults.
+ * Missing file → tier-based defaults. Partial file → fill in missing keys
+ * from tier-based defaults. Owner can always override any field explicitly.
  *
- * Defaults: 2.5 + search:true. Rationale: 2.5+search is the only combo that
- * works on BOTH the MAIN and VOICE Gemini keys (3.1+search needs paid-tier
- * entitlement that only MAIN currently has on most setups; 3.1 without search
- * works on either key but loses Web grounding by default — that's degrading
- * capability rather than picking a safe baseline). Surfaces that explicitly
- * want a different combo (e.g. voice-agent prefers 3.1 + search:false for the
- * web client's code-heavy workload) ship a `.example` template carrying that
- * override. Phone inherits the default; discord-voice's template carries it
- * too, so a fresh install behaves identically.
+ * Tier-based defaults (issue #1008 sub-item B):
+ *   paid  → 2.5-native-audio + search:true  (GEMINI_KEY_PAID set)
+ *   free  → 3.1-flash-live-preview + search:false  (OSS default)
+ *
+ * VOICE_CONFIG_DEFAULTS (paid-tier defaults) is preserved for backward
+ * compatibility. New code should use getVoiceConfigDefaults(tier) instead.
  *
  * `owner_mode` / `channels` are the discord-voice trust-boundary knobs
  * (issue #1016) — `owner_mode` is the skill-wide default and `channels[id]`
@@ -56,12 +54,26 @@ export interface VoiceConfig {
 	channels: Record<string, VoiceChannelConfig>;
 }
 
+/** Paid-tier defaults: best model + search on. Backward-compat alias kept for voice-config-switch.ts. */
 export const VOICE_CONFIG_DEFAULTS: VoiceConfig = {
 	model: 'gemini-2.5-flash-native-audio-preview-12-2025',
 	googleSearch: true,
 	owner_mode: false,
 	channels: {},
 };
+
+/** Free-tier defaults: conservative model + search off (avoids 1011 entitlement errors on free keys). */
+export const VOICE_CONFIG_DEFAULTS_FREE: VoiceConfig = {
+	model: 'gemini-3.1-flash-live-preview',
+	googleSearch: false,
+	owner_mode: false,
+	channels: {},
+};
+
+/** Return tier-appropriate defaults. Paid → 2.5+search:true. Free → 3.1+search:false. */
+export function getVoiceConfigDefaults(tier: 'paid' | 'free'): VoiceConfig {
+	return tier === 'paid' ? VOICE_CONFIG_DEFAULTS : VOICE_CONFIG_DEFAULTS_FREE;
+}
 
 /**
  * Resolve the effective owner-mode for a discord-voice channel — fail-closed.
@@ -97,12 +109,13 @@ export function resolveOwnerMode(
 	return config.owner_mode === true;
 }
 
-export function loadVoiceConfig(configPath: string): VoiceConfig {
-	if (!existsSync(configPath)) return { ...VOICE_CONFIG_DEFAULTS, channels: {} };
+export function loadVoiceConfig(configPath: string, tier: 'paid' | 'free' = 'free'): VoiceConfig {
+	const defaults = getVoiceConfigDefaults(tier);
+	if (!existsSync(configPath)) return { ...defaults, channels: {} };
 	try {
 		const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
 		return {
-			...VOICE_CONFIG_DEFAULTS,
+			...defaults,
 			...raw,
 			// channels is a nested object — spread can't deep-merge, so take the
 			// file's map verbatim when present, else fall back to the empty default.
@@ -110,6 +123,6 @@ export function loadVoiceConfig(configPath: string): VoiceConfig {
 		};
 	} catch (e) {
 		console.warn(`[voice-config] failed to parse ${configPath}, using defaults: ${(e as Error).message}`);
-		return { ...VOICE_CONFIG_DEFAULTS, channels: {} };
+		return { ...defaults, channels: {} };
 	}
 }

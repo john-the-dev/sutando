@@ -12,7 +12,8 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { resolveWorkspace, statusPath, statusReadPath } from './workspace_default.js';
-import { VOICE_CONFIG_DEFAULTS, loadVoiceConfig } from './voice-config.js';
+import { getVoiceConfigDefaults, loadVoiceConfig } from './voice-config.js';
+import { voiceKeyWithTier } from './voice-key.js';
 
 // Tasks/, results/, state/, dynamic-content.json are per-user runtime state
 // — live under $SUTANDO_WORKSPACE. Pre-fix, sites below resolved against
@@ -698,12 +699,13 @@ export const getVoiceSearchStateTool: ToolDefinition = {
 	execution: 'inline',
 	async execute() {
 		const configPath = join(resolveWorkspace(), 'config', 'voice-agent.json');
+		const { tier } = voiceKeyWithTier();
 		let googleSearch: boolean;
 		try {
-			const cfg = loadVoiceConfig(configPath);
+			const cfg = loadVoiceConfig(configPath, tier);
 			googleSearch = cfg.googleSearch;
 		} catch {
-			googleSearch = VOICE_CONFIG_DEFAULTS.googleSearch;
+			googleSearch = getVoiceConfigDefaults(tier).googleSearch;
 		}
 		if (googleSearch) {
 			return {

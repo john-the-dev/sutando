@@ -52,10 +52,10 @@ describe('get_voice_search_state inline tool — source contract', () => {
 		);
 	});
 
-	it('tool falls back to VOICE_CONFIG_DEFAULTS on missing config', () => {
+	it('tool falls back to tier-appropriate defaults on missing config', () => {
 		assert.ok(
-			SRC.includes('VOICE_CONFIG_DEFAULTS'),
-			'tool must fall back to VOICE_CONFIG_DEFAULTS when config file is missing',
+			SRC.includes('getVoiceConfigDefaults'),
+			'tool must fall back via getVoiceConfigDefaults(tier) — not hardcoded VOICE_CONFIG_DEFAULTS — so free-tier keys get search:false by default',
 		);
 	});
 
