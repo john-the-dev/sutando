@@ -55,6 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workspace_default import resolve_workspace  # noqa: E402
 from single_instance import acquire as _single_instance_acquire  # noqa: E402
 import discord_config  # noqa: E402  — Sutando workspace-local discord config (#1147)
+from discord_api import discord_api as _discord_api_post  # noqa: E402
 from util_paths import shared_personal_path  # noqa: E402
 from task_priority import default_priority_for_source  # noqa: E402
 from task_archive import find_task_file  # noqa: E402
@@ -3862,22 +3863,13 @@ def _send_via_rest(channel_id: str, message: str):
     is silently dropped — this caused codex-output replies (often >2KB) to
     never reach the channel.
     """
-    import urllib.request
-    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
-    headers = {
-        "Authorization": f"Bot {TOKEN}",
-        "Content-Type": "application/json",
-        "User-Agent": "DiscordBot (sutando, 1.0)",
-    }
     chunks = list(_chunk_for_discord(message))
     if not chunks:
         # Empty message — nothing to send. Treat as no-op rather than error.
         return
     for i, chunk in enumerate(chunks, 1):
-        data = json.dumps({"content": chunk}).encode()
-        req = urllib.request.Request(url, data=data, headers=headers)
         try:
-            urllib.request.urlopen(req)
+            _discord_api_post("POST", f"/channels/{channel_id}/messages", TOKEN, {"content": chunk})
         except Exception as e:
             print(f"Send failed (chunk {i}/{len(chunks)}): {e}")
             sys.exit(1)

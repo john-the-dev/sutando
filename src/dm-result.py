@@ -35,6 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workspace_default import resolve_workspace  # noqa: E402
 import discord_config  # noqa: E402  — workspace-local Sutando discord config (#1147)
+from discord_api import discord_api as _discord_api  # noqa: E402
 REPO = resolve_workspace()
 ACCESS_JSON = Path.home() / ".claude" / "channels" / "discord" / "access.json"
 SSE_STATUS_URL = "http://localhost:8080/sse-status"
@@ -192,26 +193,6 @@ def _load_token() -> str:
             if line.startswith("DISCORD_BOT_TOKEN="):
                 return line.split("=", 1)[1].strip().strip('"').strip("'")
     return ""
-
-
-def _discord_api(method, path, token, body=None):
-    """Small wrapper around urllib for Discord's REST API. Returns parsed JSON
-    on 2xx, raises on other statuses. No retries — caller handles failure."""
-    url = f"https://discord.com/api/v10{path}"
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Authorization": f"Bot {token}",
-            "Content-Type": "application/json",
-            "User-Agent": "Sutando/1.0",
-        },
-        method=method,
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        raw = resp.read()
-        return json.loads(raw) if raw else None
 
 
 def _send_message_with_files(channel_id: str, token: str, content: str,
