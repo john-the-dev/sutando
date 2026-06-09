@@ -582,7 +582,7 @@ function buildAgent(callSession: CallSession): MainAgent {
 				'',
 				'',
 				'## Known info',
-				(() => { try { const url = execSync('git remote get-url origin', { timeout: 2_000 }).toString().trim().replace(/\.git$/, ''); return `Sutando GitHub repo: ${url}`; } catch { return ''; } })(),
+				`Sutando GitHub repo: ${process.env.SUTANDO_GH_REPO_URL || 'https://github.com/sonichi/sutando'}`,
 				ownerLocalDateContext(),
 				// Session-level anti-hallucination backstop (cherry-picked from
 				// bassilkhilo-ag2's parallel PR #1249). Pre-warms the model
