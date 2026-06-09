@@ -305,18 +305,24 @@ export const CHAT_HTML = /* html */ `<!DOCTYPE html>
     msg.appendChild(avatar);
     msg.appendChild(bubble);
     chatInner.appendChild(msg);
-    scrollToBottom();
 
     if (save) {
       history.push({ role: role, content: content });
       saveHistory();
+      scrollToBottom(true);
     }
     return bubble;
   }
 
-  function scrollToBottom() {
+  function scrollToBottom(smooth) {
     const chat = document.getElementById('chat');
-    requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+    // Double rAF: first fires before paint but after DOM insertion; second
+    // fires after layout recalc so scrollHeight reflects the new content.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        chat.scrollTo({ top: chat.scrollHeight, behavior: smooth ? 'smooth' : 'instant' });
+      });
+    });
   }
 
   function autoresize() {
@@ -331,6 +337,10 @@ export const CHAT_HTML = /* html */ `<!DOCTYPE html>
     }
     empty.style.display = 'none';
     history.forEach(m => appendMessage(m.role, m.content, false));
+    // Single instant scroll after all history is painted — avoids N competing
+    // rAF calls from individual appendMessage calls during batch render.
+    const chat = document.getElementById('chat');
+    requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
   }
 
   input.addEventListener('input', autoresize);
@@ -365,7 +375,7 @@ export const CHAT_HTML = /* html */ `<!DOCTYPE html>
     pendingMsg.className = 'msg assistant';
     pendingMsg.innerHTML = '<div class="avatar">S</div><div class="bubble pending"><div class="typing"><span></span><span></span><span></span></div></div>';
     chatInner.appendChild(pendingMsg);
-    scrollToBottom();
+    scrollToBottom(true);
 
     let pollInterval;
     let timeoutHandle;
