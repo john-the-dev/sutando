@@ -31,14 +31,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-
-# ---- Path resolution ----
-
-def resolve_workspace() -> Path:
-    ws = os.environ.get("SUTANDO_WORKSPACE")
-    if ws:
-        return Path(ws).expanduser()
-    return Path.home() / ".sutando" / "workspace"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workspace_default import resolve_workspace  # noqa: E402
 
 
 TASK_ID_RE = re.compile(r"^task-(.+)\.txt$")
