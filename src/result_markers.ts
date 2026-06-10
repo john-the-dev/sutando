@@ -58,6 +58,7 @@ const _REDIRECT_RE = /^\s*\[channel:\s*([^\]]+)\]\s*\n?/;
 const _D7_HEADER_RE = /^\*\*\[core:\s*[^\]]+\]\*\*\s*\n(?:_[^\n]*_\s*\n)?\s*/;
 
 // Attach markers — file/send/attach are aliases.
+// Only ever called via String.replace() which resets lastIndex automatically — safe as a module-level constant.
 const _ATTACH_RE = /\[(?:file|send|attach):\s*([^\]]+)\]/g;
 
 /**
