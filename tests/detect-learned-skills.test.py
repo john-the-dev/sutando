@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Tests for src/detect-learned-skills.py — gate-guarded workflow pattern miner.
+Tests for skills/learned-skills/scripts/detect-learned-skills.py — gate-guarded
+workflow pattern miner.
 
 Covers:
   a) Gate-off path: sentinel absent → exits cleanly, prints one-line message
@@ -25,7 +26,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 spec = importlib.util.spec_from_file_location(
-    "detect_learned_skills", REPO / "src" / "detect-learned-skills.py"
+    "detect_learned_skills",
+    REPO / "skills" / "learned-skills" / "scripts" / "detect-learned-skills.py",
 )
 dls = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dls)

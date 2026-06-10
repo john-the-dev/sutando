@@ -2,7 +2,7 @@
 learned skills. Gated on state/learned-skills-enabled.sentinel (toggled from
 Settings → Skills → Behavior); exits early when the gate is off.
 
-Run: python3 src/detect-learned-skills.py
+Run: python3 skills/learned-skills/scripts/detect-learned-skills.py
 Exit: 0 always (gate-off, no candidates, or proposals written to stdout).
 """
 
@@ -14,7 +14,8 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Resolve src/ (scripts/ → learned-skills/ → skills/ → repo root → src/)
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 from workspace_default import resolve_workspace  # noqa: E402
 
 WORKSPACE = resolve_workspace()
