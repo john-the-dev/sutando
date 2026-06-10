@@ -72,3 +72,10 @@ jobs:
             fi
           done < <(find tests -name '*.test.py' -not -path '*/node_modules/*' | sort)
           exit "$failed"
+
+      # Layer 3 (#1543): validate CLASS_RULES entries in sutando-migrate.sh
+      # are compatible with personal_path() / personalPath() reader chains.
+      # No-op (exit 0) when sutando-migrate.sh is absent — activates after
+      # #1454 (staging-workspace-revamp) merges and the file appears on main.
+      - name: Lint CLASS_RULES vs reader chains
+        run: python3 scripts/lint-class-rules.py
