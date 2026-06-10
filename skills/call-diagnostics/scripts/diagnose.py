@@ -28,9 +28,7 @@ from pathlib import Path
 #   1. --metrics <path>           — explicit jsonl override (back-compat)
 #   2. data/conversation.sqlite   — primary as of #603 (sessions table)
 #   3. data/call-metrics.jsonl    — frozen archive fallback
-_cwd_path = Path.cwd() / "data" / "call-metrics.jsonl"
-_script_path = Path(__file__).resolve().parents[3] / "data" / "call-metrics.jsonl"
-METRICS_PATH = _cwd_path if _cwd_path.exists() else _script_path
+METRICS_PATH = Path(__file__).resolve().parents[3] / "data" / "call-metrics.jsonl"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 from workspace_default import resolve_workspace  # noqa: E402

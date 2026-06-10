@@ -165,7 +165,7 @@ const runDreamTool: ToolDefinition = {
     parameters: z.object({}),
     execute: async () => {
         try {
-            const scriptPath = `${process.env.SUTANDO_REPO_DIR || process.cwd()}/skills/obsidian-vault/scripts/dream.py`;
+            const scriptPath = new URL('./scripts/dream.py', import.meta.url).pathname;
             // Fire-and-forget: detach so the voice turn returns immediately.
             // `--force` bypasses the SUTANDO_OBSIDIAN_MIRROR opt-in gate
             // because this is an explicit user invocation (the user said
