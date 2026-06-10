@@ -414,12 +414,31 @@ generate_exclude() {
 
     # Migration: an in-tree .gitignore is the leak source — drop it. The
     # rules now live in .git/info/exclude (per-clone, opaque to outer).
+    #
+    # If it is TRACKED — an older host committed it to the vault, and its own
+    # `!.gitignore` rule self-tracks it — a plain `rm -f` deletes only the
+    # local copy: the file is re-materialized on the next peer pull/merge, so
+    # the inner/outer leak (workspace content showing in the OUTER repo's
+    # status; see the boundary note above) recurs forever. `git rm` instead, so
+    # the untrack is committed and propagates through the vault history — the
+    # file then disappears from every device on its next pull. Fall back to
+    # `rm -f` when untracked (fresh local cruft, or pre-first-commit --init).
     if [ -f "$legacy_gitignore" ] && [ "$DRY_RUN" != "1" ]; then
-        rm -f "$legacy_gitignore"
-        log "generate_exclude: removed legacy in-tree $legacy_gitignore (rules moved to .git/info/exclude)"
+        if git -C "$WORKSPACE_DIR" ls-files --error-unmatch .gitignore >/dev/null 2>&1; then
+            git -C "$WORKSPACE_DIR" rm -q -f .gitignore
+            log "generate_exclude: git-rm'd TRACKED in-tree $legacy_gitignore (untrack propagates via vault; rules live in .git/info/exclude)"
+        else
+            rm -f "$legacy_gitignore"
+            log "generate_exclude: removed untracked in-tree $legacy_gitignore (rules moved to .git/info/exclude)"
+        fi
     fi
 
-    if [ ! -d "$WORKSPACE_DIR/.git/info" ]; then
+    # NB: do NOT mkdir in --dry-run. Creating `.git/info` when no real repo
+    # exists leaves a STUB `.git/` (a lone `info/`, no HEAD/objects). A later
+    # `_init_impl` then sees `.git` present, skips `git init`, and git walks UP
+    # to a parent repo's worktree (e.g. a submodule) — hijacking it. A dry-run
+    # must never mutate state. (See the toplevel-isolation guard in _init_impl.)
+    if [ "$DRY_RUN" != "1" ] && [ ! -d "$WORKSPACE_DIR/.git/info" ]; then
         mkdir -p "$WORKSPACE_DIR/.git/info"
     fi
 
@@ -520,13 +539,31 @@ _init_impl() {
         return 0
     fi
 
-    # 1. git init if not already a repo
-    if [ ! -d "$WORKSPACE_DIR/.git" ]; then
+    # 1. git init if not already a *valid, isolated* repo.
+    #
+    # A bare `-d .git` check is insufficient. A stub `.git/` (e.g. a lone
+    # `.git/info/` left by a prior `--dry-run`, a half-finished init, or a
+    # backup restore) passes `-d` but is NOT a real repo. git then walks UP to
+    # the nearest parent repo's worktree — e.g. when the workspace lives inside
+    # a git SUBMODULE — and every subsequent remote/add/commit/push silently
+    # hijacks that parent (rewrites its origin, commits its whole tree, pushes
+    # it to the vault). Decide by the resolved toplevel: this is "already a
+    # repo" ONLY if git resolves THIS dir as its own toplevel.
+    local _top
+    _top="$(git -C "$WORKSPACE_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [ -n "$_top" ] && [ "$_top" -ef "$WORKSPACE_DIR" ]; then
+        log "_init_impl: $WORKSPACE_DIR is already a git repo"
+    else
         git init -q
         log "_init_impl: git init done in $WORKSPACE_DIR"
         echo "sync-workspace: git init done in $WORKSPACE_DIR" >&2
-    else
-        log "_init_impl: $WORKSPACE_DIR is already a git repo"
+        # Fail-safe: confirm the fresh repo isolated (git did NOT climb out to
+        # a parent worktree). If it still resolves elsewhere, refuse rather
+        # than operate on — and corrupt — a parent repo.
+        _top="$(git -C "$WORKSPACE_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+        if ! { [ -n "$_top" ] && [ "$_top" -ef "$WORKSPACE_DIR" ]; }; then
+            die "init: $WORKSPACE_DIR did not isolate as its own git repo (git resolved toplevel: ${_top:-<none>}). Refusing — remote/commit/push would leak into a parent repo. If the workspace is nested inside another git repo (e.g. a submodule), run 'git -C \"$WORKSPACE_DIR\" init' manually, verify 'git -C \"$WORKSPACE_DIR\" rev-parse --absolute-git-dir' points at \$WORKSPACE_DIR/.git, then re-run --init."
+        fi
     fi
 
     # 2. Set vault remote (idempotent — replace if URL changed)
@@ -858,8 +895,45 @@ _push_only_impl() {
     git add -A
     if git diff --cached --quiet; then
         log "_push_only_impl: nothing to commit"
-        echo "sync-workspace: nothing to push (clean working tree)"
-        return 0
+        # A clean tree does NOT mean "done": a prior push may have failed (auth
+        # blip, network, the recovered-from case during first --init) leaving a
+        # local commit that the remote never received. Without this, a transient
+        # push failure leaves the host branch silently stale until the NEXT
+        # content change happens to create a fresh commit.
+        #
+        # Check the remote AUTHORITATIVELY with ls-remote rather than the local
+        # remote-tracking ref: a fetch without --prune leaves a stale
+        # refs/remotes/origin/... ref after the remote branch is gone, which
+        # would falsely read as "up to date" and skip the recovery push.
+        local host_ws_seg local_sha remote_out ls_rc remote_sha
+        host_ws_seg="$(_host_ws_segment)"
+        local_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+        remote_out="$(git ls-remote --heads origin "host/${host_ws_seg}" 2>/dev/null)"; ls_rc=$?
+        remote_sha="$(printf '%s\n' "$remote_out" | awk 'NR==1{print $1}')"
+        if [ -z "$local_sha" ]; then
+            echo "sync-workspace: nothing to push (no local commit yet)"
+            return 0
+        fi
+        if [ "$ls_rc" -ne 0 ]; then
+            # Couldn't reach the remote to verify — don't thrash a push that
+            # would also fail; report softly and let the next tick retry.
+            echo "sync-workspace: nothing to push (clean tree; could not reach remote to verify)"
+            return 0
+        fi
+        if [ "$remote_sha" = "$local_sha" ]; then
+            echo "sync-workspace: nothing to push (clean working tree, remote up to date)"
+            return 0
+        fi
+        # ls-remote succeeded but the host branch is missing or behind HEAD →
+        # the local commit was never (fully) pushed. Push it now.
+        if git push origin "HEAD:refs/heads/host/${host_ws_seg}" 2>&1 | tee -a "$LOG" >/dev/null; then
+            log "_push_only_impl: pushed previously-unpushed commit(s) to host/${host_ws_seg}"
+            echo "sync-workspace: pushed previously-unpushed commit(s) to host/${host_ws_seg}"
+            return 0
+        fi
+        log "_push_only_impl: push of unpushed commit(s) failed"
+        echo "sync-workspace: push failed (clean tree, unpushed commit); check $LOG" >&2
+        return 1
     fi
 
     # Mass-deletion tripwire (carried over from sync-memory.sh)
