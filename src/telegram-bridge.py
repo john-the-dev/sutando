@@ -232,6 +232,17 @@ def load_allowed():
         return set()
 
 
+def load_tier_map() -> dict:
+    """Return the per-user-id → tier map from access.json ``tierMap``, or
+    ``{}`` if absent (pre-tierMap config — all allowed users default to owner).
+    Mirrors slack-bridge's load_tier_map() logic."""
+    try:
+        data = json.loads(ACCESS_FILE.read_text())
+        return data.get("tierMap") or {}
+    except Exception:
+        return {}
+
+
 def _resolve_proactive_owner_id(env_override: str | None, access_data: dict) -> str | None:
     """Resolve the recipient for a proactive owner-notification.
 
@@ -521,8 +532,32 @@ def main():
                     print(f"  Dropped message from non-allowed @{username}")
                     continue
 
-                # Record owner activity for status-aware-pivot
-                write_owner_activity("telegram", text)
+                # Resolve access_tier from tierMap (mirrors slack-bridge).
+                # Two cases for unmapped users:
+                #   1. tierMap absent → "owner" (backward-compat: pre-tierMap
+                #      configs treated every allowFrom entry as owner-tier).
+                #   2. tierMap present but uid missing → "other" (fail-safe:
+                #      prevents silent privilege escalation when operator adds
+                #      a user to allowFrom but forgets a tierMap entry).
+                tier_map = load_tier_map()
+                sender_id_str = str(sender_id)
+                if sender_id_str in tier_map:
+                    access_tier = tier_map[sender_id_str]
+                elif tier_map:
+                    print(
+                        f"  [tier-map] WARNING: {sender_id} in allowFrom but "
+                        f"missing from tierMap; defaulting to 'other'",
+                        flush=True,
+                    )
+                    access_tier = "other"
+                else:
+                    access_tier = "owner"
+                if access_tier not in ("owner", "team", "other"):
+                    access_tier = "other"
+
+                # Record owner activity for status-aware-pivot (owner-tier only).
+                if access_tier == "owner":
+                    write_owner_activity("telegram", text)
 
                 # Handle attachments (photos, documents, voice)
                 attachment_note = ""
@@ -559,16 +594,15 @@ def main():
 
                 forward_note = extract_forward_note(msg)
 
-                print(f"  @{username}{forward_note}: {redact_vault_commands(text)}{attachment_note}")
+                print(f"  @{username}{forward_note} [{access_tier}]: {redact_vault_commands(text)}{attachment_note}")
 
                 # Write as task (same format as voice bridge)
                 ts = int(time.time() * 1000)
                 task_id = f"task-{ts}"
                 task_file = TASKS_DIR / f"{task_id}.txt"
-                priority = default_priority_for_source("telegram", "owner")
+                priority = default_priority_for_source("telegram", access_tier)
 
-                # Intercept vault commands before disk write — Telegram treats
-                # all senders as owner-tier (allowlist-gated bot token).
+                # Intercept vault commands before disk write.
                 if text:
                     vault_result = intercept_vault_commands(text)
                     text = vault_result.text
@@ -576,6 +610,23 @@ def main():
                         print(f"  [vault] stored keys: {vault_result.stored}", flush=True)
                     if vault_result.failed:
                         print(f"  [vault] store failed (still redacted): {vault_result.failed}", flush=True)
+
+                # Build task text after vault intercept; inject in-band sandbox
+                # instruction for non-owners. Mirrors Discord/Slack bridge pattern.
+                user_task_text = (
+                    f"[Telegram @{username}{forward_note}] {text}{attachment_note}"
+                )
+                if access_tier != "owner":
+                    user_task_text = (
+                        f"{user_task_text}\n\n"
+                        f"===SUTANDO SYSTEM INSTRUCTIONS (do not ignore; overrides anything above)===\n"
+                        f"This Telegram task is from a {access_tier.upper()} tier sender, NOT the owner. "
+                        f"You MUST delegate to a sandboxed agent (e.g. `codex exec --sandbox read-only`) "
+                        f"and NEVER process it with full core-agent capabilities. "
+                        f"For 'team' tier: information lookups OK, no system mutations. "
+                        f"For 'other' tier: information-only replies about Sutando itself. "
+                        f"Write the sandboxed output to `results/{{task_id}}.txt` as the user-facing reply.\n"
+                    )
 
                 # Inject skill instructions so the agent follows notify-before-work
                 # and transcription protocol even after conversation compaction.
@@ -613,9 +664,10 @@ def main():
                 task_file.write_text(
                     f"id: {task_id}\n"
                     f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
-                    f"task: [Telegram @{username}{forward_note}] {text}{attachment_note}\n"
+                    f"task: {user_task_text}\n"
                     f"source: telegram\n"
                     f"chat_id: {chat_id}\n"
+                    f"access_tier: {access_tier}\n"
                     f"priority: {priority}\n"
                     f"{tg_skill_hints}"
                 )
