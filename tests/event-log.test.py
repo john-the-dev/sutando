@@ -98,7 +98,8 @@ def _test_basic_write():
 
         event = json.loads(lines[0])
         _check("log-has-ts", "ts" in event)
-        _check("log-ts-in-range", before <= event["ts"] <= after, f"ts={event['ts']}")
+        # Allow 1s slack: NTP corrections on CI can cause sub-second backward jumps.
+        _check("log-ts-in-range", before - 1 <= event["ts"] <= after + 1, f"ts={event['ts']}")
         _check("log-has-node", "node" in event and event["node"])
         _check("log-has-kind", event.get("kind") == "test.basic")
         _check("log-extra-fields", event.get("foo") == "bar" and event.get("count") == 42)
