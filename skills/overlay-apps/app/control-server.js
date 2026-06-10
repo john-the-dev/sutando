@@ -8,20 +8,12 @@
 
 const { createServer } = require('http');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
+const { resolveWorkspace } = require('./workspace-resolve');
 
 const HOST = '127.0.0.1';
 const DEFAULT_PORT = 7849;
 const PORT_RANGE = 20;
-
-function resolveWorkspace() {
-  const env = process.env.SUTANDO_WORKSPACE;
-  if (env) {
-    return path.resolve(env.replace(/^~(?=$|\/)/, os.homedir()));
-  }
-  return path.join(os.homedir(), '.sutando', 'workspace');
-}
 
 const DISCOVERY_PATH = path.join(
   resolveWorkspace(),

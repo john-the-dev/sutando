@@ -14,10 +14,10 @@ const {
   screen,
 } = require('electron');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { getStats } = require('./stats');
 const { startControlServer, stopControlServer } = require('./control-server');
+const { resolveWorkspace } = require('./workspace-resolve');
 
 const MARGIN = 20;
 const DIM_OPACITY = 0.2; // opacity when the app loses focus (auto-dim)
@@ -40,12 +40,6 @@ const OVERLAYS = {
 };
 
 // --- Multi-display support ----------------------------------------------
-
-function resolveWorkspace() {
-  const env = process.env.SUTANDO_WORKSPACE;
-  if (env) return path.resolve(env.replace(/^~(?=$|\/)/, os.homedir()));
-  return path.join(os.homedir(), '.sutando', 'workspace');
-}
 
 const DISPLAY_PREF_PATH = path.join(
   resolveWorkspace(),
