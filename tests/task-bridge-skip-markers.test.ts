@@ -83,4 +83,33 @@ describe('task-bridge.ts — [no-send]/[REPLIED] skip-marker handling (#1381)', 
 			`[deduped:] guard (pos ${dedupIdx}) must appear before skip-marker guard (pos ${skipIdx})`
 		);
 	});
+
+	it('skip-marker guard has file.startsWith("task-") guard (mirrors [deduped:] block)', () => {
+		// The guard must only apply to task files, not proactive-result-*.txt or
+		// other result files that could have marker-like content. Without this guard
+		// a proactive-result file beginning with [no-send] would be swallowed here
+		// instead of reaching discord-bridge's poll_proactive delivery path.
+		const afterSkip = afterBlock('has skip marker');
+		// Look backward from the log line to find the enclosing if-condition.
+		const beforeSkip = SRC.slice(0, SRC.indexOf('has skip marker'));
+		const lastIfBeforeSkip = beforeSkip.lastIndexOf('if (');
+		const ifCondition = SRC.slice(lastIfBeforeSkip, lastIfBeforeSkip + 120);
+		assert.ok(
+			ifCondition.includes('file.startsWith('),
+			`skip-marker if-condition must include file.startsWith() guard; got: ${ifCondition.slice(0, 80)}`
+		);
+	});
+
+	it('skip-marker block POSTs task-done to local API (mirrors [deduped:] block)', () => {
+		// Without the task-done POST, the dashboard would show skip-marker tasks
+		// as stuck. The [deduped:] block sends this POST; skip-marker must too.
+		const afterSkip = afterBlock('has skip marker');
+		const taskDoneIdx = afterSkip.indexOf('task-done');
+		const continueIdx = afterSkip.indexOf('continue;');
+		assert.ok(taskDoneIdx !== -1, 'skip-marker block must POST to task-done endpoint');
+		assert.ok(
+			taskDoneIdx < continueIdx,
+			'task-done POST must appear before continue; in skip-marker block'
+		);
+	});
 });
