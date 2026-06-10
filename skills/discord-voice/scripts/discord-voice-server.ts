@@ -337,6 +337,10 @@ interface DiscordVoiceSession {
 	events: { event: string; timestamp: string }[];
 	meetingMode: boolean;
 	lastUserAudioAt: number;
+	// Provenance lease — minted only from a real user STT event (resampler.on('end')).
+	// Tool dispatch requires a live lease so model-fabricated user turns can't fire tools.
+	// Cleared on turn.end. TTL is 30s (covers normal response latency).
+	actionLease: { id: string; mintedAt: number; ttlMs: number } | null;
 }
 
 // Effective tier of the in-progress turn — the gate owner/team tools check.
@@ -607,6 +611,13 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 					console.log(`${ts()} [Tier] '${t.name}' denied — speaker tier=${tier}, needs ${need}`);
 					return { status: 'denied', message: `That needs ${need}-tier access; the current speaker is ${tier}-tier.` };
 				}
+				// Provenance gate: require an action lease minted from real user audio.
+				// Blocks tool calls triggered by model-fabricated user turns (#1585).
+				const lease = s.actionLease;
+				if (!lease || Date.now() - lease.mintedAt > lease.ttlMs) {
+					console.log(`${ts()} [Lease] '${t.name}' blocked — no valid action lease (fabricated turn?)`);
+					return { status: 'denied', message: 'Tool call blocked: no action lease — possible model-fabricated turn.' };
+				}
 				return inner(args);
 			},
 		};
@@ -747,6 +758,11 @@ function subscribeUser(s: DiscordVoiceSession, userId: string): void {
 		// a hang apart from a normal pause.
 		(s as any).lastSpeakStopTs = Date.now();
 		(s as any).utterancesSinceTurn = ((s as any).utterancesSinceTurn || 0) + 1;
+		// Mint a provenance lease so the model's response to this utterance can call tools.
+		// Only real STT events (inbound Discord audio) reach this path — model-fabricated
+		// user turns never do, so they can never open an action-bearing turn (see #1585).
+		s.actionLease = { id: `${userId}-${Date.now()}`, mintedAt: Date.now(), ttlMs: 30_000 };
+		console.log(`${ts()} [Lease] minted for ${userId}`);
 		triggerSilenceBurst(s);
 	});
 	resampler.on('error', (e) => {
@@ -819,6 +835,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		events: [{ event: 'session_started', timestamp: new Date().toISOString() }],
 		meetingMode: false,
 		lastUserAudioAt: Date.now(),
+		actionLease: null,
 	};
 
 	const agent = buildAgent(s);
@@ -929,6 +946,10 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		// Tier gate: the turn is over — its speaker attribution no longer
 		// applies. The next turn re-accumulates speakers from speaking.start.
 		s.turnSpeakers.clear();
+		// Provenance lease: clear after turn ends — the next user utterance must mint
+		// a fresh lease. Fabricated user turns generated in a subsequent auto-regression
+		// step find no lease and cannot call tools (see #1585).
+		s.actionLease = null;
 		const items = session.conversationContext.items;
 		if (items.length < lastProcessedIdx) lastProcessedIdx = 0;
 		const lastText = s.transcript.length > 0 ? s.transcript[s.transcript.length - 1].text : null;
