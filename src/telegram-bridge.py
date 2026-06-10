@@ -415,7 +415,7 @@ def send_reply(chat_id, text, task_id: str | None = None):
         fpath = fpath.strip()
         if _is_path_sendable(fpath):
             send_file(chat_id, fpath)
-            print(f"  Sent file: {fpath}")
+            print(f"  Sent file: {fpath}", flush=True)
         elif os.path.isfile(fpath):
             api("sendMessage", chat_id=chat_id, text=f"(file access denied: {fpath})")
             print(f"  BLOCKED file: {fpath}")
@@ -731,7 +731,7 @@ def main():
                             fpath = action.value.strip()
                             if _is_path_sendable(fpath):
                                 send_file(chat_id, fpath)
-                                print(f"  Sent file: {fpath}")
+                                print(f"  Sent file: {fpath}", flush=True)
                             elif os.path.isfile(fpath):
                                 api("sendMessage", chat_id=chat_id, text=f"(file access denied: {fpath})")
                                 print(f"  BLOCKED file: {fpath}")
