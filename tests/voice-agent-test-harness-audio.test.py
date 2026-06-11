@@ -27,7 +27,15 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import numpy as np
+try:
+    import numpy as np
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
+
+if not _HAS_NUMPY:
+    print("voice-agent-test-harness-audio: SKIP (numpy not installed)")
+    sys.exit(0)
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "voice-agent-test-harness" / "scripts"
