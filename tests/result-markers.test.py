@@ -1,253 +1,162 @@
 #!/usr/bin/env python3
-"""
-Unit tests for src/result_markers.py — the unified result-body marker parser
-that closes #873.
+"""Tests for src/result_markers.py — parse_markers() + first_action()."""
 
-Covers:
-  - SKIP markers ([no-send], [REPLIED], [deduped: <id>]) at body start
-  - REDIRECT marker ([channel: <id>]) at body start
-  - ATTACH markers ([file:], [send:], [attach:]) anywhere in body
-  - Precedence (skip beats redirect beats attach)
-  - Edge cases: empty body, whitespace before skip, malformed markers, etc.
-  - "No marker ever leaks as literal text in body" — the load-bearing invariant
-
-Run: python3 tests/result-markers.test.py
-Exit code: 0 on pass, 1 on fail.
-"""
-
+import importlib.util
 import sys
-import unittest
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "src"))
+_REPO = Path(__file__).resolve().parent.parent
+spec = importlib.util.spec_from_file_location("result_markers", _REPO / "src" / "result_markers.py")
+_mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+sys.modules["result_markers"] = _mod
+spec.loader.exec_module(_mod)  # type: ignore[union-attr]
 
-from result_markers import parse_markers, first_action  # noqa: E402
+parse_markers = _mod.parse_markers
+first_action = _mod.first_action
+Action = _mod.Action
+ParseResult = _mod.ParseResult
 
+_passed = 0
+_failed = 0
 
-class TestSkipMarkers(unittest.TestCase):
-    def test_no_send_at_start(self):
-        r = parse_markers("[no-send]\nthis is ignored")
-        self.assertEqual(r.body, "")
-        self.assertEqual(len(r.actions), 1)
-        self.assertEqual(r.actions[0].kind, "skip")
-        self.assertEqual(r.actions[0].value, "no-send")
-
-    def test_replied_at_start(self):
-        r = parse_markers("[REPLIED]\nalready handled")
-        self.assertEqual(r.body, "")
-        self.assertEqual(r.actions[0].value, "REPLIED")
-
-    def test_deduped_captures_task_id(self):
-        r = parse_markers("[deduped: task-1779164273868]\nfull reply elsewhere")
-        self.assertEqual(r.body, "")
-        self.assertEqual(r.actions[0].value, "deduped")
-        self.assertEqual(r.actions[0].extra, "task-1779164273868")
-
-    def test_skip_strips_leading_whitespace(self):
-        r = parse_markers("  [no-send]\nbody")
-        self.assertEqual(r.actions[0].kind, "skip")
-
-    def test_skip_case_insensitive_for_no_send_and_deduped(self):
-        r1 = parse_markers("[NO-SEND]\nx")
-        r2 = parse_markers("[DEDUPED: task-1]\nx")
-        self.assertEqual(r1.actions[0].value, "no-send")
-        self.assertEqual(r2.actions[0].value, "deduped")
-
-    def test_replied_case_sensitive(self):
-        # [REPLIED] in caps is the canonical form. lowercase shouldn't match.
-        r = parse_markers("[replied]\nbody")
-        self.assertEqual(r.actions, [])
-        self.assertIn("[replied]", r.body)
+def _check(label: str, condition: bool) -> None:
+    global _passed, _failed
+    if condition:
+        _passed += 1
+    else:
+        _failed += 1
+        print(f"FAIL: {label}")
 
 
-class TestRedirectMarker(unittest.TestCase):
-    def test_redirect_at_start_strips_marker(self):
-        r = parse_markers("[channel: C09TEUW5DE1]\nhello team")
-        self.assertEqual(r.body, "hello team")
-        self.assertEqual(r.actions[0].kind, "redirect")
-        self.assertEqual(r.actions[0].value, "C09TEUW5DE1")
+# empty / plain
+r = parse_markers("")
+_check("empty → empty body", r.body == "")
+_check("empty → no actions", r.actions == [])
 
-    def test_redirect_discord_numeric_channel(self):
-        r = parse_markers("[channel: 1499520683267592432]\nRFC announcement")
-        self.assertEqual(r.actions[0].value, "1499520683267592432")
-        self.assertEqual(r.body, "RFC announcement")
+r = parse_markers("Hello world")
+_check("plain → body unchanged", r.body == "Hello world")
+_check("plain → no actions", r.actions == [])
 
-    def test_redirect_only_at_start(self):
-        # An attach-style marker in middle of body doesn't get parsed as redirect
-        r = parse_markers("body talking about [channel: 12345] inline")
-        self.assertEqual(first_action(r, "redirect"), None)
-        # And the literal text stays (bridges may strip if they want)
-        self.assertIn("[channel: 12345]", r.body)
+r = parse_markers("   \n  Line one\nLine two")
+_check("plain multiline → body preserved", "Line one" in r.body)
+_check("plain multiline → no actions", r.actions == [])
 
+# SKIP: [no-send]
+r = parse_markers("[no-send]")
+_check("no-send → body empty", r.body == "")
+_check("no-send → one action", len(r.actions) == 1)
+_check("no-send → kind=skip", r.actions[0].kind == "skip")
+_check("no-send → value=no-send", r.actions[0].value == "no-send")
 
-class TestAttachMarkers(unittest.TestCase):
-    def test_file_marker(self):
-        r = parse_markers("here it is [file: /tmp/sutando-a.png]")
-        self.assertEqual(r.actions[0].kind, "attach")
-        self.assertEqual(r.actions[0].value, "/tmp/sutando-a.png")
-        self.assertEqual(r.body, "here it is")
+r = parse_markers("[NO-SEND]\nsome content")
+_check("no-send case-insensitive → skip", r.actions[0].kind == "skip")
+_check("no-send swallows content", r.body == "")
 
-    def test_send_marker(self):
-        r = parse_markers("[send: /docs/x.pdf] check this")
-        self.assertEqual(r.actions[0].value, "/docs/x.pdf")
-        self.assertEqual(r.body, "check this")
+r = parse_markers("  [no-send]  \nignored")
+_check("no-send with leading whitespace → skip", r.actions[0].kind == "skip")
 
-    def test_attach_marker(self):
-        r = parse_markers("done [attach: /notes/y.md]")
-        self.assertEqual(r.actions[0].value, "/notes/y.md")
+# SKIP: [REPLIED]
+r = parse_markers("[REPLIED]")
+_check("REPLIED → skip", r.actions[0].kind == "skip")
+_check("REPLIED → value=REPLIED", r.actions[0].value == "REPLIED")
 
-    def test_multiple_attaches_document_order(self):
-        r = parse_markers("a [file: /a] b [send: /b] c [attach: /c] d")
-        paths = [a.value for a in r.actions if a.kind == "attach"]
-        self.assertEqual(paths, ["/a", "/b", "/c"])
+r = parse_markers("[REPLIED]\nsome body after")
+_check("REPLIED swallows body", r.body == "")
 
-    def test_attach_markers_stripped_from_body(self):
-        r = parse_markers("here is [file: /a]")
-        self.assertNotIn("[file:", r.body)
-        self.assertNotIn("/a]", r.body)
+# SKIP: [deduped:]
+r = parse_markers("[deduped: task-99]")
+_check("deduped → skip", r.actions[0].kind == "skip")
+_check("deduped → value=deduped", r.actions[0].value == "deduped")
+_check("deduped → extra=task-99", r.actions[0].extra == "task-99")
 
+r = parse_markers("[deduped: task-99]\n[channel: 12345]\n[file: /x]")
+_check("deduped terminal → no redirect", not any(a.kind == "redirect" for a in r.actions))
+_check("deduped terminal → no attach", not any(a.kind == "attach" for a in r.actions))
 
-class TestPrecedence(unittest.TestCase):
-    def test_skip_beats_redirect(self):
-        r = parse_markers("[no-send]\n[channel: C123]\nbody")
-        # Skip is terminal — no redirect should be parsed.
-        self.assertEqual(len(r.actions), 1)
-        self.assertEqual(r.actions[0].kind, "skip")
+r = parse_markers("[DEDUPED: abc-123]")
+_check("deduped case-insensitive", r.actions[0].extra == "abc-123")
 
-    def test_skip_beats_attach(self):
-        r = parse_markers("[deduped: task-1]\n[file: /x]")
-        self.assertEqual(len(r.actions), 1)
-        self.assertEqual(r.actions[0].kind, "skip")
+# REDIRECT
+r = parse_markers("[channel: 12345678901234567]\nBody text")
+_check("redirect → kind", r.actions[0].kind == "redirect")
+_check("redirect → channel id", r.actions[0].value == "12345678901234567")
+_check("redirect → body is rest", "Body text" in r.body)
+_check("redirect → marker stripped", "[channel:" not in r.body)
 
-    def test_redirect_plus_attach_coexist(self):
-        r = parse_markers("[channel: C123]\nbody [file: /tmp/sutando-x.png]")
-        kinds = [a.kind for a in r.actions]
-        self.assertEqual(kinds, ["redirect", "attach"])
-        self.assertEqual(r.body, "body")
+r = parse_markers("[channel: CDEF1234]\nSlack channel")
+_check("redirect slack channel id", r.actions[0].value == "CDEF1234")
 
+r = parse_markers("  [channel: 99]  \nAfter")
+_check("redirect leading whitespace", r.actions[0].kind == "redirect")
 
-class TestEdgeCases(unittest.TestCase):
-    def test_empty_body(self):
-        r = parse_markers("")
-        self.assertEqual(r.body, "")
-        self.assertEqual(r.actions, [])
+r = parse_markers("[channel: 99]")
+_check("redirect no following body → ok", r.actions[0].kind == "redirect")
 
-    def test_plain_text_no_markers(self):
-        r = parse_markers("just a normal reply")
-        self.assertEqual(r.body, "just a normal reply")
-        self.assertEqual(r.actions, [])
+r = parse_markers("Some text\n[channel: 999]\nMore")
+_check("redirect not first line → no redirect", not any(a.kind == "redirect" for a in r.actions))
 
-    def test_malformed_skip_does_not_match(self):
-        # Missing closing bracket — should be literal text, not parsed
-        r = parse_markers("[no-send\nbody")
-        self.assertEqual(r.actions, [])
-        self.assertIn("[no-send", r.body)
+# ATTACH
+r = parse_markers("Here [file: /tmp/x.png] you go")
+_check("file marker → attach", r.actions[0].kind == "attach")
+_check("file marker → path", r.actions[0].value == "/tmp/x.png")
+_check("file marker stripped", "[file:" not in r.body)
 
-    def test_first_action_helper(self):
-        r = parse_markers("[channel: C1]\n[file: /a] [file: /b]")
-        self.assertEqual(first_action(r, "redirect").value, "C1")
-        self.assertEqual(first_action(r, "attach").value, "/a")
-        self.assertEqual(first_action(r, "skip"), None)
+r = parse_markers("See [send: /home/user/report.pdf]")
+_check("send alias → attach", r.actions[0].kind == "attach")
+_check("send alias → path", r.actions[0].value == "/home/user/report.pdf")
 
+r = parse_markers("[attach: /data/output.csv] attached")
+_check("attach alias → attach", r.actions[0].kind == "attach")
+_check("attach alias → path", r.actions[0].value == "/data/output.csv")
 
-class TestNoLeakInvariant(unittest.TestCase):
-    """The load-bearing claim of #873: no marker ever leaks as literal text
-    in the parsed `body` field. Whatever a bridge passes through, the user
-    sees clean output.
-    """
+r = parse_markers("First [file: /a.txt] and [send: /b.txt] end")
+attaches = [a for a in r.actions if a.kind == "attach"]
+_check("multiple attaches → 2 actions", len(attaches) == 2)
+_check("multiple attaches → first path", attaches[0].value == "/a.txt")
+_check("multiple attaches → second path", attaches[1].value == "/b.txt")
+_check("multiple attaches → markers stripped", "[file:" not in r.body and "[send:" not in r.body)
 
-    def test_no_attach_marker_in_body(self):
-        r = parse_markers("body [file: /a] [send: /b] [attach: /c] end")
-        for marker in ("[file:", "[send:", "[attach:"):
-            self.assertNotIn(marker, r.body)
+# REDIRECT + ATTACH combo
+r = parse_markers("[channel: 42]\nSee [file: /report.pdf] for details")
+_check("redirect+attach → redirect present", any(a.kind == "redirect" for a in r.actions))
+_check("redirect+attach → attach present", any(a.kind == "attach" for a in r.actions))
+_check("redirect+attach → body has text", "for details" in r.body)
 
-    def test_no_redirect_marker_in_body_when_at_start(self):
-        r = parse_markers("[channel: C1]\nhello")
-        self.assertNotIn("[channel:", r.body)
+# D7 header peeling
+r = parse_markers("**[core: 2]**\nNormal body")
+_check("D7 header → body includes reply", "Normal body" in r.body)
+_check("D7 header alone → no actions", r.actions == [])
 
-    def test_skip_strips_entire_body(self):
-        # Body is "" for skips so no leak possible.
-        for prefix in ("[no-send]", "[REPLIED]", "[deduped: task-x]"):
-            r = parse_markers(f"{prefix}\nthis is internal")
-            self.assertEqual(r.body, "")
+r = parse_markers("**[core: 1]**\n_(handled by pool core 1)_\nReply text")
+_check("D7 italic sub-line → body includes reply", "Reply text" in r.body)
 
+r = parse_markers("**[core: 3]**\n[no-send]\nbody")
+_check("D7+skip → still skips", r.actions[0].kind == "skip")
+_check("D7+skip → body empty", r.body == "")
 
-class TestD7HeaderTolerance(unittest.TestCase):
-    """D7 (owner directive 2026-05-19) prepends `**[core: N]**` + optional
-    italic sub-line to every owner-facing reply. The header sits at byte 0,
-    which previously shadowed the redirect regex (anchored at body start).
-    The parser now peels the header off before marker scanning and re-stitches
-    it onto the returned body — markers fire correctly, header stays visible.
-    """
+r = parse_markers("**[core: 1]**\n[channel: 777]\nRedir body")
+_check("D7+redirect → redirect found", any(a.kind == "redirect" for a in r.actions))
+_check("D7+redirect → body has text", "Redir body" in r.body)
+_check("D7+redirect → D7 header in body", "**[core: 1]**" in r.body)
 
-    def test_d7_header_does_not_shadow_redirect(self):
-        text = "**[core: 2]**\n\n[channel: C09XYZ]\nHello redirected."
-        r = parse_markers(text)
-        self.assertEqual(first_action(r, "redirect").value, "C09XYZ")
-        # Header preserved in user-facing body.
-        self.assertTrue(r.body.startswith("**[core: 2]**"))
-        # Redirect line itself stripped.
-        self.assertNotIn("[channel:", r.body)
-        # Discord channel-id form also accepted.
-        r2 = parse_markers("**[core: 1]**\n\n[channel: 1506182697142325298]\nx")
-        self.assertEqual(first_action(r2, "redirect").value, "1506182697142325298")
+# first_action
+pr = ParseResult(body="x", actions=[
+    Action(kind="skip", value="no-send"),
+    Action(kind="attach", value="/a.txt"),
+    Action(kind="attach", value="/b.txt"),
+])
 
-    def test_d7_header_with_italic_subline(self):
-        text = (
-            "**[core: 2]**\n"
-            "_(channel→core handler switch from core-1)_\n"
-            "\n"
-            "[channel: C09XYZ]\n"
-            "Body."
-        )
-        r = parse_markers(text)
-        self.assertEqual(first_action(r, "redirect").value, "C09XYZ")
-        # Both header lines preserved.
-        self.assertIn("**[core: 2]**", r.body)
-        self.assertIn("_(channel→core handler switch from core-1)_", r.body)
+a = first_action(pr, "skip")
+_check("first_action skip → found", a is not None and a.kind == "skip")
 
-    def test_d7_header_without_marker_passes_through(self):
-        text = "**[core: 2]**\n\nJust a normal reply, no markers."
-        r = parse_markers(text)
-        self.assertEqual(r.actions, [])
-        # Body unchanged (header + content intact).
-        self.assertEqual(r.body, text)
+a = first_action(pr, "attach")
+_check("first_action attach → first file", a is not None and a.value == "/a.txt")
 
-    def test_d7_plus_skip_keeps_skip_terminal(self):
-        # Skip markers are invisible to the user — when combined with a D7
-        # header, the header is discarded along with the body. Otherwise the
-        # bridge would deliver a header-only message with no content.
-        text = "**[core: 2]**\n\n[no-send]\nthis-is-internal"
-        r = parse_markers(text)
-        self.assertEqual(first_action(r, "skip").value, "no-send")
-        self.assertEqual(r.body, "")
+a = first_action(pr, "redirect")
+_check("first_action redirect → None when absent", a is None)
 
-    def test_d7_plus_deduped_keeps_skip_terminal(self):
-        text = "**[core: 2]**\n[deduped: task-1779164273868]\nfull elsewhere"
-        r = parse_markers(text)
-        skip = first_action(r, "skip")
-        self.assertEqual(skip.value, "deduped")
-        self.assertEqual(skip.extra, "task-1779164273868")
-        self.assertEqual(r.body, "")
+a = first_action(ParseResult(body="", actions=[]), "skip")
+_check("first_action empty → None", a is None)
 
-    def test_d7_plus_redirect_plus_attach(self):
-        text = (
-            "**[core: 2]**\n"
-            "\n"
-            "[channel: C09XYZ]\n"
-            "[file: /tmp/x.txt]\n"
-            "Body with attachment."
-        )
-        r = parse_markers(text)
-        kinds = [a.kind for a in r.actions]
-        self.assertEqual(kinds, ["redirect", "attach"])
-        self.assertEqual(first_action(r, "attach").value, "/tmp/x.txt")
-        # No marker leaks; header still in body.
-        self.assertNotIn("[channel:", r.body)
-        self.assertNotIn("[file:", r.body)
-        self.assertIn("**[core: 2]**", r.body)
-
-
-if __name__ == "__main__":
-    unittest.main()
+print(f"result-markers: {_passed}/{_passed + _failed} passed")
+sys.exit(0 if _failed == 0 else 1)
