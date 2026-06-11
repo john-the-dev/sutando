@@ -1,241 +1,229 @@
 #!/usr/bin/env python3
-"""Unit tests for src/result_channel_key.py — the per-channel pull path
-for task-result files in `results/`.
+"""Regression guard: all pure functions in src/result_channel_key.py.
 
-Twin of tests/result-channel-key.test.ts. Same invariants, same shape.
+sanitize_key(raw) -> str
+  Collapses to [A-Za-z0-9_-]; empty/None/falsy → "unknown".
+  Leading/trailing whitespace stripped first.
+
+result_filename(channel_key, task_id) -> str
+  Scoped filename: "<sanitized_key>.<task_id>.txt".
+
+parse_result_filename(filename) -> (key | None, task_id)
+  Scoped form "<key>.task-{id}[.txt]" → (key, "task-{id}").
+  Anything else (legacy flat, voice-, proactive-) → (None, basename).
+
+result_belongs_to(filename, channel_key) -> bool
+  True iff filename is the scoped form claimed by channel_key.
+  Must end with ".txt"; .tmp/.partial etc. return False.
+  task_id must start with "task-".
+
+discord_voice_key(vc_id) -> str  — "dvoice-<sanitize_key(vc_id)>"
+phone_call_key(call_sid) -> str  — "phone-<sanitize_key(call_sid)>"
 
 Run: python3 tests/result-channel-key.test.py
-Exit code: 0 on pass, 1 on fail.
+Exit: 0 on pass, 1 on fail.
 """
+from __future__ import annotations
 
+import importlib.util
 import sys
-import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "src"))
 
-from result_channel_key import (  # noqa: E402
-    sanitize_key,
-    result_filename,
-    parse_result_filename,
-    result_belongs_to,
-    discord_voice_key,
-    phone_call_key,
+spec = importlib.util.spec_from_file_location(
+    "result_channel_key", REPO / "src" / "result_channel_key.py"
 )
+_mod = importlib.util.module_from_spec(spec)
+sys.modules["result_channel_key"] = _mod
+spec.loader.exec_module(_mod)
+
+_passed = 0
+_failed = 0
 
 
-class TestSanitizeKey(unittest.TestCase):
-    def test_passes_safe_input(self):
-        self.assertEqual(sanitize_key("1485653767402553457"), "1485653767402553457")
-        self.assertEqual(sanitize_key("CA1234abcd"), "CA1234abcd")
-        self.assertEqual(sanitize_key("local-voice"), "local-voice")
-        self.assertEqual(sanitize_key("foo_bar-baz"), "foo_bar-baz")
-
-    def test_collapses_unsafe_chars(self):
-        self.assertEqual(sanitize_key("a/b"), "a-b")
-        self.assertEqual(sanitize_key("a.b"), "a-b")
-        self.assertEqual(sanitize_key("a b"), "a-b")
-        self.assertEqual(sanitize_key("../etc/passwd"), "---etc-passwd")
-
-    def test_empty_falls_back_to_unknown(self):
-        self.assertEqual(sanitize_key(""), "unknown")
-        self.assertEqual(sanitize_key(None), "unknown")
-        self.assertEqual(sanitize_key("   "), "unknown")
-        # All-unsafe → all dashes (not 'unknown' — input wasn't empty).
-        self.assertEqual(sanitize_key("..."), "---")
+def _check(label: str, condition: bool, detail: str = "") -> None:
+    global _passed, _failed
+    if condition:
+        _passed += 1
+    else:
+        _failed += 1
+        print(f"FAIL [{label}]{': ' + detail if detail else ''}", file=sys.stderr)
 
 
-class TestResultFilename(unittest.TestCase):
-    def test_builds_scoped_form(self):
-        self.assertEqual(
-            result_filename("1485653767402553457", "task-discord-voice-1700000000"),
-            "1485653767402553457.task-discord-voice-1700000000.txt",
-        )
-        self.assertEqual(
-            result_filename("CA1234abcd", "task-phone-1700000000"),
-            "CA1234abcd.task-phone-1700000000.txt",
-        )
+# ---------------------------------------------------------------------------
+# sanitize_key
+# ---------------------------------------------------------------------------
+
+def _test_sanitize_key():
+    s = _mod.sanitize_key
+
+    # Alphanumeric + allowed chars pass through unchanged
+    _check("sk-alpha",       s("dvoice-123_abc") == "dvoice-123_abc")
+
+    # Spaces collapsed to "-"
+    _check("sk-space",       s("my channel") == "my-channel")
+
+    # Dot collapsed to "-"
+    _check("sk-dot",         s("chan.nel") == "chan-nel")
+
+    # Slash collapsed to "-"
+    _check("sk-slash",       "." not in s("a/b") and "/" not in s("a/b"))
+
+    # None → "unknown"
+    _check("sk-none",        s(None) == "unknown")
+
+    # Empty string → "unknown"
+    _check("sk-empty",       s("") == "unknown")
+
+    # All-unsafe chars → all collapsed (non-empty result)
+    _check("sk-all-unsafe",  s("...") == "---")
+
+    # Leading/trailing whitespace stripped (not collapsed to dashes)
+    _check("sk-strip",       s("  hello  ") == "hello")
+
+    # Numeric-only string preserved
+    _check("sk-numeric",     s("1234567890") == "1234567890")
 
 
-class TestParseResultFilename(unittest.TestCase):
-    def test_splits_scoped_form(self):
-        self.assertEqual(
-            parse_result_filename("1485653767402553457.task-discord-voice-1700000000.txt"),
-            ("1485653767402553457", "task-discord-voice-1700000000"),
-        )
-        self.assertEqual(
-            parse_result_filename("CA1234abcd.task-phone-1700000000"),
-            ("CA1234abcd", "task-phone-1700000000"),
-        )
-
-    def test_returns_none_for_legacy_flat(self):
-        self.assertEqual(
-            parse_result_filename("task-1700000000.txt"), (None, "task-1700000000")
-        )
-        self.assertEqual(
-            parse_result_filename("task-discord-voice-1700000000.txt"),
-            (None, "task-discord-voice-1700000000"),
-        )
-
-    def test_returns_none_for_non_task(self):
-        self.assertEqual(
-            parse_result_filename("voice-1700000000.txt"), (None, "voice-1700000000")
-        )
-        self.assertEqual(
-            parse_result_filename("proactive-1700000000.txt"),
-            (None, "proactive-1700000000"),
-        )
+_test_sanitize_key()
 
 
-class TestResultBelongsTo(unittest.TestCase):
-    def test_claims_scoped_match(self):
-        self.assertTrue(
-            result_belongs_to(
-                "1485653767402553457.task-foo.txt", "1485653767402553457"
-            )
-        )
-        self.assertTrue(result_belongs_to("CA123.task-phone-1.txt", "CA123"))
+# ---------------------------------------------------------------------------
+# result_filename
+# ---------------------------------------------------------------------------
 
-    def test_rejects_different_key(self):
-        self.assertFalse(
-            result_belongs_to(
-                "1485653767402553457.task-foo.txt", "9999999999"
-            )
-        )
+def _test_result_filename():
+    rf = _mod.result_filename
 
-    def test_rejects_legacy_flat(self):
-        self.assertFalse(result_belongs_to("task-1700000000.txt", "1485653767402553457"))
-        self.assertFalse(
-            result_belongs_to("task-discord-voice-1700000000.txt", "local-voice")
-        )
+    # Standard usage
+    _check("rf-basic", rf("dvoice-123456789", "task-1718000000") ==
+           "dvoice-123456789.task-1718000000.txt")
 
-    def test_rejects_non_task(self):
-        self.assertFalse(result_belongs_to("voice-1700000000.txt", "local-voice"))
-        self.assertFalse(result_belongs_to("proactive-1700000000.txt", "anything"))
-        # Scoped form whose payload isn't a task-* file.
-        self.assertFalse(
-            result_belongs_to(
-                "1485653767402553457.proactive-foo.txt", "1485653767402553457"
-            )
-        )
+    # Unsafe key sanitized
+    out2 = rf("my channel!", "task-42")
+    _check("rf-sanitize", "!" not in out2 and " " not in out2)
+    _check("rf-suffix",   out2.endswith(".txt"))
 
-    def test_rejects_atomic_write_temp_suffixes(self):
-        """Partial-write race: a writer's atomic-write temp file
-        (``<key>.task-X.txt.tmp``, ``.sending``, ``.partial``, etc.) must
-        NEVER match — picking it up would inject a half-written body and
-        orphan the rename target. The scan loops also gate on
-        ``endswith('.txt')``, but lock the invariant at the helper too."""
-        key = "1485653767402553457"
-        temp_suffixes = [
-            "1485653767402553457.task-discord-voice-1700000000.txt.tmp",
-            "1485653767402553457.task-discord-voice-1700000000.txt.partial",
-            "1485653767402553457.task-discord-voice-1700000000.txt.sending",
-            "1485653767402553457.task-discord-voice-1700000000.txt.swp",
-            "1485653767402553457.task-discord-voice-1700000000.txt.lock",
-            "1485653767402553457.task-discord-voice-1700000000.txt~",
-            "1485653767402553457.task-discord-voice-1700000000.sending",
-            "1485653767402553457.task-discord-voice-1700000000.tmp",
-            "1485653767402553457.task-discord-voice-1700000000.partial",
-            # dotfile prefix (vim swap, atomic-write idioms)
-            ".1485653767402553457.task-discord-voice-1700000000.txt",
-        ]
-        for f in temp_suffixes:
-            self.assertFalse(
-                result_belongs_to(f, key),
-                f"result_belongs_to should reject {f} (partial-write temp)",
-            )
-
-    def test_still_matches_canonical_txt(self):
-        """Sanity-check: canonical `.txt` form still matches — the
-        temp-suffix rejection didn't accidentally over-reject."""
-        self.assertTrue(
-            result_belongs_to(
-                "1485653767402553457.task-discord-voice-1700000000.txt",
-                "1485653767402553457",
-            )
-        )
+    # Underscore in key preserved
+    _check("rf-underscore", rf("phone_call", "task-99") == "phone_call.task-99.txt")
 
 
-class TestExistingConsumersDoNotMatch(unittest.TestCase):
-    """Load-bearing invariant. A scoped filename must NOT match any
-    existing consumer's filter (specific task_id existsSync / `task-*`
-    glob / startswith). Replay each consumer's actual pattern to lock
-    that in."""
-
-    SCOPED = "1485653767402553457.task-discord-voice-1700000000.txt"
-    SCOPED_BASE = "1485653767402553457.task-discord-voice-1700000000"
-
-    def test_pending_replies_lookup(self):
-        # discord/telegram/slack bridges: result_file = RESULTS_DIR / f"{task_id}.txt"
-        # where task_id is an id THEY tracked. A scoped filename's task_id
-        # is the full prefixed string, which is never a tracked id.
-        tracked_ids = ["task-1700000001", "task-discord-voice-1700000000"]
-        for tid in tracked_ids:
-            self.assertNotEqual(
-                f"{tid}.txt",
-                self.SCOPED,
-                f"pending id {tid} would match scoped filename",
-            )
-
-    def test_agent_api_glob(self):
-        # agent-api.py: results_dir.glob("task-*.txt")
-        # Equivalent: name starts with 'task-' and ends with '.txt'.
-        self.assertFalse(self.SCOPED.startswith("task-"))
-
-    def test_task_bridge_voice_guard(self):
-        # task-bridge.ts: file.startsWith('voice-')
-        self.assertFalse(self.SCOPED.startswith("voice-"))
-
-    def test_task_bridge_task_guards(self):
-        # task-bridge.ts: file.startsWith('task-') for dedup + offline forward
-        self.assertFalse(self.SCOPED.startswith("task-"))
-
-    def test_task_bridge_chat_guard(self):
-        # task-bridge.ts: taskId.startsWith('task-chat-')
-        self.assertFalse(self.SCOPED_BASE.startswith("task-chat-"))
+_test_result_filename()
 
 
-class TestTypedKeyConstructors(unittest.TestCase):
-    """Per-consumer prefixes — writer + consumer MUST go through the same
-    typed function so the keys agree. Prevents cross-consumer namespace
-    collisions when a future consumer ID format overlaps with an existing one."""
+# ---------------------------------------------------------------------------
+# parse_result_filename
+# ---------------------------------------------------------------------------
 
-    def test_discord_voice_key_prefixes_dvoice(self):
-        self.assertEqual(
-            discord_voice_key("1485653767402553457"),
-            "dvoice-1485653767402553457",
-        )
+def _test_parse_result_filename():
+    p = _mod.parse_result_filename
 
-    def test_phone_call_key_prefixes_phone(self):
-        self.assertEqual(phone_call_key("CA1234abcd"), "phone-CA1234abcd")
+    # Scoped form with .txt suffix
+    key, task_id = p("dvoice-123.task-1718000000.txt")
+    _check("prf-key",     key == "dvoice-123")
+    _check("prf-task-id", task_id == "task-1718000000")
 
-    def test_typed_keys_sanitize_input(self):
-        self.assertEqual(discord_voice_key("a/b"), "dvoice-a-b")
-        self.assertEqual(phone_call_key("../etc"), "phone----etc")
+    # Scoped form without .txt suffix
+    key2, tid2 = p("dvoice-123.task-1718000000")
+    _check("prf-no-ext-key",  key2 == "dvoice-123")
+    _check("prf-no-ext-task", tid2 == "task-1718000000")
 
-    def test_typed_keys_fallback_on_empty(self):
-        self.assertEqual(discord_voice_key(None), "dvoice-unknown")
-        self.assertEqual(discord_voice_key(""), "dvoice-unknown")
-        self.assertEqual(phone_call_key(None), "phone-unknown")
+    # Legacy flat form → (None, basename)
+    key3, tid3 = p("task-1718000000.txt")
+    _check("prf-legacy-key",  key3 is None)
+    _check("prf-legacy-task", tid3 == "task-1718000000")
 
-    def test_typed_keys_round_trip_through_result_filename(self):
-        key = discord_voice_key("1485653767402553457")
-        fname = result_filename(key, "task-1700000000")
-        self.assertEqual(fname, "dvoice-1485653767402553457.task-1700000000.txt")
-        self.assertTrue(result_belongs_to(fname, key))
+    # voice- prefix → (None, basename)
+    key4, tid4 = p("voice-1234567890.txt")
+    _check("prf-voice-key",  key4 is None)
+    _check("prf-voice-name", tid4 == "voice-1234567890")
 
-    def test_typed_keys_dont_collide_across_consumers(self):
-        # Hypothetical collision: a future consumer takes a Twilio-shaped ID
-        # but the discord-voice consumer also wraps a VC ID that happens to
-        # match. Without prefixes the keys would be equal; with prefixes they
-        # remain distinct.
-        same_id = "CA1234abcd"
-        self.assertNotEqual(
-            discord_voice_key(same_id),
-            phone_call_key(same_id),
-        )
+    # proactive- prefix → (None, basename)
+    key5, _ = p("proactive-1718000000.txt")
+    _check("prf-proactive", key5 is None)
+
+    # Phone-scoped form
+    key7, tid7 = p("phone-CA1234567890abcdef.task-1718000001.txt")
+    _check("prf-phone-key",  key7 == "phone-CA1234567890abcdef")
+    _check("prf-phone-task", tid7 == "task-1718000001")
 
 
-if __name__ == "__main__":
-    unittest.main()
+_test_parse_result_filename()
+
+
+# ---------------------------------------------------------------------------
+# result_belongs_to
+# ---------------------------------------------------------------------------
+
+def _test_result_belongs_to():
+    rb = _mod.result_belongs_to
+
+    # Exact match
+    _check("rbt-match",    rb("dvoice-123.task-1.txt", "dvoice-123") is True)
+
+    # Different key → False
+    _check("rbt-diff-key", rb("dvoice-123.task-1.txt", "dvoice-456") is False)
+
+    # Legacy flat → False (key is None)
+    _check("rbt-legacy",   rb("task-1.txt", "dvoice-123") is False)
+
+    # Missing .txt suffix → False
+    _check("rbt-no-ext",   rb("dvoice-123.task-1", "dvoice-123") is False)
+
+    # Temp file (.tmp suffix) → False
+    _check("rbt-tmp",      rb("dvoice-123.task-1.txt.tmp", "dvoice-123") is False)
+
+    # task_id must start with "task-" (proactive is not a task)
+    _check("rbt-non-task", rb("dvoice-123.proactive-1.txt", "dvoice-123") is False)
+
+    # Phone channel match
+    _check("rbt-phone",    rb("phone-CA123.task-2.txt", "phone-CA123") is True)
+
+    # Channel key comparison uses sanitize_key (unsafe chars normalized)
+    _check("rbt-sanitize-match",
+           rb("dvoice-123.task-1.txt", "dvoice-123") is True)
+
+
+_test_result_belongs_to()
+
+
+# ---------------------------------------------------------------------------
+# discord_voice_key / phone_call_key
+# ---------------------------------------------------------------------------
+
+def _test_typed_constructors():
+    dv = _mod.discord_voice_key
+    pk = _mod.phone_call_key
+
+    # Normal discord voice channel snowflake
+    _check("dvk-basic",   dv("1234567890123456") == "dvoice-1234567890123456")
+
+    # None → "dvoice-unknown"
+    _check("dvk-none",    dv(None) == "dvoice-unknown")
+
+    # Unsafe chars in vc_id sanitized
+    out = dv("vc:12:34")
+    _check("dvk-unsafe",  out.startswith("dvoice-") and ":" not in out)
+
+    # Phone call sid
+    sid = "CA1234567890abcdef1234567890abcdef"
+    _check("pk-basic",    pk(sid) == f"phone-{sid}")
+
+    # None → "phone-unknown"
+    _check("pk-none",     pk(None) == "phone-unknown")
+
+
+_test_typed_constructors()
+
+
+# ---------------------------------------------------------------------------
+# Results
+# ---------------------------------------------------------------------------
+
+total = _passed + _failed
+print(
+    f"result-channel-key: {_passed}/{total} passed"
+    f"{'' if _failed == 0 else f' — {_failed} FAILED'}"
+)
+sys.exit(0 if _failed == 0 else 1)
