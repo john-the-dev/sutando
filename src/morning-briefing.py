@@ -96,9 +96,11 @@ def get_calendar_events() -> list[dict]:
     filtering out subscribed shared calendars that clutter the briefing
     (closes #964). Case-insensitive match on calendar name.
     """
-    today = datetime.now().strftime("%Y-%m-%d")
-    script = f'''
-set theDate to date "{today}"
+    script = '''
+set theDate to (current date)
+set hours of theDate to 0
+set minutes of theDate to 0
+set seconds of theDate to 0
 set endDate to theDate + (24 * 60 * 60)
 set output to ""
 tell application "Calendar"
