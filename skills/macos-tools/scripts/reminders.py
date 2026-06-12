@@ -169,8 +169,8 @@ def main():
             print("No reminders.")
             return
         if reminders and "error" in reminders[0]:
-            print(f"Error: {reminders[0]['error']}")
-            return
+            print(f"Error: {reminders[0]['error']}", file=sys.stderr)
+            sys.exit(1)
         if due_today:
             reminders = [r for r in reminders if _is_due_today_or_overdue(r["due"])]
         if not reminders:
