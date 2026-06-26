@@ -14,9 +14,9 @@
 // Usage:  node build-hook-settings.mjs <abs-path-to-obs-hook.sh>
 // Prints the settings JSON to stdout (exit 2 on missing arg).
 //
-// The 10 event keys are all valid Claude Code hook events, verified against
-// https://code.claude.com/docs/en/hooks.md (incl. UserPromptExpansion and
-// MessageDisplay). Unknown keys would be silently ignored by the CLI.
+// The event keys below are all valid Claude Code hook events, verified against
+// https://code.claude.com/docs/en/hooks.md (incl. UserPromptExpansion).
+// MessageDisplay was removed from the valid event list; see issue #1755.
 
 const hookScript = process.argv[2];
 if (!hookScript) {
@@ -39,7 +39,6 @@ process.stdout.write(
 		hooks: {
 			UserPromptSubmit: life,
 			UserPromptExpansion: life,
-			MessageDisplay: life,
 			PreToolUse: tool,
 			PostToolUse: tool,
 			Stop: life,
