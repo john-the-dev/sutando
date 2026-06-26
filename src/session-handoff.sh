@@ -124,6 +124,25 @@ print(f'5h: {d[\"utilization_5h\"]:.0%} (resets in {m5}min at {r5.strftime(\"%I:
   # Stars
   echo "## Repo Stats"
   gh api repos/sonichi/sutando --jq '.stargazers_count, .forks_count' 2>/dev/null | tr '\n' ' ' | awk '{print $1 " stars, " $2 " forks"}' || echo "(couldn't fetch)"
+  echo ""
+
+  # Relay notes — narrative continuity from prior passes (written by /relay +
+  # proactive-loop step 7). Drain on read: move to processed/ so the next
+  # compaction doesn't re-include them. Fixes #1738: catchup-after-startup
+  # was their only consumer and was removed by PR #1737.
+  RELAY_DIR="$WORKSPACE_DIR/relay"
+  RELAY_PROCESSED="$RELAY_DIR/processed"
+  RELAY_FILES=$(ls -t "$RELAY_DIR"/relay-*.md 2>/dev/null)
+  if [ -n "$RELAY_FILES" ]; then
+    mkdir -p "$RELAY_PROCESSED"
+    echo "## Relay Notes (from prior session)"
+    for rf in $RELAY_FILES; do
+      echo "### $(basename "$rf")"
+      cat "$rf"
+      echo ""
+      mv "$rf" "$RELAY_PROCESSED/" 2>/dev/null || true
+    done
+  fi
 
 } > "$STATE_FILE" 2>/dev/null
 

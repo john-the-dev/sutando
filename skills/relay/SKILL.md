@@ -1,6 +1,6 @@
 ---
 name: relay
-description: "Write a handoff/continuity note for the NEXT Sutando session. Captures what was just in flight, what to check first, what might go wrong, and implicit context the structured snapshot doesn't carry. Read first by /catchup-after-startup."
+description: "Write a handoff/continuity note for the NEXT Sutando session. Captures what was just in flight, what to check first, what might go wrong, and implicit context the structured snapshot doesn't carry. Drained by session-handoff.sh into session-state.md on context compaction (fixes #1738)."
 user-invocable: true
 ---
 
@@ -29,7 +29,7 @@ workspace/relay/
 
 - **File naming:** `relay-{epoch}.md` — sortable + greppable, matches the `task-{epoch}.txt` shape.
 - **Multiple files allowed:** `/relay` always creates a NEW file by default. `--append` appends to the LATEST unprocessed `relay-*.md` instead of creating a new one.
-- **Consumption:** catchup-after-startup reads ALL unprocessed `relay-*.md` files in mtime order (oldest first), prints them as section 0 of its briefing, then `mv`s each one to `processed/` (mirroring the result-watcher drain pattern).
+- **Consumption:** `src/session-handoff.sh` reads ALL unprocessed `relay-*.md` files (newest first) and includes them as a "## Relay Notes" section in `session-state.md` on context compaction, then `mv`s each one to `processed/` (mirroring the result-watcher drain pattern). Previously consumed by `catchup-after-startup`, which was removed by PR #1737 (orphaned by #1738; fixed here).
 - **Cleanup:** kept indefinitely on local disk. Tiny files (~200-500 bytes each); a year of relay notes is < 1 MB. Sync via the workspace-sync engine (`scripts/sync-workspace.sh`) for fleet visibility — the legacy `sync-memory.sh` flow is deprecated in v0.3.0 and removed in v0.4.0.
 
 ## What to write
