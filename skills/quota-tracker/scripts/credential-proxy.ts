@@ -16,6 +16,7 @@ import { createServer, request as httpRequest, type RequestOptions } from 'node:
 import { request as httpsRequest } from 'node:https';
 import { execSync, execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
 import { statusPath } from '../../../src/workspace_default.js';
 
@@ -34,17 +35,41 @@ const UPSTREAM_IDLE_TIMEOUT_MS = Number(process.env.SUTANDO_PROXY_TIMEOUT_MS) ||
 // keep the skill-dir path as a last-resort fallback for one release.
 const QUOTA_FILE = statusPath('quota-state.json');
 
-// OAuth self-refresh. The proxy reads the DEFAULT `Claude Code-credentials`
-// keychain item, but nothing refreshes that item's accessToken on a headless
-// node (interactive `/login` refreshes it; a namespaced-CLAUDE_CONFIG_DIR core
-// refreshes its OWN `Claude Code-credentials-<hash>` item). So once `expiresAt`
+// OAuth self-refresh. The proxy reads the keychain item for the active
+// CLAUDE_CONFIG_DIR (see computeKeychainService()), but nothing refreshes that
+// item's accessToken on a headless node (interactive `/login` refreshes it; a
+// namespaced-CLAUDE_CONFIG_DIR core refreshes its OWN item). So once `expiresAt`
 // passes the proxy injects an EXPIRED token → upstream 401 ("401 after a while").
 // Fix: when the stored token is at/near expiry, use the stored refreshToken to
 // mint a fresh one and write it back — making every proxy-routed node self-heal.
 // Endpoint + client_id verified from the Claude Code binary (v2.1.170 strings).
 const TOKEN_ENDPOINT = 'https://platform.claude.com/v1/oauth/token';
 const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
-const KEYCHAIN_SERVICE = 'Claude Code-credentials';
+const DEFAULT_KEYCHAIN_SERVICE = 'Claude Code-credentials';
+
+// Claude Code namespaces the keychain item when CLAUDE_CONFIG_DIR differs from
+// the default ~/.claude: service = "Claude Code-credentials-<first 8 hex of
+// sha256(CLAUDE_CONFIG_DIR)>". Resolve primary + optional fallback so the proxy
+// reads the right token on migrated nodes without breaking un-migrated ones.
+// See issue #1740.
+function computeKeychainService(): string {
+	const configDir = process.env.CLAUDE_CONFIG_DIR;
+	if (!configDir) return DEFAULT_KEYCHAIN_SERVICE;
+	const expanded = configDir.replace(/^~(?=\/|$)/, process.env.HOME ?? '');
+	if (expanded === `${process.env.HOME ?? ''}/.claude`) return DEFAULT_KEYCHAIN_SERVICE;
+	const hash = createHash('sha256').update(expanded).digest('hex').slice(0, 8);
+	return `${DEFAULT_KEYCHAIN_SERVICE}-${hash}`;
+}
+
+const KEYCHAIN_SERVICE = computeKeychainService();
+// Fallback for transition: migrated nodes may still have the stale default item;
+// non-migrated nodes only have the default. Always try primary first.
+const KEYCHAIN_SERVICE_FALLBACK: string | null =
+	KEYCHAIN_SERVICE !== DEFAULT_KEYCHAIN_SERVICE ? DEFAULT_KEYCHAIN_SERVICE : null;
+
+// The service from which the last successful read came. Writes go to the same
+// service to ensure read-write symmetry during the migration window.
+let activeKeychainService = KEYCHAIN_SERVICE;
 // Refresh when the token expires within this window (ms). Tokens are ~8h-lived;
 // 5 min of slack avoids racing the expiry on a long-running upstream request.
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
@@ -59,18 +84,32 @@ interface ClaudeOAuth {
 function ts(): string { return new Date().toISOString().slice(11, 23); }
 
 // Read the full cred object from the keychain (not just the accessToken).
+// Tries KEYCHAIN_SERVICE first; falls back to DEFAULT_KEYCHAIN_SERVICE when
+// CLAUDE_CONFIG_DIR is non-default but the namespaced item doesn't exist yet
+// (transition window / node that hasn't re-logged-in after migration).
 function readCred(): ClaudeOAuth | null {
-	try {
-		const raw = execSync(`security find-generic-password -s "${KEYCHAIN_SERVICE}" -w`, {
-			encoding: 'utf-8',
-			timeout: 5000,
-		}).trim();
-		const parsed = JSON.parse(raw);
-		const oauth = parsed?.claudeAiOauth;
-		return oauth && typeof oauth.accessToken === 'string' ? (oauth as ClaudeOAuth) : null;
-	} catch {
-		return null;
+	const candidates = [KEYCHAIN_SERVICE, KEYCHAIN_SERVICE_FALLBACK].filter(Boolean) as string[];
+	for (const svc of candidates) {
+		try {
+			const raw = execSync(`security find-generic-password -s "${svc}" -w`, {
+				encoding: 'utf-8',
+				timeout: 5000,
+			}).trim();
+			const parsed = JSON.parse(raw);
+			const oauth = parsed?.claudeAiOauth;
+			if (oauth && typeof oauth.accessToken === 'string') {
+				if (svc !== KEYCHAIN_SERVICE) {
+					console.warn(
+						`${ts()} [Proxy] WARN: using fallback keychain service "${svc}"; ` +
+						`re-login with CLAUDE_CONFIG_DIR=${process.env.CLAUDE_CONFIG_DIR} to fix`,
+					);
+				}
+				activeKeychainService = svc;
+				return oauth as ClaudeOAuth;
+			}
+		} catch { /* not found in this service — try next */ }
 	}
+	return null;
 }
 
 // Atomically write the cred back to the keychain. Returns true ONLY after a
@@ -79,7 +118,7 @@ function readCred(): ClaudeOAuth | null {
 // persisted, else the node can never refresh again.
 function keychainAccount(): string | null {
 	try {
-		const meta = execFileSync('security', ['find-generic-password', '-s', KEYCHAIN_SERVICE], {
+		const meta = execFileSync('security', ['find-generic-password', '-s', activeKeychainService], {
 			encoding: 'utf-8', timeout: 5000,
 		});
 		const m = meta.match(/"acct"<blob>="([^"]*)"/);
@@ -100,7 +139,7 @@ function writeCred(oauth: ClaudeOAuth): boolean {
 		// single-user Mac, same as the rest of the vault path.)
 		execFileSync('security', [
 			'add-generic-password', '-U',
-			'-s', KEYCHAIN_SERVICE, '-a', acct, '-w', payload,
+			'-s', activeKeychainService, '-a', acct, '-w', payload,
 		], { timeout: 5000 });
 		const back = readCred();
 		return back?.accessToken === oauth.accessToken; // rotation-lockout read-back guard
@@ -255,7 +294,7 @@ if (isMain) {
 		console.error('No OAuth token found in macOS keychain. Is Claude Code logged in?');
 		process.exit(1);
 	}
-	console.log(`${ts()} [Proxy] OAuth token loaded from keychain (will re-read on each request)`);
+	console.log(`${ts()} [Proxy] OAuth token loaded from keychain service "${activeKeychainService}" (will re-read on each request)`);
 }
 
 const upstreamUrl = new URL(UPSTREAM);
