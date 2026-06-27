@@ -202,11 +202,15 @@ def case_i_token_read_prefers_channel_env() -> list[str]:
     import os
     fails = []
     saved_home = os.environ.get("HOME")
+    saved_ccd = os.environ.get("CLAUDE_CONFIG_DIR")
     saved_repo = hc.REPO_DIR
     saved_env_token = os.environ.pop("SLACK_BOT_TOKEN", None)  # force the file path
     try:
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as repo:
             os.environ["HOME"] = home
+            # claude_home_path reads CLAUDE_CONFIG_DIR first (post-M0/#1454); override
+            # it so the test's temp home is consulted, not the real install's config dir.
+            os.environ["CLAUDE_CONFIG_DIR"] = str(Path(home) / ".claude")
             hc.REPO_DIR = Path(repo)
             chan = Path(home) / ".claude" / "channels" / "slack"
             chan.mkdir(parents=True, exist_ok=True)
