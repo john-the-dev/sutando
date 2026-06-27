@@ -181,11 +181,13 @@ def voice_connected() -> bool:
         return False
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
 def _load_token() -> str:
     """Read DISCORD_BOT_TOKEN from the first env file that has it."""
     for env_path in [
         claude_home_path("channels", "discord", ".env"),
-        REPO / ".env",
+        _REPO_ROOT / ".env",
     ]:
         if not env_path.exists():
             continue
