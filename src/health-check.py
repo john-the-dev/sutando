@@ -37,7 +37,7 @@ except ImportError:  # non-POSIX (e.g. Windows) — the lock degrades to a no-op
 
 REPO_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
-from util_paths import claude_home_path, shared_personal_path  # noqa: E402
+from util_paths import claude_home_path, personal_path, shared_personal_path  # noqa: E402
 from workspace_default import resolve_workspace, status_read_path  # noqa: E402
 
 # Workspace = runtime-state root (tasks/, results/, state/). REPO_DIR stays the
@@ -1098,6 +1098,12 @@ def run_all_checks() -> list[dict]:
     # removed from the repo in #793's workspace migration. Post-v0.8
     # (#1440) the workspace defaults to <repo>/workspace/.
     checks.append(check_directory(Path(shared_personal_path("notes", WORKSPACE_DIR)), "notes-dir"))
+
+    # Stand identity — if missing the bot falls back to the generic "Sutando" name.
+    # Hosts that ran the v0.8 migration before #1540 may have this misclassified.
+    si_path = personal_path("stand-identity.json", WORKSPACE_DIR)
+    if not si_path.exists():
+        checks.append({"name": "stand-identity", "status": "warn", "detail": "stand-identity.json not found — bot name defaults to 'Sutando'. If you ran v0.8 migrate before #1540, see startup self-heal in #1542."})
 
     # Notes split-brain: both <repo>/notes/ and <workspace>/notes/ with overlapping files (#1266)
     _notes_sb = check_notes_split_brain()
