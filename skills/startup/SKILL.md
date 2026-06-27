@@ -42,6 +42,28 @@ If the skill is not installed, skip silently. `/startup` works without it — ev
 
 Note: this step runs BEFORE step 2 so that the watcher (started by step 2's downstream) doesn't pick up an orphan task before recovery has classified it.
 
+### Step 1.5 — Relay drain (optional)
+
+Drain any pending relay notes left by the prior session so the current session starts with full narrative continuity.
+
+```bash
+WORKSPACE="$(bash scripts/sutando-config.sh workspace)"
+relay_dir="$WORKSPACE/relay"
+processed_dir="$relay_dir/processed"
+```
+
+1. Skip silently if `$relay_dir/relay-*.md` has no matches — no notes to drain.
+2. `mkdir -p "$processed_dir"` (idempotent).
+3. For each file matching `$relay_dir/relay-*.md` in mtime order (oldest first):
+   - Print a header: `📡 Relay note from prior session (<filename>):`
+   - Print the file contents.
+   - `mv` the file to `$processed_dir/` (claim-by-mv mirrors the task/result drain pattern).
+4. Emit a one-line summary: `relay-drain: consumed N note(s) → processed/`.
+
+**Idempotency**: after the drain, `relay-*.md` is empty — re-running is a no-op.
+
+**Why here**: `/catchup-after-startup` (the prior consumer) was removed in PR #1737. The relay write-side (`/relay` skill + `/proactive-loop` step 7) was left intact — see issue #1738. Folding the drain into `/startup` restores the read→archive loop at the earliest point in the session where context is needed, without resurrecting the full catchup machinery. (Closes #1738, option 2.)
+
 ### Step 2 — Register schedules + start watcher
 
 Invoke `/schedule-crons`. This handles:
@@ -68,12 +90,14 @@ session start
     ▼
 /startup
     │
-    ├─► step 1:  /task-orphan-check (optional) ──► classifies + archives orphan tasks
+    ├─► step 1:   /task-orphan-check (optional) ──► classifies + archives orphan tasks
     │
-    ├─► step 2:  /schedule-crons ──┬─► step 1-3 (register crons.json entries)
-    │                               ├─► step 4 (proactive-loop fallback if missing)
-    │                               ├─► step 5 (start watch-tasks-stream.sh via Monitor)
-    │                               └─► step 6 (confirm what was scheduled)
+    ├─► step 1.5: relay drain ──────────────────► prints + mv's relay-*.md → processed/
+    │
+    ├─► step 2:   /schedule-crons ──┬─► step 1-3 (register crons.json entries)
+    │                                ├─► step 4 (proactive-loop fallback if missing)
+    │                                ├─► step 5 (start watch-tasks-stream.sh via Monitor)
+    │                                └─► step 6 (confirm what was scheduled)
     │
     └─► step 3: emit summary
 ```
@@ -95,3 +119,4 @@ If you find yourself wanting to put logic IN `/startup`, ask whether it belongs 
 
 - v0.1.0 — 2026-05-23 — initial draft. Per Chi 2026-05-23 Discord exchange about #1049 redesign ("make a new skill and include everything we need at start"). `/startup` becomes the canonical CLI entry; `/schedule-crons` remains callable for manual cron re-registration. Migration: launchd plists + CLI scripts switch to `/startup`.
 - v0.2.0 — 2026-06-21 — removed the fresh-session briefing step and its session sentinel (that sub-skill was deleted). `/startup` now runs orphan-check → schedules + watcher → confirm; sub-skill idempotency replaces the former sentinel guard.
+- v0.3.0 — 2026-06-27 — added step 1.5 relay drain (closes #1738). `/catchup-after-startup` (removed in #1737) was the sole consumer of `workspace/relay/relay-*.md`; folding the drain into `/startup` restores read→archive continuity at session start without the full catchup machinery.
