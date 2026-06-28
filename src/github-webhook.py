@@ -17,6 +17,8 @@ Usage:
   python3 src/github-webhook.py --port 7846  # custom port
 """
 
+from __future__ import annotations
+
 import hashlib
 import hmac
 import json
