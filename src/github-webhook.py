@@ -21,17 +21,28 @@ import hashlib
 import hmac
 import json
 import os
+import subprocess
 import sys
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 # Two separate concerns (per qingyun review on PR #775):
-# - REPO  = source tree (this file's parent.parent) — for loading .env from
-#           the checkout root. Stays anchored regardless of SUTANDO_WORKSPACE.
+# - REPO  = source tree (resolved via git) — for loading .env from the
+#           checkout root. Stays anchored regardless of SUTANDO_WORKSPACE.
 # - WORKSPACE_DIR = runtime state (resolve_workspace()) — for tasks/ writes so
 #           the workspace-aware watcher picks them up.
-REPO = Path(__file__).resolve().parent.parent
+def _repo_root() -> Path | None:
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
+    except Exception:
+        return None
+
+REPO = _repo_root()
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workspace_default import resolve_workspace  # noqa: E402
 
@@ -44,7 +55,8 @@ PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 
 # file. The .env lives in the checkout, not the runtime workspace.
 try:
     from dotenv import load_dotenv
-    load_dotenv(REPO / ".env")
+    if REPO is not None:
+        load_dotenv(REPO / ".env")
 except ImportError:
     print("⚠️ python-dotenv not installed — relying on shell env for GITHUB_WEBHOOK_SECRET")
 
