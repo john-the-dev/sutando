@@ -34,13 +34,17 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+_r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5)
+if _r.returncode != 0:
+    raise RuntimeError("must be run from inside the sutando git repository")
+REPO = Path(_r.stdout.strip())
 README = REPO / "README.md"
 PLAYLIST_ID = os.environ.get(
     "PLAYLIST_ID", "PLoEaHbP1bU5FDWAyeLDL9J9i7Iblp3_m_"

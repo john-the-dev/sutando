@@ -22,7 +22,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+_r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5)
+if _r.returncode != 0:
+    raise RuntimeError("must be run from inside the sutando git repository")
+ROOT = Path(_r.stdout.strip())
 sys.path.insert(0, str(ROOT / "src"))
 from workspace_default import resolve_workspace  # noqa: E402
 
