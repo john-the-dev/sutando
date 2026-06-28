@@ -5,18 +5,32 @@
 # Reads the transcript, extracts key signals, and writes to session-state.md.
 # The incoming session reads this in CLAUDE.md or as part of the proactive loop.
 
-# REPO resolves to: (1) $SUTANDO_REPO_DIR if set, (2) auto-detect from the
-# script's parent dir using a sutando-checkout signature, (3) ~/Desktop/sutando
-# as last-resort default. SUTANDO_WORKSPACE intentionally NOT in the fallback
-# (CLAUDE.md reserves it for the per-user workspace dir; using it as a REPO
-# alias would silently pick the wrong path).
-__SCRIPT_PARENT="$(cd "$(dirname "$0")/.." && pwd 2>/dev/null || echo "")"
-if [ -n "${SUTANDO_REPO_DIR:-}" ]; then
+# REPO resolves to: (1) $SUTANDO_REPO_DIR if set AND valid, (2) auto-detect
+# from the script's own resolved location (symlink-safe), (3) common layout
+# probes, (4) ~/Desktop/sutando as last-resort default. SUTANDO_WORKSPACE
+# intentionally NOT in the fallback (CLAUDE.md reserves it for the workspace
+# dir; using it as a REPO alias would silently pick the wrong path).
+#
+# A set-but-stale SUTANDO_REPO_DIR is a real failure mode: long-lived parents
+# (tmux, launchd, Sutando.app) cache the env across a repo move, so a fresh
+# session after relocating the checkout gets empty REPO-rooted output (commits,
+# health, session-state). Validate before trusting. (-e not -d for .git:
+# submodule/worktree checkouts have a file, not a directory, at .git.)
+_repo_ok() { [ -f "$1/CLAUDE.md" ] && [ -d "$1/skills" ] && [ -e "$1/.git" ]; }
+__SCRIPT_PARENT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P || echo "")"
+if [ -n "${SUTANDO_REPO_DIR:-}" ] && _repo_ok "$SUTANDO_REPO_DIR"; then
     REPO="$SUTANDO_REPO_DIR"
-elif [ -n "$__SCRIPT_PARENT" ] && [ -f "$__SCRIPT_PARENT/CLAUDE.md" ] && [ -d "$__SCRIPT_PARENT/skills" ] && [ -d "$__SCRIPT_PARENT/.git" ]; then
-    REPO="$__SCRIPT_PARENT"
 else
-    REPO="$HOME/Desktop/sutando"
+    if [ -n "${SUTANDO_REPO_DIR:-}" ]; then
+        echo "⚠ SUTANDO_REPO_DIR=\`$SUTANDO_REPO_DIR\` is not a valid Sutando checkout (stale after a repo move?) — probing instead." >&2
+    fi
+    REPO=""
+    for _cand in "$__SCRIPT_PARENT" "$HOME/Desktop/sutando" "$HOME/Documents/sutando/sutando" "$HOME/Documents/sutando" "$HOME/sutando" "$(pwd)"; do
+        if [ -n "$_cand" ] && _repo_ok "$_cand"; then
+            REPO="$_cand"; break
+        fi
+    done
+    REPO="${REPO:-${SUTANDO_REPO_DIR:-$HOME/Desktop/sutando}}"
 fi
 export PATH="/opt/homebrew/bin:$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"
 STATE_FILE="$REPO/session-state.md"
