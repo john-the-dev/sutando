@@ -181,7 +181,7 @@ def voice_connected() -> bool:
         return False
 
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).resolve().parent.parent  # repo root — where repo-root .env lives; deliberately NOT resolve_workspace()
 
 def _load_token() -> str:
     """Read DISCORD_BOT_TOKEN from the first env file that has it."""
