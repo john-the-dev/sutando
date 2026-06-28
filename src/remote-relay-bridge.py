@@ -52,9 +52,7 @@ import urllib.request
 from pathlib import Path
 
 # resolve_workspace lives alongside this file in src/.
-# Coupled-skill import: this skill ships in the main repo, so use the
-# canonical src/ helper rather than a vendored copy (avoids silent drift).
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workspace_default import resolve_workspace  # noqa: E402
 
 WS = resolve_workspace()
