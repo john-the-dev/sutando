@@ -7,11 +7,15 @@
 # the loader and tries to discover the workspace by:
 #
 #   • reading $SUTANDO_WORKSPACE directly  (process.env.SUTANDO_WORKSPACE,
-#     os.environ["SUTANDO_WORKSPACE"], os.getenv("SUTANDO_WORKSPACE"))
+#     process.env['SUTANDO_WORKSPACE'], os.environ["SUTANDO_WORKSPACE"],
+#     os.getenv("SUTANDO_WORKSPACE"))
 #   • hardcoding the legacy default path  (~/.sutando/workspace/)
 #   • using the historic anti-pattern of walking up from __file__  (the
 #     `Path(__file__).resolve().parent.parent` pattern that broke when
 #     services launched from an app bundle's symlinked src/)
+#
+# Scanned file types: .py .ts .tsx .sh .bash .js .mjs .md
+#   (added .js/.mjs in PR #1824 — overlay-apps bug was invisible without it)
 #
 # Allowed files (the loader + thin compat wrappers):
 #   src/sutando_config.py
@@ -39,6 +43,8 @@ mode="${1:-all}"  # all | --diff
 
 # Patterns that signal direct workspace resolution.
 # Each pattern is a single ERE alternation we feed grep -E.
+# Note: PATTERN_ENV covers both JS (process.env.SUTANDO_WORKSPACE,
+# process.env['SUTANDO_WORKSPACE']) and Python/shell equivalents.
 PATTERN_ENV='(process\.env|process\.env\[)["'\'']?SUTANDO_WORKSPACE|os\.environ(\.get)?\(["'\'']SUTANDO_WORKSPACE|os\.getenv\(["'\'']SUTANDO_WORKSPACE'
 PATTERN_HARDCODED_HOME='\.sutando/workspace'
 PATTERN_REPO_WALK='Path\(__file__\)\.resolve\(\)\.parent\.parent'
@@ -61,7 +67,13 @@ PATTERN_DOC_ENV_PATH='\$SUTANDO_WORKSPACE/'
 # branch when the wrapper script isn't reachable (e.g. non-checkout
 # installs). The fallback path is documented in each script's comments;
 # new contributors should still go through the wrapper.
-ALLOWED='^(src/sutando_config\.(py|ts)|src/workspace_default\.(py|ts)|src/util_paths\.py|src/startup\.sh|src/migration_safety_helpers\.sh|scripts/lint-workspace-resolution\.sh|scripts/install-git-hooks\.sh|scripts/sutando-config\.sh|scripts/sync-memory\.sh|scripts/sutando-migrate\.sh|scripts/sweep-stranded-claims\.sh|tests/[^/]+\.(test\.)?(py|ts|sh))$'
+#
+# skills/overlay-apps/app/*.js — Electron app that runs from a workspace
+# copy (not the repo root) so it cannot call sutando-config.sh. It reads
+# SUTANDO_RESOLVED_WORKSPACE (set by launch.sh) as the primary path and
+# keeps $SUTANDO_WORKSPACE + ~/.sutando/workspace as documented fallbacks.
+# See PR #1823.
+ALLOWED='^(src/sutando_config\.(py|ts)|src/workspace_default\.(py|ts)|src/util_paths\.py|src/startup\.sh|src/migration_safety_helpers\.sh|scripts/lint-workspace-resolution\.sh|scripts/install-git-hooks\.sh|scripts/sutando-config\.sh|scripts/sync-memory\.sh|scripts/sutando-migrate\.sh|scripts/sweep-stranded-claims\.sh|tests/[^/]+\.(test\.)?(py|ts|sh|js)|skills/overlay-apps/app/(control-server|main)\.js)$'
 
 # Allowed .md files — legitimate uses of `$SUTANDO_WORKSPACE/path` in
 # prose, e.g. the workspace contract docs that DESCRIBE the legacy form
@@ -76,8 +88,8 @@ if [[ "$mode" == "--diff" ]]; then
   # Added or modified files vs base.
   files="$(git diff --name-only --diff-filter=AM "$base"...HEAD)"
 else
-  # All tracked files of relevant types — code (.py/.ts/.tsx/.sh/.bash) + docs (.md).
-  files="$(git ls-files -- '*.py' '*.ts' '*.tsx' '*.sh' '*.bash' '*.md')"
+  # All tracked files of relevant types — code (.py/.ts/.tsx/.sh/.bash/.js/.mjs) + docs (.md).
+  files="$(git ls-files -- '*.py' '*.ts' '*.tsx' '*.sh' '*.bash' '*.js' '*.mjs' '*.md')"
 fi
 
 if [[ -z "$files" ]]; then
@@ -111,8 +123,8 @@ for f in $files; do
     continue
   fi
 
-  # Code branch (the original lint).
-  [[ "$f" =~ \.(py|ts|tsx|sh|bash)$ ]] || continue
+  # Code branch (the original lint + JS/MJS).
+  [[ "$f" =~ \.(py|ts|tsx|sh|bash|js|mjs)$ ]] || continue
   if grep -E -q "$ALLOWED" <<< "$f"; then continue; fi
 
   if [[ "$mode" == "--diff" ]]; then
