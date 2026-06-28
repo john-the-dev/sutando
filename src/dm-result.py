@@ -34,7 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from util_paths import claude_home_path  # noqa: E402
-from workspace_default import resolve_workspace  # noqa: E402
+from workspace_default import resolve_workspace, resolve_repo_root  # noqa: E402
 import discord_config  # noqa: E402  — workspace-local Sutando discord config (#1147)
 REPO = resolve_workspace()
 ACCESS_JSON = claude_home_path("channels", "discord", "access.json")
@@ -181,7 +181,7 @@ def voice_connected() -> bool:
         return False
 
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent  # repo root — where repo-root .env lives; deliberately NOT resolve_workspace()
+_REPO_ROOT = resolve_repo_root()  # repo root — where repo-root .env lives; deliberately NOT resolve_workspace()
 
 def _load_token() -> str:
     """Read DISCORD_BOT_TOKEN from the first env file that has it."""
