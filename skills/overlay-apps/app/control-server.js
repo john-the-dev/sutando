@@ -16,10 +16,14 @@ const DEFAULT_PORT = 7849;
 const PORT_RANGE = 20;
 
 function resolveWorkspace() {
-  const env = process.env.SUTANDO_WORKSPACE;
-  if (env) {
-    return path.resolve(env.replace(/^~(?=$|\/)/, os.homedir()));
-  }
+  // launch.sh exports SUTANDO_RESOLVED_WORKSPACE (M0 canonical, from
+  // sutando-config.sh). Check it first; $SUTANDO_WORKSPACE is no longer
+  // honored since v0.8/#1440 but kept as a one-step fallback for non-launch.sh
+  // invocations. Last resort: pre-M0 home-dir default.
+  const resolved = process.env.SUTANDO_RESOLVED_WORKSPACE;
+  if (resolved) return resolved;
+  const legacy = process.env.SUTANDO_WORKSPACE;
+  if (legacy) return path.resolve(legacy.replace(/^~(?=$|\/)/, os.homedir()));
   return path.join(os.homedir(), '.sutando', 'workspace');
 }
 
