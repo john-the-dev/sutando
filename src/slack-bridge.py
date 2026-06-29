@@ -523,10 +523,27 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
     _claude_config = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
     _notify_py = _claude_config / "skills/task-progress/scripts/notify.py"
     _transcribe_py = _claude_config / "skills/audio-transcribe/scripts/transcribe.py"
+    # CONTEXT-FIRST is a correctness feature (reconstruct before interpreting) and
+    # must NOT be gated on unrelated skills (task-progress / audio-transcribe) being
+    # installed — emit for every owner task. notify/transcribe steps stay conditional
+    # within. (Mirrors discord-bridge PR #1782 + telegram-bridge.)
     skill_hints = ""
-    if access_tier == "owner" and (_notify_py.exists() or _transcribe_py.exists()):
+    if access_tier == "owner":
         hints_lines = ["===SKILL INSTRUCTIONS (follow before any other action)==="]
         step = 1
+        # Context-first: a terse or threaded reply ("no", "continue", a pronoun)
+        # loses its referent after compaction. Reconstruct from session transcript
+        # and embedded thread context (Slack has no channel-history fetch in the
+        # bridge — model after telegram-bridge).
+        hints_lines.append(
+            f'{step}. CONTEXT-FIRST: if this message is not self-contained '
+            f'(terse — "y", "no", a pronoun — a reply, or refers to something not '
+            f'stated here), reconstruct context BEFORE interpreting. Slack has no '
+            f'channel-history fetch in this bridge, so use the embedded thread/reply '
+            f'context above (if present) plus the session transcript, and answer from '
+            f'that, not from memory.'
+        )
+        step += 1
         if _notify_py.exists():
             notify_cmd = (
                 f"python3 {_notify_py}"
