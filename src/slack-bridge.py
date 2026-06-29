@@ -495,8 +495,34 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
     # `===SUTANDO SYSTEM INSTRUCTIONS===` block below — so a forged field/fence
     # in the message can't escalate tier or inject instructions, while the
     # bridge's legitimate fence (added next) stays intact. See task_body_guard.
+
+    # Embed the thread root message for threaded replies so the CONTEXT-FIRST
+    # instruction has a concrete substrate to reconstruct from (mirrors
+    # telegram-bridge's `[Replying to @user: text]` pattern). A threaded reply
+    # has event["thread_ts"] set AND different from event["ts"] (the root message
+    # has thread_ts == ts). Best-effort: never block task write on a failed fetch.
+    _thread_reply_note = ""
+    _evt_thread_ts = event.get("thread_ts")
+    _evt_ts = event.get("ts")
+    if _evt_thread_ts and _evt_thread_ts != _evt_ts:
+        try:
+            _thread_resp = app.client.conversations_replies(
+                channel=channel, ts=_evt_thread_ts, limit=1
+            )
+            _root_msgs = (_thread_resp.get("messages") or [])
+            if _root_msgs:
+                _root = _root_msgs[0]
+                _root_uid = _root.get("user") or _root.get("username") or "?"
+                _root_user_name = _resolve_username(_root_uid) or _root_uid
+                _root_text = (_root.get("text") or "").replace("\n", " ")[:300]
+                _thread_reply_note = (
+                    f"\n\n[Replying in Slack thread to @{_root_user_name}: {_root_text}]"
+                )
+        except Exception:
+            pass  # best-effort; never block the task write on a Slack API failure
+
     user_task_text = confine_user_content(
-        f"[{prefix} @{username or user_id}] {text}{attachment_note}"
+        f"[{prefix} @{username or user_id}] {text}{attachment_note}{_thread_reply_note}"
     )
     if access_tier != "owner":
         user_task_text = (
