@@ -35,11 +35,15 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
 import sys
 from fnmatch import fnmatch
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(subprocess.run(
+    ["git", "rev-parse", "--show-toplevel"],
+    capture_output=True, text=True, check=True
+).stdout.strip())
 MIGRATE_SH = REPO / "scripts" / "sutando-migrate.sh"
 
 
