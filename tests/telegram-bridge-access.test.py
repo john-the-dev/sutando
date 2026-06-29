@@ -47,6 +47,7 @@ sys.modules["task_priority"] = _tp
 # Stub workspace_default
 _wd = types.ModuleType("workspace_default")
 _wd.resolve_workspace = lambda: REPO
+_wd.resolve_repo_root = lambda: REPO
 sys.modules["workspace_default"] = _wd
 
 # Stub vision_push
