@@ -64,9 +64,14 @@ check(
     "===SKILL INSTRUCTIONS" in slack_src,
 )
 check(
+    "slack: CONTEXT-FIRST step injected for owner tasks",
+    "CONTEXT-FIRST" in slack_src,
+)
+check(
     "slack: non-owner tasks do not get skill hints",
-    # guard: access_tier == "owner" AND skill exists
-    re.search(r'access_tier == .owner. and \(', slack_src) is not None,
+    # guard: access_tier == "owner" (ungated from optional-skill presence — mirrors
+    # discord-bridge PR #1782 + telegram-bridge; CONTEXT-FIRST fires for all owner tasks)
+    re.search(r'if access_tier == .owner.:', slack_src) is not None,
 )
 
 # ---------------------------------------------------------------------------
