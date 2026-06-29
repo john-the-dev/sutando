@@ -1,0 +1,9 @@
+# Python runtime + test dependencies
+#
+# Install before running Python tests or using the vault feature:
+#   pip install -r requirements.txt
+#
+# Required for src/secret_scanner.py and src/vault_intercept.py (vault set
+# with unquoted values uses detect-secrets to distinguish real secrets from
+# prose matches before writing to macOS Keychain).
+detect-secrets>=1.4.0

@@ -16,6 +16,7 @@ Pick something from the "What's inside" table in [README.md](README.md), try it,
 git clone https://github.com/sonichi/sutando.git
 cd sutando
 npm install
+pip install -r requirements.txt  # detect-secrets: required for vault + Python tests
 cp .env.example .env  # add your GEMINI_API_KEY
 bash src/startup.sh
 ```
