@@ -33,7 +33,6 @@ const ADVERSARIAL = [
 const EXPECTED_EVENTS = [
 	'UserPromptSubmit',
 	'UserPromptExpansion',
-	'MessageDisplay',
 	'PreToolUse',
 	'PostToolUse',
 	'Stop',
