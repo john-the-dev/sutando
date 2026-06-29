@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -18,7 +19,22 @@ ROOT = Path(__file__).resolve().parent.parent
 SWIFT_CONFIG = ROOT / "src" / "Sutando" / "SutandoConfig.swift"
 
 
-@unittest.skipUnless(shutil.which("swiftc"), "swiftc not available")
+def _swift_version() -> tuple[int, int]:
+    """Return (major, minor) of the installed swiftc, or (0, 0) on failure."""
+    try:
+        out = subprocess.check_output(
+            ["swiftc", "--version"], text=True, stderr=subprocess.STDOUT
+        )
+        m = re.search(r"Swift version (\d+)\.(\d+)", out)
+        return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+    except Exception:
+        return (0, 0)
+
+
+_SWIFT_OK = shutil.which("swiftc") is not None and _swift_version() >= (5, 10)
+
+
+@unittest.skipUnless(_SWIFT_OK, "swiftc not available or Swift < 5.10 (nonisolated(unsafe) requires 5.10+)")
 class TestSutandoConfigSwift(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="sutando-swift-config-"))
