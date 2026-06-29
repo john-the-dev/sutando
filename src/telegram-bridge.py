@@ -44,7 +44,7 @@ from result_markers import parse_markers  # noqa: E402
 from task_body_guard import confine_user_content  # noqa: E402
 from util_paths import channel_access_path, claude_home_path  # noqa: E402
 
-from workspace_default import resolve_workspace  # noqa: E402
+from workspace_default import resolve_workspace, resolve_repo_root  # noqa: E402
 from task_archive import find_task_file  # noqa: E402
 from single_instance import acquire as _single_instance_acquire  # noqa: E402
 import progress_stream  # noqa: E402  (opt-in owner progress streaming, SUTANDO_PROGRESS_STREAM=1)
@@ -90,7 +90,7 @@ def _is_path_sendable(fpath: str) -> bool:
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(REPO / ".env")
+    load_dotenv(resolve_repo_root() / ".env")
 except ImportError:
     pass  # python-dotenv not installed — token loaded from channels config below
 

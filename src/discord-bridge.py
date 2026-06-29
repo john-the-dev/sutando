@@ -54,7 +54,7 @@ except ModuleNotFoundError:
     raise
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workspace_default import resolve_workspace  # noqa: E402
+from workspace_default import resolve_workspace, resolve_repo_root  # noqa: E402
 from single_instance import acquire as _single_instance_acquire  # noqa: E402
 import discord_config  # noqa: E402  — Sutando workspace-local discord config (#1147)
 from util_paths import channel_access_path, claude_home_path, personal_path, shared_personal_path  # noqa: E402
@@ -579,7 +579,7 @@ def presenter_mode_active():
 TEAM_TIER_OWNER = ""
 LOCAL_MACHINE = ""
 try:
-    env_file = REPO / ".env"
+    env_file = resolve_repo_root() / ".env"
     if env_file.exists():
         for line in env_file.read_text().splitlines():
             if line.startswith("SUTANDO_TEAM_TIER_OWNER="):

@@ -71,6 +71,17 @@ def _legacy_repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def resolve_repo_root() -> Path:
+    """Return the sutando repo root (the directory that contains `src/`).
+
+    Use this instead of bare `Path(__file__).resolve().parent.parent` in
+    `src/` scripts that need the repo root (e.g. to read `<repo>/.env`).
+    Centralised here so the lint-workspace-resolution CI check has a single
+    allowed location for the pattern.
+    """
+    return _legacy_repo_root()
+
+
 def _migrate_from_legacy(target: Path) -> bool:
     """Move runtime-state dirs from the legacy repo-root fallback into `target`
     on first run after the workspace-default change.
