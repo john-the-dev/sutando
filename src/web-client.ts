@@ -928,7 +928,7 @@ function showChromeSttInterim(text) {
     $('transcript').appendChild(currentUserEl);
   }
   currentUserEl.textContent = text;
-  $('transcript').scrollTop = $('transcript').scrollHeight;
+  scrollTranscript();
 }
 
 function startChromeStt() {
@@ -944,6 +944,22 @@ function stopChromeStt() {
 let currentUserEl = null;
 let currentAssistantEl = null;
 let serverUserTextReceived = false;  // blocks Chrome STT overwrites after server sends
+
+// Stick-to-bottom autoscroll: follow new content only while the user is at the
+// bottom. A manual scroll-up to read history must not be yanked back down by
+// streaming updates. force=true (the user's own typed message) always jumps.
+let transcriptPinned = true;
+let transcriptScrollHooked = false;
+function scrollTranscript(force) {
+  const t = $('transcript');
+  if (!transcriptScrollHooked) {
+    transcriptScrollHooked = true;
+    t.addEventListener('scroll', () => {
+      transcriptPinned = t.scrollHeight - t.scrollTop - t.clientHeight < 40;
+    });
+  }
+  if (force || transcriptPinned) t.scrollTop = t.scrollHeight;
+}
 
 function addCopyBtn(el) {
   const btn = document.createElement('span');
@@ -989,7 +1005,7 @@ function handleTranscript(role, text, partial) {
     currentAssistantEl.textContent = text;
     if (!partial) { addCopyBtn(currentAssistantEl); currentAssistantEl = null; }
   }
-  $('transcript').scrollTop = $('transcript').scrollHeight;
+  scrollTranscript();
 }
 
 function addSystem(text, isHtml) {
@@ -998,7 +1014,7 @@ function addSystem(text, isHtml) {
   if (isHtml) { el.innerHTML = text; } else { el.textContent = text; }
   addCopyBtn(el);
   $('transcript').appendChild(el);
-  $('transcript').scrollTop = $('transcript').scrollHeight;
+  scrollTranscript();
 }
 
 // ─── Debug log ────────────────────────────────────────────
@@ -1276,9 +1292,11 @@ function renderTasks() {
       actionsHtml = '<div class="task-actions" data-replyfor="' + id + '">' + inner + '</div>';
     }
     const rawText = t.text || id;
-    // Default-tag bare tasks (no [Channel] prefix) as [Voice] — the
-    // overwhelming majority of un-prefixed tasks come from the voice agent.
-    const taggedRaw = /^\\[/.test(rawText) ? rawText : '[Voice] ' + rawText;
+    // Tag un-prefixed tasks by their source field: voice -> [Voice],
+    // anything else (cron/system reminders, etc.) -> [System]. Replaces the
+    // old "every bare task is [Voice]" default that mislabeled non-voice
+    // items (#bugs 2026-06-25).
+    const taggedRaw = /^\\[/.test(rawText) ? rawText : ((t.source === 'voice' ? '[Voice] ' : '[System] ') + rawText);
     // Prepend the 1-based index INTO the display text so it always renders
     // — earlier attempt with a separate <span class="task-num"> got
     // zero-width even with min-width set (flex layout/min-content issue).
@@ -1345,7 +1363,7 @@ function startTaskPolling() {
         if (t.status === 'done' && existing.status !== 'done' && !expandedTasks.has(t.id) && !userCollapsed) {
           expandedTasks.add(t.id);
         }
-        taskMap[t.id] = { status: t.status, text: t.text, time: new Date(t.time * 1000), result: t.result || existing.result || '' };
+        taskMap[t.id] = { status: t.status, text: t.text, time: new Date(t.time * 1000), result: t.result || existing.result || '', source: t.source || existing.source || '' };
       }
       // Remove tasks no longer in API (stale)
       for (const id of Object.keys(taskMap)) {
@@ -1772,7 +1790,7 @@ function connectWs() {
             dlLink.textContent = 'Download image';
             imgEl.appendChild(dlLink);
             $('transcript').appendChild(imgEl);
-            $('transcript').scrollTop = $('transcript').scrollHeight;
+            scrollTranscript();
             dbg('Image received via gui.update: ' + (guiData.description || '').slice(0, 50), 'event');
           } else if (guiData?.type === 'video' && guiData.base64) {
             const vidEl = document.createElement('div');
@@ -1803,7 +1821,7 @@ function connectWs() {
             dlLink.textContent = 'Download video';
             vidEl.appendChild(dlLink);
             $('transcript').appendChild(vidEl);
-            $('transcript').scrollTop = $('transcript').scrollHeight;
+            scrollTranscript();
             dbg('Video received via gui.update: ' + (guiData.description || '').slice(0, 50), 'event');
           } else {
             addSystem('[gui] ' + JSON.stringify(guiData));
@@ -1832,7 +1850,7 @@ function connectWs() {
           dlLink2.textContent = 'Download image';
           imgEl.appendChild(dlLink2);
           $('transcript').appendChild(imgEl);
-          $('transcript').scrollTop = $('transcript').scrollHeight;
+          scrollTranscript();
           dbg('Image received: ' + (msg.data.description || '').slice(0, 50), 'event');
         } else if (msg.type === 'speech_speed') {
           const speeds = { slow: 0.85, normal: 1.0, fast: 1.2 };
@@ -2484,7 +2502,7 @@ function sendText() {
   el.className = 't-entry t-user';
   el.textContent = text;
   $('transcript').appendChild(el);
-  $('transcript').scrollTop = $('transcript').scrollHeight;
+  scrollTranscript(true);
   input.value = '';
 
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -2525,7 +2543,7 @@ function sendText() {
                 }
                 addCopyBtn(re);
                 $('transcript').appendChild(re);
-                $('transcript').scrollTop = $('transcript').scrollHeight;
+                scrollTranscript();
               }
             }).catch(() => {});
           }, 2000);
@@ -2728,10 +2746,11 @@ function renderTabContent() {
         var resultDisplay = isExpanded ? 'block' : 'none';
         var resultHtml = hasResult ? '<div id="result-' + id + '" style="display:' + resultDisplay + ';padding:8px 12px;color:#b8c8d8;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;background:#0d1520;border-radius:8px;margin:4px 0 6px 30px">' + esc(t.result) + '</div>' : '';
         var rawText = t.text || id;
-        // Default-tag bare tasks (no [Channel] prefix) as [Voice] — the
-        // overwhelming majority of un-prefixed tasks come from the voice agent.
-        // (Was [Sutando-core]; renamed 2026-05-03 per Chi's "rename to Voice".)
-        var taggedRaw = /^\\[/.test(rawText) ? rawText : '[Voice] ' + rawText;
+        // Tag un-prefixed tasks by their source field: voice -> [Voice],
+        // anything else (cron/system reminders, etc.) -> [System]. Replaces
+        // the old "every bare task is [Voice]" default that mislabeled
+        // non-voice items (#bugs 2026-06-25).
+        var taggedRaw = /^\\[/.test(rawText) ? rawText : ((t.source === 'voice' ? '[Voice] ' : '[System] ') + rawText);
         // Prepend 1-based index — same as the primary renderTasks path,
         // so voice can target tasks by number on this dynamic-region list too.
         var numPrefix = (i + 1) + '. ';
@@ -3105,12 +3124,12 @@ let _seeingUntil = 0;
 const CORE_STATUS_STALE_SECONDS = 60;
 function readCoreStatus(): { running: boolean; step: string; stale: boolean } {
 	try {
-		// core-status.json is per-user runtime state under $SUTANDO_WORKSPACE/state/
-		// (default ~/.sutando/workspace/state/). Pre-fix this read from REPO_ROOT
-		// via import.meta.url-relative `../core-status.json` — but Python writers
-		// migrated to WORKSPACE_DIR in #836, so the TS reader silently saw stale
-		// or missing data. statusReadPath falls back to the legacy workspace-root
-		// location for one release.
+		// core-status.json is per-user runtime state under <workspace>/state/
+		// (workspace resolves via the M0 helper; default <repo>/workspace/ post-v0.8).
+		// Pre-fix this read from REPO_ROOT via import.meta.url-relative
+		// `../core-status.json` — but Python writers migrated to WORKSPACE_DIR in
+		// #836, so the TS reader silently saw stale or missing data. statusReadPath
+		// falls back to the legacy workspace-root location for one release.
 		const statusPath = statusReadPath('core-status.json', WORKSPACE_DIR);
 		const raw = readFileSync(statusPath, 'utf-8');
 		const s = JSON.parse(raw) as { status?: string; ts?: number; step?: string };

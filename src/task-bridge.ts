@@ -10,10 +10,10 @@
 
 import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, appendFileSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { homedir } from 'node:os';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { resolveWorkspace } from './workspace_default.js';
+import { claudeHomePath } from './util_paths.js';
 import { recordConversation, recordSessionBoundary } from './conversation-store.js';
 
 const REPO_DIR = resolveWorkspace();
@@ -171,7 +171,7 @@ export function _isVoiceTask(taskId: string): boolean {
  * (issue #1035, follow-up to PR #1033). Returns true iff the filename is one
  * that task-bridge legitimately delivers via `onResult()`. Rejects everything
  * else — most importantly, the new `<channel-key>.task-{id}.txt` namespace
- * PR #1033 introduced for the per-channel pull path (discord-voice / phone),
+ * PR #1033 introduced for the per-channel pull path (phone / plugin surfaces),
  * which the per-channel scanner consumes itself.
  *
  * `proactive-*` IS allowed: per the long-standing proactive-voice rule,
@@ -185,6 +185,25 @@ export function _isVoiceTask(taskId: string): boolean {
  * awkward to exercise in isolation. */
 export function _shouldFallthrough(file: string): boolean {
 	return file.startsWith('task-') || file.startsWith('voice-') || file.startsWith('proactive-');
+}
+
+/**
+ * Whether a result file should REGISTER a row in the Task list — i.e. fire
+ * `_sendTaskStatus` (live web-socket task card) and POST `/task-done`
+ * (agent-api `task_history`). Only genuine `task-*.txt` results are tasks.
+ *
+ * `proactive-*` notification files also pass `_shouldFallthrough` so they get
+ * SPOKEN by the voice agent (the proactive-voice delivery path), but they are
+ * NOT tasks: registering them keys a `task_history` row by the file stem, so
+ * every re-fire of a proactive notification (e.g. the hourly pending-question
+ * reminder) lands a fresh `proactive-<ts>` id as a DUPLICATE Task row. This is
+ * the general fix for that class (#1786); the narrow #1784 only stabilized the
+ * pending-question filename so its duplicate rows collapsed to one. `voice-*`
+ * files are short-circuited earlier in the watcher and never reach this path.
+ *
+ * Exported for unit testing alongside `_shouldFallthrough`. */
+export function _shouldRegisterTaskRow(file: string): boolean {
+	return file.startsWith('task-');
 }
 
 const _apiToken = process.env.SUTANDO_API_TOKEN || '';
@@ -258,7 +277,7 @@ export const workTool: ToolDefinition = {
 				const video = execFileSync('/bin/sh', ['-c', 'ls -t /tmp/sutando-recording-*-narrated-subtitled.mov /tmp/sutando-recording-*-narrated.mov /tmp/sutando-recording-*.mov 2>/dev/null | head -1'], { timeout: 3000 }).toString().trim();
 				if (image && video) {
 					// execFileSync argv array bypasses shell — image/video paths are separate args, no interpolation (fixes #1451)
-					const scriptPath = resolve(join(homedir(), '.claude/skills/video-concat/scripts/prepend-image.sh'));
+					const scriptPath = resolve(claudeHomePath('skills', 'video-concat', 'scripts', 'prepend-image.sh'));
 					const result = execFileSync('bash', [scriptPath, image, video, '3'], { timeout: 60000 }).toString().trim();
 					const parsed = JSON.parse(result);
 					return { status: 'done', result: `Video with image prepended: ${parsed.output} (${parsed.size_mb}MB)` };
@@ -707,6 +726,30 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 					}, 5_000);
 					continue;
 				}
+				// Skip markers: [no-send] / [REPLIED] — archive silently with no voice narration.
+				// These are set by the core agent when delivery already happened via another path
+				// (e.g. Discord bridge already replied) or the result should be suppressed entirely.
+				// Parity with Python bridges: discord-bridge.py and telegram-bridge.py both honor
+				// these via parse_markers(); task-bridge.ts must too (issue #1381).
+				if (file.startsWith('task-') && /^\s*\[(?:no-send|REPLIED)\]/i.test(result)) {
+					console.log(`${ts()} [TaskBridge] ${taskId} has skip marker; archiving silently`);
+					_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
+					_deliveredResults.add(file);
+					_pendingTasks.delete(taskId);
+					try {
+						fetch('http://localhost:7843/task-done', {
+							method: 'POST',
+							headers: _apiHeaders(),
+							body: JSON.stringify({ taskId, result }),
+						}).catch(() => {});
+					} catch {}
+					setTimeout(() => {
+						archiveFile(path, 'results', taskId);
+						const taskFile = join(TASK_DIR, `${taskId}.txt`);
+						if (existsSync(taskFile)) archiveFile(taskFile, 'tasks', taskId);
+					}, 5_000);
+					continue;
+				}
 				// Voice client offline → forward voice-task results to Discord DM
 				// via a proactive-result-*.txt file (poll_proactive in
 				// discord-bridge.py picks it up and DMs the owner). Skips files
@@ -773,7 +816,7 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 				// the fallthrough below fires onResult() for any non-empty .txt
 				// when the voice client is connected. PR #1033 introduced a new
 				// filename namespace `<channel-key>.task-{id}.txt` for the
-				// per-channel pull path used by discord-voice / phone — those
+				// per-channel pull path used by phone / plugin surfaces — those
 				// files are NOT meant for task-bridge to inject into voice.
 				// PR #1033's mitigation is the per-channel scanner's
 				// read-and-delete winning the race; this guard closes the
@@ -783,19 +826,27 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 				if (!_shouldFallthrough(file)) continue;
 				if (result) {
 					console.log(`${ts()} [TaskBridge] Result ${file}: ${result.slice(0, 100)}`);
-					_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
+					// proactive-* files reach this fallthrough only to be SPOKEN
+					// (onResult below). They are NOT tasks — gate the two
+					// task-registration side-effects (_sendTaskStatus + POST
+					// /task-done) to genuine task-*.txt results, else each
+					// proactive re-fire duplicates a Task row (#1786).
+					const registersTask = _shouldRegisterTaskRow(file);
+					if (registersTask) _sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
 					_deliveredResults.add(file);
 					_pendingTasks.delete(taskId);
 					logConversation('core-agent', `[task:${taskId}] ${result.slice(0, LOG_LINE_MAX_CHARS)}`);
 					onResult(result);
-					// Notify agent-api directly, then delete file
-					try {
-						fetch('http://localhost:7843/task-done', {
-							method: 'POST',
-							headers: _apiHeaders(),
-							body: JSON.stringify({ taskId, result }),
-						}).catch(() => {});
-					} catch {}
+					// Notify agent-api directly (task results only), then delete file
+					if (registersTask) {
+						try {
+							fetch('http://localhost:7843/task-done', {
+								method: 'POST',
+								headers: _apiHeaders(),
+								body: JSON.stringify({ taskId, result }),
+							}).catch(() => {});
+						} catch {}
+					}
 					setTimeout(() => {
 						const taskIdFromFile = path.split('/').pop()!.replace('.txt', '');
 						archiveFile(path, 'results', taskIdFromFile);

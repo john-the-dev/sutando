@@ -330,9 +330,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 task_id = f.stem
                 content = f.read_text()
                 task_line = ""
+                source_line = ""
+                # Capture the first `source:` and first `task:` regardless of
+                # field order — voice/chat tasks put `source:` before `task:`,
+                # but discord/slack tasks put `task:` first. The `not …` guards
+                # keep the real header `source:` from being overridden by any
+                # `source:` line inside the task body (#1781 review, sonichi).
                 for line in content.splitlines():
-                    if line.startswith("task:"):
+                    if not source_line and line.startswith("source:"):
+                        source_line = line[7:].strip()
+                    elif not task_line and line.startswith("task:"):
                         task_line = line[5:].strip()
+                    if task_line and source_line:
                         break
                 result_file = RESULT_DIR / f.name
                 existing = task_history.get(task_id, {})
@@ -360,7 +369,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 else:
                     status = "working"
                     result_text = ""
-                task_history[task_id] = {"status": status, "text": task_line or existing.get("text", task_id), "time": f.stat().st_mtime, "result": result_text}
+                task_history[task_id] = {"status": status, "text": task_line or existing.get("text", task_id), "time": f.stat().st_mtime, "result": result_text, "source": source_line or existing.get("source", "")}
             # Also check for result files without task files (already cleaned up)
             for f in sorted(RESULT_DIR.glob("task-*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]:
                 task_id = f.stem
@@ -403,13 +412,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     lines = section.strip().split('\n')
                     title = lines[0].strip()
                     body = '\n'.join(lines[1:])
-                    # Skip preamble (sections without question metadata)
-                    if '**Status:**' not in body and '**Options:**' not in body:
+                    # Skip preamble before first ## header (contains the file title).
+                    if i == 0 or title.startswith('#'):
                         continue
-                    # Skip resolved/answered questions
+                    # Skip sections already marked resolved in title — free-form format
+                    # (post-#1265: no **Status:** markers; [RESOLVED ...] prefix instead).
+                    if title.startswith('[RESOLVED') or title.startswith('RESOLVED'):
+                        continue
+                    # Skip resolved/answered questions (structured format — optional marker)
                     if re.search(r'\*\*Status:\*\*\s*(resolved|answered|done|complete)', body, re.IGNORECASE):
                         continue
-                    # Extract question text — use body before first metadata field
+                    # Extract question text — use body before first metadata field (if any)
                     q_text = re.split(r'\*\*(?:Status|Options|Asked|Question):\*\*', body)[0].strip()
                     q_text = q_text if q_text else title
                     q = {"id": f"Q{i}", "text": title, "detail": q_text}
@@ -890,11 +903,22 @@ async function send(){
 </script></body></html>"""
 
 
+def _resolve_local_ip() -> str:
+    """Best-effort LAN IP for the startup log line. An unresolvable hostname
+    (e.g. a DHCP-assigned name not in DNS/hosts) must NOT crash startup —
+    `socket.gethostbyname(socket.gethostname())` raises gaierror in that case.
+    The value is informational only, so fall back to loopback."""
+    import socket
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except OSError:
+        return "127.0.0.1"
+
+
 if __name__ == "__main__":
     bind = os.environ.get("AGENT_API_BIND", "127.0.0.1")
     server = http.server.HTTPServer((bind, PORT), Handler)
-    import socket
-    local_ip = socket.gethostbyname(socket.gethostname())
+    local_ip = _resolve_local_ip()
     print(f"Sutando Agent API → http://{bind}:{PORT}")
     print(f"  POST /task  — submit a task")
     print(f"  GET  /status — health + capabilities")
