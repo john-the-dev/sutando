@@ -68,6 +68,19 @@ check(
     # guard: access_tier == "owner" AND skill exists
     re.search(r'access_tier == .owner. and \(', slack_src) is not None,
 )
+check(
+    "slack: thread reply note variable defined",
+    '_thread_reply_note = ""' in slack_src,
+)
+check(
+    "slack: thread reply note uses Replying-in-Slack-thread prefix",
+    "[Replying in Slack thread to @" in slack_src,
+)
+check(
+    "slack: thread reply note passed through confine_user_content",
+    re.search(r'confine_user_content\(.*_thread_reply_note', slack_src, re.DOTALL) is not None,
+    "_thread_reply_note not found inside confine_user_content call",
+)
 
 # ---------------------------------------------------------------------------
 # Discord bridge
