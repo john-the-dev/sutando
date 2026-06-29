@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 import workspace_default  # noqa: E402
 from workspace_default import (  # noqa: E402
     default_workspace_dir,
+    resolve_repo_root,
     resolve_workspace,
     status_path,
     status_read_path,
@@ -745,6 +746,27 @@ class TestPostMigrationDisableBehavior(unittest.TestCase):
             with patch.object(sys, "stderr", buf):
                 resolve_workspace(migrate=True)
             self.assertEqual("", buf.getvalue())
+
+
+class TestResolveRepoRoot(unittest.TestCase):
+    """resolve_repo_root() returns the repo root (parent of src/)."""
+
+    def test_returns_path(self):
+        result = resolve_repo_root()
+        self.assertIsInstance(result, Path)
+
+    def test_contains_src_dir(self):
+        """The returned path must have a src/ subdirectory — it's the repo root."""
+        self.assertTrue((resolve_repo_root() / "src").is_dir())
+
+    def test_distinct_from_workspace(self):
+        """resolve_repo_root() != resolve_workspace() on a default install."""
+        # workspace defaults to <repo>/workspace/, repo root is <repo>/ — not equal.
+        self.assertNotEqual(resolve_repo_root(), resolve_workspace(migrate=False))
+
+    def test_matches_legacy_repo_root(self):
+        """resolve_repo_root() is a stable alias for _legacy_repo_root()."""
+        self.assertEqual(resolve_repo_root(), workspace_default._legacy_repo_root())
 
 
 if __name__ == "__main__":
