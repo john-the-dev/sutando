@@ -64,6 +64,27 @@ def _build_helper_namespace(tmpdir: Path, task_files: dict):
     return ns
 
 
+def _build_helper_namespace_with_archive(tmpdir: Path, active: dict, archived: dict):
+    """Like _build_helper_namespace, but use the real helper's archive lookup
+    shape: tasks/archive/YYYY-MM/<task_id>.txt."""
+    for tid, body in active.items():
+        (tmpdir / f"{tid}.txt").write_text(body)
+    archive_month = tmpdir / "archive" / "2026-06"
+    archive_month.mkdir(parents=True)
+    for tid, body in archived.items():
+        (archive_month / f"{tid}.txt").write_text(body)
+
+    def stub_find_task_file(tasks_dir, task_id):
+        p = Path(tasks_dir) / f"{task_id}.txt"
+        return p if p.exists() else None
+
+    const_src = _extract(r"DM_FALLBACK_SOURCES = \{[^}]*\}")
+    func_src = _extract(r"def _task_source\(task_id: str\):.*?(?=^\n\n|\Z)")
+    ns = {"find_task_file": stub_find_task_file, "TASKS_DIR": tmpdir, "Path": Path, "sorted": sorted}
+    exec(const_src + "\n\n" + func_src, ns)
+    return ns
+
+
 # ---------------------------------------------------------------------------
 # Static structure: the allowlist exists and is positive (voice/phone in,
 # api/chat out), and the gate is wired into poll_dm_fallback.
@@ -124,6 +145,20 @@ def test_api_and_chat_results_are_not_eligible():
         })
         assert _eligible(ns, "task-api") is False
         assert _eligible(ns, "task-chat") is False
+
+
+def test_archived_chat_task_source_is_not_eligible():
+    """Live failure caught during PR test: chat task files can be archived
+    before dm-fallback sees the result. The archived source must still block
+    Discord DM fallback."""
+    with tempfile.TemporaryDirectory() as d:
+        ns = _build_helper_namespace_with_archive(
+            Path(d),
+            active={},
+            archived={"task-chat-archived": "id: task-chat-archived\nsource: chat\n"},
+        )
+        assert ns["_task_source"]("task-chat-archived") == "chat"
+        assert _eligible(ns, "task-chat-archived") is False
 
 
 def test_discord_and_telegram_results_are_not_eligible():

@@ -4246,6 +4246,14 @@ def _task_source(task_id: str):
     whether a `task-` result is DM-eligible (see DM_FALLBACK_SOURCES)."""
     tf = find_task_file(TASKS_DIR, task_id)
     if not tf:
+        processed = TASKS_DIR / "processed" / f"{task_id}.txt"
+        if processed.exists():
+            tf = processed
+    if not tf:
+        archived = sorted((TASKS_DIR / "archive").glob(f"*/{task_id}.txt"))
+        if archived:
+            tf = archived[-1]
+    if not tf:
         return None
     try:
         for ln in tf.read_text(encoding="utf-8", errors="replace").splitlines():
