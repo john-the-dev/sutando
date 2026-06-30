@@ -1127,6 +1127,9 @@ function restoreTranscript() {
   if (!Array.isArray(entries) || !entries.length) return;
   _transcriptRestoring = true;
   const t = $('transcript');
+  // Clear the freshly-rendered default seed so it isn't duplicated by the
+  // seed entry captured in the snapshot.
+  t.innerHTML = '';
   entries.forEach(e => {
     const el = document.createElement('div');
     el.className = e.cls || 't-entry';
