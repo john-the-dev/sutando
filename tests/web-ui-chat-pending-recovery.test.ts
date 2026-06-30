@@ -21,6 +21,30 @@ test('dashboard text sends persist and resume pending task results', () => {
 	assert.ok(resumeIndex > keyIndex, 'resume must run after the pending key is initialized');
 });
 
+test('dashboard chat poll tolerates long tasks and does not orphan the reply', () => {
+	// Ceiling must be generous — long agent tasks (PR creation, research) exceed
+	// a few minutes. A short cap orphaned the reply in the transcript.
+	assert.match(webClient, /CHAT_POLL_MAX_MS = 30 \* 60 \* 1000/);
+	// Cadence backs off after a fast window instead of hammering /result forever.
+	assert.match(webClient, /CHAT_POLL_FAST_WINDOW_MS/);
+	assert.match(webClient, /CHAT_POLL_SLOW_MS/);
+	// Stale persisted sends are garbage-collected on load.
+	assert.match(webClient, /CHAT_PENDING_TTL_MS/);
+	// On the hard ceiling the poll must NOT delete the persisted entry — a reload
+	// has to be able to re-attach and still render the late reply.
+	const pollBody = webClient.slice(
+		webClient.indexOf('function pollChatReply'),
+		webClient.indexOf('function resumePendingChatSends'),
+	);
+	assert.doesNotMatch(pollBody, /No response yet/, 'must not show the dead-end placeholder that orphans the reply');
+	const ceilingBranch = pollBody.slice(pollBody.indexOf('CHAT_POLL_MAX_MS'));
+	assert.doesNotMatch(
+		ceilingBranch.slice(0, ceilingBranch.indexOf('fetch(')),
+		/removePendingChatSend/,
+		'ceiling give-up must keep the persisted entry so a reload can recover',
+	);
+});
+
 test('/chat sends persist and resume pending task results', () => {
 	assert.match(CHAT_HTML, /PENDING_KEY = 'sutando-chat-page-pending-v1'/);
 	assert.match(CHAT_HTML, /function rememberPendingTask\(taskId, text\)/);

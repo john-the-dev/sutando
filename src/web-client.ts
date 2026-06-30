@@ -2502,9 +2502,23 @@ window.showNoteInDR = showNoteInDR;
 // the reply. /result/<id> serves from results/archive too, so the reply
 // survives the bridge archiving the file before the resumed poll runs.
 const PERSIST_KEY_CHAT_PENDING = 'sutando-dashboard-chat-pending-v1';
-const CHAT_POLL_MAX_MS = 5 * 60 * 1000;
+// Long-running agent tasks (PR creation, research, multi-step analysis) routinely
+// take many minutes. A short poll cap orphaned the reply: the result landed in the
+// Tasks tab but the transcript was stuck on a dead "(No response yet…)" line forever.
+// Keep polling well past the first minute (backing the cadence off once past the
+// fast window), and on the hard ceiling stop the in-page timer but KEEP the
+// persisted entry so a reload re-attaches and still renders the late reply.
+const CHAT_POLL_FAST_MS = 2 * 1000;            // cadence during the fast window
+const CHAT_POLL_SLOW_MS = 15 * 1000;           // cadence after the fast window
+const CHAT_POLL_FAST_WINDOW_MS = 2 * 60 * 1000;// poll every 2s for the first 2 min
+const CHAT_POLL_MAX_MS = 30 * 60 * 1000;       // hard ceiling for one in-page poll
+const CHAT_PENDING_TTL_MS = 30 * 60 * 1000;    // GC persisted entries older than this on load
 function loadPendingChatSends() {
-  try { return JSON.parse(localStorage.getItem(PERSIST_KEY_CHAT_PENDING) || '[]'); } catch { return []; }
+  try {
+    const cutoff = Date.now() - CHAT_PENDING_TTL_MS;
+    return JSON.parse(localStorage.getItem(PERSIST_KEY_CHAT_PENDING) || '[]')
+      .filter(p => p && p.task_id && (p.ts || 0) >= cutoff);
+  } catch { return []; }
 }
 function addPendingChatSend(taskId, text) {
   try {
@@ -2539,30 +2553,43 @@ function renderChatReply(el, resultText) {
 }
 // Poll the task bridge for a chat reply and render it into placeholderEl when
 // it arrives. startedAt lets a resumed poll honor the original send time so the
-// overall wait is bounded across reloads. Clears the localStorage entry on
-// completion or give-up.
+// overall wait is bounded across reloads. Backs the cadence off after the fast
+// window. On completion it clears the persisted entry; on the hard ceiling it
+// stops the in-page timer but KEEPS the entry so a reload re-attaches and still
+// renders the reply (the result is served from results/archive indefinitely).
 function pollChatReply(taskId, placeholderEl, startedAt) {
   const apiBase = 'http://' + location.hostname + ':7843';
   const begin = startedAt || Date.now();
-  const poll = setInterval(() => {
-    if (Date.now() - begin > CHAT_POLL_MAX_MS) {
-      clearInterval(poll);
-      removePendingChatSend(taskId);
+  let timer = null;
+  const stop = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  const schedule = (elapsed) => {
+    const delay = elapsed < CHAT_POLL_FAST_WINDOW_MS ? CHAT_POLL_FAST_MS : CHAT_POLL_SLOW_MS;
+    timer = setTimeout(tick, delay);
+  };
+  const tick = () => {
+    const elapsed = Date.now() - begin;
+    if (elapsed > CHAT_POLL_MAX_MS) {
+      stop();
+      // Keep the persisted entry — a reload resumes the poll and can still
+      // render the reply once the (slow) task finishes.
       if (placeholderEl && placeholderEl.classList.contains('t-working')) {
-        placeholderEl.textContent = '(No response yet — the agent may still be working. Check the Tasks tab.)';
+        placeholderEl.textContent = '(Still working — the reply will appear here when it lands, or refresh. It is also in the Tasks tab.)';
         placeholderEl.classList.remove('t-working');
       }
       return;
     }
     fetch(apiBase + '/result/' + taskId).then(r => r.json()).then(r => {
       if (r.status === 'completed') {
-        clearInterval(poll);
+        stop();
         removePendingChatSend(taskId);
         renderChatReply(placeholderEl, r.result);
         scrollTranscript();
+      } else {
+        schedule(elapsed);
       }
-    }).catch(() => {});
-  }, 2000);
+    }).catch(() => { schedule(elapsed); });
+  };
+  tick();
 }
 // On page load, re-render any in-flight chat sends and resume polling so a
 // reload during the core-pickup wait still surfaces the reply.
