@@ -1375,7 +1375,8 @@ function startTaskPolling() {
       renderTasks();
       // Update system status indicators
       const statusParts = [];
-      if (data.claude === false) statusParts.push('<span style="color:#e94560">brain offline</span>');
+      if (data.core_limit && data.core_limit.limited) statusParts.push('<span style="color:#f0ad4e">' + esc(data.core_limit.message || 'Claude session limit reached') + '</span>');
+      else if (data.claude === false) statusParts.push('<span style="color:#e94560">brain offline</span>');
       if (data.watcher === false) statusParts.push('<span style="color:#f0ad4e">watcher offline</span>');
       const sysEl = document.getElementById('sys-status');
       if (sysEl) sysEl.innerHTML = statusParts.length ? statusParts.join(' · ') : '';
@@ -2998,7 +2999,9 @@ document.addEventListener('keydown', function(e) {
       // Update persistent core status bar (clickable to expand activity)
       var csBar = document.getElementById('core-status-bar');
       if (csBar) {
-        var statusText = loopData.status === 'running'
+        var statusText = loopData.core_limit && loopData.core_limit.limited
+          ? '<span class="core-running">Core: ' + esc(loopData.core_limit.message || 'Claude session limit reached') + '</span>'
+          : loopData.status === 'running'
           ? '<span class="core-running">Core: ' + esc(loopData.step || 'working') + '</span>'
           : '<span class="core-idle">Core: idle</span>';
         var expandBtn = '';

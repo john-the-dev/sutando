@@ -118,6 +118,27 @@ task_history = {}
 # Web client polls /voice/state and connects/disconnects accordingly.
 voice_desired_state = "disconnected"
 
+SESSION_LIMIT_RE = re.compile(r"You(?:'|\u2019)ve hit your session limit\s*(?:\u00b7|-)\s*resets\s+([^\r\n]+)", re.IGNORECASE)
+
+
+def detect_core_session_limit(capture_text=None) -> dict:
+    """Detect Claude Code session-limit text from the core tmux pane."""
+    text = capture_text
+    if text is None:
+        sock = os.environ.get("SUTANDO_TMUX_SOCK", "/tmp/sutando-tmux.sock")
+        session = os.environ.get("SUTANDO_TMUX_SESSION", "sutando-core")
+        cmd = ["tmux", "-S", sock, "capture-pane", "-t", session, "-pS", "-80"]
+        try:
+            text = subprocess.run(cmd, capture_output=True, text=True, timeout=0.75).stdout
+        except Exception:
+            text = ""
+    match = SESSION_LIMIT_RE.search(text or "")
+    if not match:
+        return {"limited": False}
+    reset = match.group(1).strip().rstrip(".")
+    message = f"Claude session limit reached; resets {reset}"
+    return {"limited": True, "reset": reset, "message": message}
+
 
 
 def get_status() -> dict:
@@ -307,16 +328,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(200, {"pong": True})
         elif path == "/core-status":
             # Read loop status file for web UI
+            core_limit = detect_core_session_limit()
             status_file = status_read_path("core-status.json", WORKSPACE_DIR)
             if status_file.exists():
                 import json as _json
                 try:
                     data = _json.loads(status_file.read_text())
+                    if core_limit.get("limited"):
+                        data["status"] = "running"
+                        data["step"] = core_limit["message"]
+                        data["core_limit"] = core_limit
                     self.send_json(200, data)
                 except Exception:
-                    self.send_json(200, {"status": "idle"})
+                    data = {"status": "idle"}
+                    if core_limit.get("limited"):
+                        data = {"status": "running", "step": core_limit["message"], "core_limit": core_limit}
+                    self.send_json(200, data)
             else:
-                self.send_json(200, {"status": "idle"})
+                data = {"status": "idle"}
+                if core_limit.get("limited"):
+                    data = {"status": "running", "step": core_limit["message"], "core_limit": core_limit}
+                self.send_json(200, data)
         elif path == "/voice/state":
             self.send_json(200, {"state": voice_desired_state})
         elif path == "/status":
@@ -325,6 +357,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # List active tasks + system status for the web client
             watcher_ok = subprocess.run(["/usr/bin/pgrep", "-f", "watch-tasks"], capture_output=True).returncode == 0
             claude_ok = subprocess.run(["/usr/bin/pgrep", "-f", "claude.*sutando-core"], capture_output=True).returncode == 0
+            core_limit = detect_core_session_limit()
             # Scan disk for active tasks, update history (preserve existing text)
             for f in sorted(TASK_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]:
                 task_id = f.stem
@@ -431,7 +464,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if opts_match:
                         q["options"] = [o.strip() for o in opts_match.group(1).split("|")]
                     questions.append(q)
-            self.send_json(200, {"tasks": tasks, "watcher": watcher_ok, "claude": claude_ok, "questions": questions})
+            self.send_json(200, {"tasks": tasks, "watcher": watcher_ok, "claude": claude_ok, "core_limit": core_limit, "questions": questions})
         elif path.startswith("/result/"):
             task_id = path[len("/result/"):]
             result = get_task_result(task_id)
