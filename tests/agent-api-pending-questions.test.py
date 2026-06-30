@@ -41,34 +41,38 @@ class TestAgentApiPendingQuestionsParser(unittest.TestCase):
             "Parser must check title.startswith('[RESOLVED') to skip resolved sections",
         )
 
-    def test_status_gate_count_reduced(self):
-        """The **Status:** not in body gate should appear at most once (POST /answer path only).
+    def test_status_gate_removed_from_answer_path_too(self):
+        """The **Status:** not in body gate must not exist.
 
-        The GET /status path should NOT have this gate — it would exclude all free-form
-        questions (which don't have **Status:** markers per post-#1265 convention).
+        Both GET /tasks/active and POST /answer must accept free-form questions.
+        If GET lists a marker-less section but POST /answer skips it, the UI
+        shows Q1 and then fails with "question Q1 not found or already answered".
         """
         import re
         # Count occurrences of the status-gate pattern
         matches = re.findall(r"Status.*not in body|not in body.*Status", SRC)
-        self.assertLessEqual(
-            len(matches), 1,
-            f"Status gate found {len(matches)} times — GET /status path should not "
-            "have this gate (only POST /answer path should use it for finding "
-            "structured questions to update). More than 1 occurrence means the "
-            "GET /status fix was reverted.",
+        self.assertEqual(
+            len(matches), 0,
+            f"Status marker gate found {len(matches)} times — free-form questions "
+            "must be answerable, not only visible.",
         )
 
     def test_resolved_text_check_not_removed(self):
-        """The **Status:** resolved check in POST /answer must still be present.
-
-        This gate is intentional — when ANSWERING a question, we need to find
-        sections with **Status:** to update. Don't accidentally remove it.
-        """
+        """The resolved/answered skip in POST /answer must still be present."""
         self.assertIn(
             "resolved|answered|done|complete",
             SRC,
-            "The **Status:** resolved skip in POST /answer must remain — "
-            "needed to avoid re-answering already-resolved questions",
+            "The resolved skip in POST /answer must remain — needed to avoid "
+            "re-answering already-resolved questions",
+        )
+
+    def test_agent_api_uses_threading_server(self):
+        """One slow browser/API request must not block /answer or /result."""
+        self.assertIn(
+            "http.server.ThreadingHTTPServer",
+            SRC,
+            "agent-api.py must use ThreadingHTTPServer; single-threaded "
+            "HTTPServer can wedge the web UI behind one slow request.",
         )
 
 

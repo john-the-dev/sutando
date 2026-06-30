@@ -869,38 +869,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pq_file = Path(personal_path("pending-questions.md", WORKSPACE_DIR))
                 if pq_file.exists():
                     content = pq_file.read_text()
-                    # Update status from unanswered to answered
+                    # Update status from unanswered to answered. Keep this in
+                    # lockstep with the GET /tasks/active question parser above:
+                    # free-form sections without **Status:**/**Options:** are
+                    # valid pending questions and must be answerable.
                     import re
                     safe_answer = answer.replace('\n', ' ')
-                    # Try new format: - **Status:** unanswered
-                    pattern = rf'(## [^\n]*\n(?:.*?\n)*?- \*\*Status:\*\* )unanswered'
-                    # Find the right section by matching the question ID
-                    sections = re.split(r'(^## )', content, flags=re.MULTILINE)
-                    new_content = content
-                    # Reconstruct and find the section matching this qid
-                    idx = 0
-                    for si, section in enumerate(re.split(r'^## ', content, flags=re.MULTILINE)):
+                    sections = re.split(r'^## ', content, flags=re.MULTILINE)
+                    new_sections = [sections[0]]
+                    answered = False
+                    for si, section in enumerate(sections[1:], start=1):
                         if not section.strip():
+                            new_sections.append(section)
                             continue
-                        lines = section.strip().split('\n')
+                        lines = section.split('\n')
                         title = lines[0].strip()
                         body = '\n'.join(lines[1:])
-                        if '**Status:**' not in body and '**Options:**' not in body:
+                        if title.startswith('#'):
+                            new_sections.append(section)
+                            continue
+                        if title.startswith('[RESOLVED') or title.startswith('RESOLVED'):
+                            new_sections.append(section)
                             continue
                         if re.search(r'\*\*Status:\*\*\s*(resolved|answered|done|complete)', body, re.IGNORECASE):
+                            new_sections.append(section)
                             continue
-                        idx += 1
                         if f"Q{si}" == qid:
-                            # Match any waiting/unanswered status line
-                            new_body = re.sub(
-                                r'\*\*Status:\*\*\s*(?:Waiting|unanswered).*',
-                                f'**Status:** Answered — {safe_answer}',
-                                body
-                            )
-                            if new_body != body:
-                                new_content = content.replace(body, new_body)
-                            break
-                    if new_content != content:
+                            status_re = r'\*\*Status:\*\*\s*(?:Waiting|unanswered).*'
+                            if re.search(status_re, body, flags=re.IGNORECASE):
+                                body = re.sub(
+                                    status_re,
+                                    f'**Status:** Answered — {safe_answer}',
+                                    body,
+                                    count=1,
+                                    flags=re.IGNORECASE,
+                                )
+                            else:
+                                body = body.rstrip() + f'\n\n**Status:** Answered — {safe_answer}\n'
+                            section = lines[0] + '\n' + body
+                            answered = True
+                        new_sections.append(section)
+                    if answered:
+                        new_content = new_sections[0] + ''.join(f'## {section}' for section in new_sections[1:])
                         pq_file.write_text(new_content)
                         ts = int(datetime.now().timestamp() * 1000)
                         safe_qid = re.sub(r'[^a-zA-Z0-9_\-.]', '', qid)
