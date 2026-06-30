@@ -806,6 +806,17 @@ function getDefaultWsUrl() {
   return protocol + '//' + hostname + ':' + WS_PORT;
 }
 
+// The transcript + input bar live in #bottom-panel, which is position:fixed at
+// the bottom. The dashboard (#dynamic-region: tasks/notes/questions) is normal
+// flow above it. A static body padding-bottom can't reserve space for the
+// transcript, which grows up to 50vh — so a tall chat history would float over
+// and cover the dashboard's Questions panel. Keep body padding-bottom in sync
+// with the panel's real height so dashboard content is always pushed clear.
+function syncBottomPad() {
+  const bp = $('bottom-panel');
+  if (bp) document.body.style.paddingBottom = (bp.offsetHeight + 12) + 'px';
+}
+
 // Set default WebSocket URL on page load + init Chrome STT
 window.addEventListener('DOMContentLoaded', () => {
   const wsUrlInput = $('wsUrl');
@@ -815,6 +826,14 @@ window.addEventListener('DOMContentLoaded', () => {
   initChromeStt();
   // Auto-reconnect voice if it was connected before refresh
   try { if (sessionStorage.getItem('sutando-voice')) { setTimeout(() => toggle(), 500); } } catch {}
+  // Reserve bottom space equal to the fixed panel's height so the chat history
+  // never covers the dashboard (e.g. the Questions panel).
+  try {
+    const bp = $('bottom-panel');
+    if (bp && window.ResizeObserver) { new ResizeObserver(syncBottomPad).observe(bp); }
+    syncBottomPad();
+    window.addEventListener('resize', syncBottomPad);
+  } catch {}
 });
 
 // ─── Remote toggle via SSE ────────────────────────────────
