@@ -2,7 +2,8 @@
 """Browser-mode X (Twitter) — drives your real, logged-in Chrome.
 
 No API key required. Uses AppleScript to control the actual Google Chrome app
-(not a headless browser), so it reads X with your existing logged-in session.
+(not a headless browser), so it reads and engages with X (like, reply) using
+your existing logged-in session.
 
 Requirements (macOS + Google Chrome):
   - Chrome > View > Developer > "Allow JavaScript from Apple Events" must be ON.

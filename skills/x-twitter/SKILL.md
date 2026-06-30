@@ -1,6 +1,6 @@
 ---
 name: x-twitter
-description: "Post, search, read, and check engagement on X (Twitter) via API v2 — or read X with no API key by driving your real logged-in Chrome (browser mode)."
+description: "Post, search, read, and check engagement on X (Twitter) via API v2 — or read and engage (like, reply) with no API key by driving your real logged-in Chrome (browser mode)."
 ---
 
 # X (Twitter)
@@ -9,8 +9,8 @@ Post, search, read, and monitor X from the command line.
 
 Two backends:
 - **API mode** (`x-post.py`) — full read + write (post, reply, media) via X API v2. Needs API keys.
-- **Browser mode** (`x-browser.py`) — read-only, **no API key**. Drives your real,
-  logged-in Google Chrome via AppleScript, so it sees X exactly as you do.
+- **Browser mode** (`x-browser.py`) — read **and** engage (like, reply), **no API key**.
+  Drives your real, logged-in Google Chrome via AppleScript, so it sees X exactly as you do.
 
 ## Usage — API mode (`x-post.py`)
 
@@ -37,8 +37,10 @@ python3 skills/x-twitter/x-post.py engagement 2040817066199195818
 
 ## Usage — Browser mode (`x-browser.py`, no API key)
 
-Read-only. Drives your real, logged-in Google Chrome via AppleScript, so it
-reads X exactly as you see it — no developer account, no keys.
+Drives your real, logged-in Google Chrome via AppleScript, so it reads **and
+engages with** X exactly as you see it — no developer account, no keys. Reads
+need no permissions beyond the Apple Events toggle; `reply` additionally needs
+Accessibility permission (the submit is a real OS keystroke).
 
 ```bash
 # The logged-in account (name + @handle)
