@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Browser-mode X (Twitter) reader — drives your real, logged-in Chrome.
+"""Browser-mode X (Twitter) — drives your real, logged-in Chrome.
 
 No API key required. Uses AppleScript to control the actual Google Chrome app
 (not a headless browser), so it reads X with your existing logged-in session.
@@ -9,15 +9,27 @@ Requirements (macOS + Google Chrome):
     (One-time toggle; without it, Chrome refuses `execute javascript`.)
   - You must be logged into x.com in Chrome.
 
-Commands:
+Read commands:
   x-browser.py whoami                 # the logged-in account (name + @handle)
   x-browser.py home [--limit N]       # visible tweets on your home timeline
   x-browser.py read <tweet-id|url>    # a single tweet's text + author
   x-browser.py search "<query>"       # latest results for a search (--limit N)
 
-This is READ-ONLY by design. Posting/liking/following via DOM automation is
-fragile and risks tripping X's automation defenses, so it is intentionally not
-implemented here — use the API path (x-post.py) for writes.
+Engagement commands (opt-in writes):
+  x-browser.py like  <tweet-id|url>            # like a tweet
+  x-browser.py reply <tweet-id|url> "<text>"   # post a reply
+
+Engagement notes:
+  - `like` is pure DOM (a synthetic click is honored by X) — reliable.
+  - `reply` is a HYBRID: JS fills the composer, but the final SUBMIT needs a
+    real OS keystroke (System Events Cmd+Return), because X ignores synthetic
+    submit events. That means `reply` additionally requires:
+      * Accessibility permission for the controlling process (System Events).
+      * It briefly brings Chrome to the foreground and activates the x.com tab
+        to land the keystroke. Don't run it while typing elsewhere.
+  - Writes are public and post under your real handle — confirm intent first.
+    For bulk/headless writes with no foregrounding, prefer the API path
+    (x-post.py).
 """
 import sys
 import json
@@ -207,8 +219,100 @@ def cmd_search(query: str, limit: int) -> int:
     return 0
 
 
+def _status_url(ref: str) -> str:
+    return ref if ref.startswith("http") else f"https://x.com/i/web/status/{ref}"
+
+
+def cmd_like(ref: str) -> int:
+    ensure_tab(_status_url(ref), settle=5.0)
+    click = (
+        "(function(){var a=document.querySelector('article[data-testid=\\\"tweet\\\"]');"
+        "if(!a)return JSON.stringify({error:'tweet not found'});"
+        "if(a.querySelector('[data-testid=\\\"unlike\\\"]'))return JSON.stringify({already:true});"
+        "var b=a.querySelector('[data-testid=\\\"like\\\"]');"
+        "if(!b)return JSON.stringify({error:'no like button'});b.click();"
+        "return JSON.stringify({clicked:true});})()"
+    )
+    r = json.loads(run_js(click))
+    if r.get("error"):
+        print(r["error"]); return 1
+    if r.get("already"):
+        print("already liked"); return 0
+    time.sleep(1.5)
+    ver = (
+        "(function(){var a=document.querySelector('article[data-testid=\\\"tweet\\\"]');"
+        "return JSON.stringify({liked: !!(a&&a.querySelector('[data-testid=\\\"unlike\\\"]'))});})()"
+    )
+    if json.loads(run_js(ver)).get("liked"):
+        print("liked"); return 0
+    print("like click sent but not confirmed"); return 1
+
+
+def _os_submit_via_keystroke() -> None:
+    """Send a REAL Cmd+Return to Chrome to submit the focused composer.
+
+    X ignores synthetic JS submit events (untrusted), so the post button can't
+    be driven from inside the page. This brings Chrome forward, activates the
+    x.com tab, and sends an OS-level keystroke via System Events (needs
+    Accessibility permission)."""
+    osa = '''
+tell application "Google Chrome"
+  activate
+  repeat with w in windows
+    set ti to 0
+    repeat with t in tabs of w
+      set ti to ti + 1
+      if (URL of t contains "x.com" or URL of t contains "twitter.com") then
+        set active tab index of w to ti
+        set index of w to 1
+        exit repeat
+      end if
+    end repeat
+  end repeat
+end tell
+delay 0.7
+tell application "System Events"
+  keystroke return using command down
+end tell
+'''
+    _osascript(osa)
+
+
+def cmd_reply(ref: str, text: str) -> int:
+    ensure_tab(_status_url(ref), settle=5.0)
+    run_js(
+        "(function(){var a=document.querySelector('article[data-testid=\\\"tweet\\\"]');"
+        "var b=a&&a.querySelector('[data-testid=\\\"reply\\\"]');if(b)b.click();return 'ok';})()"
+    )
+    time.sleep(2.5)
+    tjson = json.dumps(text)
+    fill = (
+        "(function(){var ed=document.querySelector('[data-testid=\\\"tweetTextarea_0\\\"]');"
+        "if(!ed)return 'noeditor';ed.focus();"
+        "document.execCommand('selectAll',false,null);"
+        "document.execCommand('delete',false,null);"
+        "document.execCommand('insertText',false," + tjson + ");"
+        "return ed.innerText;})()"
+    )
+    if run_js(fill) == "noeditor":
+        raise BrowserError("reply composer did not open")
+    time.sleep(0.5)
+    _os_submit_via_keystroke()
+    time.sleep(4.0)
+    needle = json.dumps(text[:20])
+    ver = (
+        "(function(){var arts=document.querySelectorAll('article[data-testid=\\\"tweet\\\"]');"
+        "var found=false;arts.forEach(function(a){var tx=a.querySelector('[data-testid=\\\"tweetText\\\"]');"
+        "if(tx&&tx.innerText.indexOf(" + needle + ")>-1)found=true;});"
+        "return JSON.stringify({posted:found});})()"
+    )
+    if json.loads(run_js(ver)).get("posted"):
+        print("reply posted"); return 0
+    print("reply submitted but not confirmed (check the tweet)"); return 1
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Browser-mode X reader (real Chrome, no API key)")
+    ap = argparse.ArgumentParser(description="Browser-mode X (real Chrome, no API key)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("whoami")
     p_home = sub.add_parser("home")
@@ -218,6 +322,11 @@ def main() -> int:
     p_search = sub.add_parser("search")
     p_search.add_argument("query")
     p_search.add_argument("--limit", type=int, default=10)
+    p_like = sub.add_parser("like")
+    p_like.add_argument("ref", help="tweet id or full URL")
+    p_reply = sub.add_parser("reply")
+    p_reply.add_argument("ref", help="tweet id or full URL")
+    p_reply.add_argument("text", help="reply text (posts publicly under your handle)")
     args = ap.parse_args()
 
     try:
@@ -229,6 +338,10 @@ def main() -> int:
             return cmd_read(args.ref)
         if args.cmd == "search":
             return cmd_search(args.query, args.limit)
+        if args.cmd == "like":
+            return cmd_like(args.ref)
+        if args.cmd == "reply":
+            return cmd_reply(args.ref, args.text)
     except BrowserError as e:
         msg = str(e)
         print(f"browser-mode error: {msg}", file=sys.stderr)

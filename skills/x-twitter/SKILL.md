@@ -52,7 +52,20 @@ python3 skills/x-twitter/x-browser.py read 2040817066199195818
 
 # Latest results for a search
 python3 skills/x-twitter/x-browser.py search "sutando agent" --limit 10
+
+# Engagement (opt-in writes — post publicly under your handle)
+python3 skills/x-twitter/x-browser.py like 2040817066199195818
+python3 skills/x-twitter/x-browser.py reply 2040817066199195818 "Nice thread"
 ```
+
+Engagement notes:
+- **`like`** is pure DOM (a synthetic click is honored by X) — reliable.
+- **`reply`** is a hybrid: JS fills the composer, but the final **submit** needs
+  a real OS keystroke (System Events Cmd+Return) because X ignores synthetic
+  submit events. So `reply` additionally needs **Accessibility permission**, and
+  it briefly brings Chrome to the foreground + activates the x.com tab to land
+  the keystroke — don't run it while typing elsewhere. For bulk/headless writes,
+  use API mode (`x-post.py`).
 
 ## Setup — API mode
 
@@ -79,5 +92,7 @@ macOS + Google Chrome only. No keys needed.
 - Free tier: 500 posts/month, search recent tweets (7 days)
 - Video upload uses chunked upload (supports 4K)
 - Always confirm post content with user before publishing
-- Browser mode is read-only by design — posting/liking via DOM automation is
-  fragile and risks tripping X's automation defenses. Use API mode for writes.
+- Browser mode reads need no permissions beyond the Apple Events toggle.
+  `like` works via DOM; `reply` works but needs Accessibility permission (the
+  submit is a real OS keystroke) and foregrounds Chrome. Prefer API mode for
+  bulk or headless writes.
