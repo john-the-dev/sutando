@@ -818,8 +818,6 @@ window.addEventListener('DOMContentLoaded', () => {
   initChromeStt();
   // Auto-reconnect voice if it was connected before refresh
   try { if (sessionStorage.getItem('sutando-voice')) { setTimeout(() => toggle(), 500); } } catch {}
-  // Resume any web-chat sends that were in flight when the page was reloaded.
-  try { resumePendingChatSends(); } catch {}
 });
 
 // ─── Remote toggle via SSE ────────────────────────────────
@@ -2503,7 +2501,7 @@ window.showNoteInDR = showNoteInDR;
 // localStorage and resume polling on load so a reload re-attaches and renders
 // the reply. /result/<id> serves from results/archive too, so the reply
 // survives the bridge archiving the file before the resumed poll runs.
-const PERSIST_KEY_CHAT_PENDING = 'sutando-chat-pending-v1';
+const PERSIST_KEY_CHAT_PENDING = 'sutando-dashboard-chat-pending-v1';
 const CHAT_POLL_MAX_MS = 5 * 60 * 1000;
 function loadPendingChatSends() {
   try { return JSON.parse(localStorage.getItem(PERSIST_KEY_CHAT_PENDING) || '[]'); } catch { return []; }
@@ -2634,6 +2632,8 @@ function sendText() {
       });
   }
 }
+
+try { resumePendingChatSends(); } catch {}
 
 // ─── Dynamic region: contextual generative UI ────────────
 // Priority: dynamic-content.json > pending questions > proactive status > chips
