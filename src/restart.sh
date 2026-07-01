@@ -1,6 +1,10 @@
 #!/bin/bash
 # Sutando restart — stops all background services, then restarts via startup.sh.
 # Does NOT touch the Claude Code CLI (core agent) — that's managed separately.
+# To restart the CORE (e.g. to switch model / apply .env config) from inside the
+# running session, use scripts/safe-restart-core.sh (detached, survives its own
+# kill-session). Calling scripts/start-cli.sh --restart from within sutando-core
+# kills the agent before relaunch — see that script's header.
 # Usage: bash src/restart.sh
 #   --stop-only    Stop without restarting
 
