@@ -555,6 +555,9 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
         f"task: {user_task_text}\n"
         f"source: slack\n"
         f"channel_id: {channel}\n"
+        # Thread context so mid-task notifications (task-progress skill) reply IN the
+        # thread the user wrote from, not the top-level channel. Only when threaded.
+        f"{('thread_ts: ' + str(thread_ts) + chr(10)) if thread_ts else ''}"
         f"user_id: {user_id}\n"
         f"access_tier: {access_tier}\n"
         f"priority: {priority}\n"

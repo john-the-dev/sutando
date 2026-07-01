@@ -6,6 +6,7 @@ Usage:
     python3 notify.py --source slack --channel-id D0B5L7X2TK2 --thread-ts 1780586204.198 --message "Still working..."
     python3 notify.py --source discord --channel-id 1234567890 --message "Working on it..."
     python3 notify.py --source telegram --chat-id 123456789 --message "On it..."
+    python3 notify.py --source telegram --chat-id 123456789 --thread-id 42 --message "On it..."  # forum topic
 
 Exits 0 on success, 1 on failure. Fail-open by design — a failed send must never
 block the task itself. The caller should always continue working regardless of exit code.
@@ -95,16 +96,15 @@ def send_discord(channel_id: str, message: str) -> bool:
     )
 
 
-def send_telegram(chat_id: str, message: str) -> bool:
+def send_telegram(chat_id: str, message: str, thread_id: str | None = None) -> bool:
     token = _token("telegram", "TELEGRAM_BOT_TOKEN")
     if not token:
         print("[task-progress] TELEGRAM_BOT_TOKEN not found", file=sys.stderr)
         return False
-    return _post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        {"chat_id": chat_id, "text": message},
-        {},
-    )
+    payload: dict = {"chat_id": chat_id, "text": message}
+    if thread_id:  # forum-topic thread
+        payload["message_thread_id"] = thread_id
+    return _post(f"https://api.telegram.org/bot{token}/sendMessage", payload, {})
 
 
 def main() -> int:
@@ -115,6 +115,8 @@ def main() -> int:
     parser.add_argument("--chat-id", help="Telegram chat ID (alias for --channel-id on telegram)")
     parser.add_argument("--thread-ts", default=None,
                         help="Slack thread timestamp for threaded replies")
+    parser.add_argument("--thread-id", default=None,
+                        help="Telegram forum message_thread_id — reply inside that topic")
     parser.add_argument("--message", required=True, help="Text to send")
     args = parser.parse_args()
 
@@ -131,7 +133,7 @@ def main() -> int:
     elif source == "discord":
         ok = send_discord(channel, message)
     elif source == "telegram":
-        ok = send_telegram(channel, message)
+        ok = send_telegram(channel, message, thread_id=args.thread_id)
     else:
         print(f"[task-progress] unknown source: {source}", file=sys.stderr)
         return 1

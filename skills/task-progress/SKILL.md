@@ -2,6 +2,21 @@
 
 Sends mid-task progress updates to the channel a task came from (Slack, Discord, or Telegram).
 
+## Two rules that must never be broken
+
+**1. Reply in the SAME place the task came from — in-thread if it came from a thread.**
+If the task originated inside a thread, your notification MUST go into that thread, not the
+main channel. Read the thread field from the task file and pass it:
+- **Slack:** if the task file has `thread_ts:`, you MUST pass `--thread-ts <value>`. Without it,
+  Slack posts to the top-level channel — the exact bug this avoids.
+- **Discord:** a thread is its own channel, so `channel_id:` already targets the thread — nothing extra needed.
+- **Telegram:** forum topics carry `message_thread_id:` → pass `--thread-id <value>` when present.
+
+**2. Exactly ONE acknowledgment — never duplicate.**
+This skill's `notify.py` call IS your "on it" message. Do NOT also send a separate Slack/Discord/
+Telegram message with the same (or similar) text — that double-pings the user. One notify.py call per
+checkpoint, and nothing else.
+
 ## Critical rule — notify BEFORE any work begins
 
 **Call notify.py as the FIRST action after reading a task — before transcription, web searches,
@@ -75,7 +90,13 @@ For research tasks, be specific about what you're doing:
   --message "Researching Trigify setup time now — back in a minute."
 ```
 
-For a Slack @mention (threaded reply), add `--thread-ts <ts>` to keep the update in-thread.
+**If the task file has `thread_ts:` (Slack), ALWAYS add `--thread-ts <ts>`** so the update lands in
+the thread the user wrote from — not the main channel:
+```bash
+python3 $CLAUDE_CONFIG_DIR/skills/task-progress/scripts/notify.py \
+  --source slack --channel-id D0B5L7X2TK2 --thread-ts 1780586204.198 \
+  --message "On it — looking into that now."
+```
 
 Mid-task checkpoint update:
 ```bash
@@ -87,13 +108,14 @@ python3 $CLAUDE_CONFIG_DIR/skills/task-progress/scripts/notify.py \
 
 ### Field mapping from task files
 
-| source    | field in task file  | CLI flag        |
-|-----------|---------------------|-----------------|
-| slack     | `channel_id:`       | `--channel-id`  |
-| discord   | `channel_id:`       | `--channel-id`  |
-| telegram  | `chat_id:`          | `--chat-id`     |
+| source    | channel field       | CLI flag        | thread field (if present)      | thread flag     |
+|-----------|---------------------|-----------------|--------------------------------|-----------------|
+| slack     | `channel_id:`       | `--channel-id`  | `thread_ts:`                   | `--thread-ts`   |
+| discord   | `channel_id:`       | `--channel-id`  | (thread = its own channel)     | —               |
+| telegram  | `chat_id:`          | `--chat-id`     | `message_thread_id:`           | `--thread-id`   |
 
-Optional for Slack @mentions: `reply_thread_ts:` → `--thread-ts`
+**Whenever the thread field is present in the task file, you MUST pass the thread flag.** Omitting it
+is what makes the "On it" land in the main channel instead of the user's thread.
 
 ## Supported channels
 
