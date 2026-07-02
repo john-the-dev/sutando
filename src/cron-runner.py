@@ -39,15 +39,18 @@ import time
 from pathlib import Path
 
 # --- workspace + host resolution (mirror the rest of the codebase) ----------
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "src"))
+# This file lives in src/, so its own directory IS the src/ dir — reach the
+# sanctioned loader without walking up from __file__ (that anti-pattern is
+# refused by scripts/lint-workspace-resolution.sh).
+SRC_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SRC_DIR))
 
 try:
     from workspace_default import resolve_workspace  # type: ignore
     WORKSPACE = Path(resolve_workspace())
 except Exception:
     # Defensive fallback for non-checkout installs — matches CLAUDE.md default.
-    WORKSPACE = REPO / "workspace"
+    WORKSPACE = SRC_DIR.parent / "workspace"
 
 
 def host_slug() -> str:
