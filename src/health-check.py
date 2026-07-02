@@ -351,6 +351,35 @@ def fix_screen_capture() -> str:
         f"restart attempted but port check says {after['status']} — see {log_path}")
 
 
+def fix_down_bridges(checks: list) -> list:
+    """Restart configured-but-not-running channel bridges.
+
+    A dead bridge reports status "warn" (optional channels don't page), which
+    keeps it out of `issues` — so main()'s fix loop never reaches it, and
+    owner DMs silently queue channel-side until someone notices (2026-07-02:
+    discord-bridge died at boot with nothing logged; --fix left it down and 8
+    DMs sat undelivered). The exact-detail match excludes every other bridge
+    warn (multiple PIDs, token invalid, stale log), each of which needs
+    different handling than a plain start.
+
+    Returns the list of bridge names restarted.
+    """
+    restarted = []
+    for c in checks:
+        if (
+            c["name"] in ("telegram-bridge", "discord-bridge")
+            and c["status"] == "warn"
+            and c.get("detail") == "configured but not running"
+        ):
+            log_path = WORKSPACE_DIR / "logs" / f"{c['name']}.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.Popen([sys.executable, str(REPO_DIR / "src" / f"{c['name']}.py")],
+                             stdout=open(str(log_path), "a"), stderr=subprocess.STDOUT,
+                             start_new_session=True)
+            restarted.append(c["name"])
+    return restarted
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -2306,6 +2335,13 @@ def main():
                    and "not running" in (c.get("detail") or "")), None)
         if sc:
             print(f"  screen-capture: {fix_screen_capture()}")
+
+    # Channel bridges have the same optional-component shape: "configured but
+    # not running" is warn-only, so the fix loop above can't reach a dead
+    # bridge (see fix_down_bridges for the incident that motivated this).
+    if do_fix:
+        for name in fix_down_bridges(checks):
+            print(f"  {name}: restarted (was not running)")
 
     # Emit task on the RESIDUAL failure set when --fix ran (per PR #640 v2
     # review). The no-fix path emits earlier, before --quiet / --json early
