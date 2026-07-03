@@ -685,6 +685,32 @@ def _should_notify_owner_on_seed(sender_id, owner_ids):
     owners = {str(o) for o in (owner_ids or [])}
     return bool(owners) and str(sender_id) not in owners
 
+def _has_sibling_bots(access_data, self_id):
+    """True iff this deployment declares sibling Sutando bots — other bots of
+    the same fleet sharing this guild — via a top-level `siblingBots` id list
+    in access.json.
+
+    Drives multi-bot-safe thread auto-seeding. In a fleet deployment several
+    Sutando bots watch one guild; before this gate, a single owner @-ping in a
+    thread made EVERY bot auto-seed that thread into its own access.json, post
+    its own "🌱 Auto-seeded" notice (pinging its own owner), and thereafter
+    treat every follow-up as a task — so N bots piled onto one PR (the
+    2026-07-02 #1823 collision). Gating the seed on "this bot is addressed"
+    only fires the seed for the bot that was actually pinged.
+
+    Absent/empty `siblingBots` → single-bot deployment → seed on ANY first
+    thread message (preserves the #1498 ep013 first-message-drop fix; the
+    common OSS single-bot install is never regressed). Self is removed so the
+    identical fleet-wide id list can be dropped into every bot's access.json.
+    """
+    try:
+        sibs = access_data.get("siblingBots")
+        if not isinstance(sibs, (list, tuple, set)):
+            return False  # missing or mis-typed (e.g. a bare string) → single-bot
+        return bool({str(s) for s in sibs} - {str(self_id)})
+    except Exception:
+        return False
+
 def _format_seed_notice(owner_id, author_mention, parent_label, thread_id_str):
     """Inline notice posted to a freshly auto-seeded thread. Pure (no I/O)."""
     return (
@@ -2295,7 +2321,7 @@ _poll_loops_started = False
 
 @client.event
 async def on_ready():
-    print(f"Discord bridge ready: {client.user}")
+    print(f"Discord bridge ready: {client.user}", flush=True)
     # #1147: auto-seed workspace `state/discord-config.json` from the legacy
     # access.json heuristic on first boot. Idempotent (no-op if file
     # exists). Emits a WARN to stderr if the seed had to fall back to
@@ -2542,7 +2568,19 @@ async def _handle_discord_message(message, force=False):
                 access_data = json.loads(ACCESS_FILE.read_text())
                 access_groups = access_data.setdefault('groups', {})
                 thread_id_str = str(message.channel.id)
-                if thread_id_str not in access_groups:
+                # Multi-bot-safe seed gate. In a fleet deployment (siblingBots
+                # declared), seed ONLY when THIS bot is the addressed one
+                # (direct @-mention or a sutando-role @) — otherwise every
+                # sibling bot seeds the same thread, posts its own 🌱 notice
+                # pinging its own owner (the seed storm), and then grabs every
+                # unaddressed follow-up (the 2026-07-02 #1823 pile-up). In a
+                # single-bot deployment (no siblingBots) seed on any first
+                # message, preserving the #1498 ep013 first-message-drop fix.
+                _seed_ok = (
+                    bot_mentioned or role_mentioned
+                    or not _has_sibling_bots(access_data, getattr(client.user, "id", None))
+                )
+                if thread_id_str not in access_groups and _seed_ok:
                     parent_id_str = str(message.channel.parent_id) if message.channel.parent_id else None
                     parent_cfg = access_groups.get(parent_id_str) if parent_id_str else None
                     if parent_cfg is True:
@@ -4244,6 +4282,48 @@ async def poll_proactive():
         await asyncio.sleep(3)
 
 
+# Sources whose results have NO delivery channel of their own — the ONLY
+# `task-` results poll_dm_fallback may forward to the owner's Discord DM.
+# Voice (and phone) results are delivered by voice-agent's task-bridge only
+# while that client is connected; when it's offline the result would be
+# silently lost, which is the entire reason this fallback exists. Every other
+# source — api/chat (agent-api), discord (poll_results), telegram, slack —
+# owns its own delivery path and must never be echoed here. This is an
+# allowlist, not a denylist: a newly-added source is non-eligible by default
+# and can never leak into DM unless deliberately added.
+DM_FALLBACK_SOURCES = {"voice", "phone"}
+
+
+def _task_source(task_id: str):
+    """Lowercased `source:` of a task file, or None when the file is
+    missing/unreadable or declares no source. Lets poll_dm_fallback decide
+    whether a `task-` result is DM-eligible (see DM_FALLBACK_SOURCES)."""
+    tf = find_task_file(TASKS_DIR, task_id)
+    if not tf:
+        processed = TASKS_DIR / "processed" / f"{task_id}.txt"
+        if processed.exists():
+            tf = processed
+    if not tf:
+        archived = sorted((TASKS_DIR / "archive").glob(f"*/{task_id}.txt"))
+        if archived:
+            tf = archived[-1]
+    if not tf:
+        return None
+    try:
+        for ln in tf.read_text(encoding="utf-8", errors="replace").splitlines():
+            if ln.startswith("source:"):
+                return ln.split(":", 1)[1].strip().lower() or None
+    except OSError:
+        return None
+    return None
+
+
+def _dm_fallback_eligible(task_id: str) -> bool:
+    """FAIL-CLOSED (#1854 follow-up): missing/unreadable source -> NOT
+    DM-eligible; a wrongly-skipped result still surfaces via retention."""
+    return _task_source(task_id) in DM_FALLBACK_SOURCES
+
+
 async def poll_dm_fallback():
     """Fallback path for task/question/briefing results that no other
     consumer is going to handle.
@@ -4273,6 +4353,17 @@ async def poll_dm_fallback():
                 # Skip anything Discord is already tracking for reply.
                 task_id = f.stem  # e.g. "task-1776286725412"
                 if task_id in pending_replies:
+                    continue
+                # Source gate: this fallback delivers ONLY channel-less voice/
+                # phone results (see DM_FALLBACK_SOURCES). A `task-` result from
+                # a source that owns its own delivery path (api/chat, discord,
+                # telegram, slack) is none of our business — skip it and leave
+                # it for its own consumer (+ the retention sweep) to drain. The
+                # other FALLBACK_PREFIXES (question-/briefing-/insight-/friction-)
+                # are cron/proactive artifacts with no channel, so they bypass
+                # this gate and stay eligible. FAIL-CLOSED: a missing/unreadable
+                # source is NOT eligible (see _dm_fallback_eligible).
+                if task_id.startswith("task-") and not _dm_fallback_eligible(task_id):
                     continue
                 # Grace window so voice-agent / telegram-bridge get first dibs.
                 try:
