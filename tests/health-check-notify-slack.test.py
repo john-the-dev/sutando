@@ -198,15 +198,22 @@ def case_i_token_read_prefers_channel_env() -> list[str]:
     first, then fall back to $REPO/.env.
 
     Redirects HOME (Path.home() honors $HOME on POSIX) and hc.REPO_DIR so the
-    real path-resolution code runs against temp files."""
+    real path-resolution code runs against temp files. claude_home_path()
+    prefers $CLAUDE_CONFIG_DIR (then $CLAUDE_HOME) over ~/.claude, and every
+    real Sutando install sets it — so those must be pinned to the temp dir
+    too, or the channel candidate reads the HOST's config dir and the case
+    fails on any machine whose repo .env carries a Slack token."""
     import os
     fails = []
     saved_home = os.environ.get("HOME")
+    saved_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    saved_claude_home = os.environ.pop("CLAUDE_HOME", None)
     saved_repo = hc.REPO_DIR
     saved_env_token = os.environ.pop("SLACK_BOT_TOKEN", None)  # force the file path
     try:
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as repo:
             os.environ["HOME"] = home
+            os.environ["CLAUDE_CONFIG_DIR"] = str(Path(home) / ".claude")
             hc.REPO_DIR = Path(repo)
             chan = Path(home) / ".claude" / "channels" / "slack"
             chan.mkdir(parents=True, exist_ok=True)
@@ -231,6 +238,12 @@ def case_i_token_read_prefers_channel_env() -> list[str]:
     finally:
         if saved_home is not None:
             os.environ["HOME"] = saved_home
+        if saved_config_dir is not None:
+            os.environ["CLAUDE_CONFIG_DIR"] = saved_config_dir
+        else:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        if saved_claude_home is not None:
+            os.environ["CLAUDE_HOME"] = saved_claude_home
         if saved_env_token is not None:
             os.environ["SLACK_BOT_TOKEN"] = saved_env_token
         hc.REPO_DIR = saved_repo
