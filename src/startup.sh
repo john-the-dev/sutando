@@ -666,7 +666,7 @@ fi
 # Serves the research webapp with the live (read-only) portfolio panel and keeps
 # its snapshot fresh via a background refresher daemon. No-op if not initialised.
 if [ -d "$REPO/skills/portfolio-research" ]; then
-  if [ ! -d "${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}/research/portfolio/webapp" ]; then
+  if [ ! -d "$WORKSPACE/research/portfolio/webapp" ]; then
     bash "$REPO/skills/portfolio-research/scripts/init-evergreen-webapp.sh" \
       > "$LOGS_DIR/portfolio-dashboard.log" 2>&1 || true
   fi
