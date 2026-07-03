@@ -2288,9 +2288,14 @@ def _recover_orphan_sending_files() -> int:
     return recovered
 
 
+# Guards the once-only startup of the long-lived poll loops below. `on_ready`
+# re-fires on every gateway reconnect, so without this the loops accumulate.
+_poll_loops_started = False
+
+
 @client.event
 async def on_ready():
-    print(f"Discord bridge ready: {client.user}")
+    print(f"Discord bridge ready: {client.user}", flush=True)
     # #1147: auto-seed workspace `state/discord-config.json` from the legacy
     # access.json heuristic on first boot. Idempotent (no-op if file
     # exists). Emits a WARN to stderr if the seed had to fall back to
@@ -2312,14 +2317,25 @@ async def on_ready():
     # does NOT replay `MESSAGE_CREATE` events that arrived during the
     # gap. See `_catchup_missed_dms` for the replay flow.
     client.loop.create_task(_catchup_missed_dms())
-    # Start polling loops
-    client.loop.create_task(poll_results())
-    client.loop.create_task(poll_progress())
-    client.loop.create_task(poll_approved())
-    client.loop.create_task(poll_proactive())
-    client.loop.create_task(poll_dm_fallback())
-    # Auto-mod LLM-judge flush timer (per-guild gate enforced inside flush)
-    client.loop.create_task(_mod_flush_timer_loop())
+    # Start polling loops EXACTLY ONCE. `on_ready` fires on every gateway
+    # reconnect (RESUME-expiry, network blip, Discord-side reconnect), not
+    # just first boot — so spawning these long-lived `while True` loops here
+    # unguarded leaks a new copy of each on every reconnect. With N reconnects
+    # there are N+1 `poll_progress` loops, each independently posting its own
+    # "⏳ working…" placeholder for the same task → many duplicate placeholders,
+    # growing the longer the bridge runs. (poll_results / poll_proactive / etc.
+    # duplicate the same way — latent duplicate-delivery risk.) The catch-up
+    # above intentionally runs per-reconnect; these singletons must not.
+    global _poll_loops_started
+    if not _poll_loops_started:
+        _poll_loops_started = True
+        client.loop.create_task(poll_results())
+        client.loop.create_task(poll_progress())
+        client.loop.create_task(poll_approved())
+        client.loop.create_task(poll_proactive())
+        client.loop.create_task(poll_dm_fallback())
+        # Auto-mod LLM-judge flush timer (per-guild gate enforced inside flush)
+        client.loop.create_task(_mod_flush_timer_loop())
 
 
 def _message_mentions_bot(message):
