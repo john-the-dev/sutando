@@ -102,6 +102,11 @@ _heartbeat_disabled = False
 _last_heartbeat_at = 0.0
 
 _TASK_FIELDS = ("id", "timestamp", "task", "source", "channel_id",
+                # Context enrichment (AG2 broker writer side): human room/sender
+                # names + reply reference. Serialized only when the relay sends
+                # them (absent for other sources); each newline-stripped by
+                # _one_line so a room/display name can't forge an extra line.
+                "room_name", "sender_name", "reply_to_event", "reply_to_me",
                 "source_message_id", "user_id", "priority")
 
 # Trust tier is a LOCAL decision (review 2026-06-13): the relay is outside
@@ -176,8 +181,48 @@ def _post_task_ack(tid: str) -> bool:
         return False
 
 
+_CORE_STEP_MAX = 500
+
+
+def _core_str(v) -> str | None:
+    """A core-status field → bounded non-empty str, or None. core-status.json is
+    written by another process and may be malformed; a non-string field must not
+    be forwarded (the broker calls .lower() on it)."""
+    if not isinstance(v, str):
+        return None
+    v = v.strip()
+    return v[:_CORE_STEP_MAX] if v else None
+
+
+def _read_core_status() -> tuple[str | None, str | None]:
+    """Read this node's core-status.json → (status, step) for the presence layer.
+    core-status is written by the proactive loop / task handlers (status =
+    running|idle, step = human 'what it's doing'). The broker derives the agent's
+    presence badge from it.
+
+    MUST NOT raise: this runs in the main loop BEFORE the /v1/tasks poll, so an
+    exception here would back the loop off and stall task delivery — a malformed
+    presence side-channel must never become a delivery blocker. So we guard the
+    JSON shape (a valid-JSON non-object would AttributeError on .get) and coerce
+    every field to a bounded str-or-None; any surprise → (None, None) and the
+    heartbeat still fires as a plain liveness ping."""
+    try:
+        with open(WS / "state" / "core-status.json") as f:
+            cs = json.load(f)
+        if not isinstance(cs, dict):
+            return (None, None)
+        status = _core_str(cs.get("status"))
+        step = _core_str(cs.get("step"))
+        # An idle status carries no meaningful step — send status only so the
+        # sweep reads 'available' rather than stale 'what it was last doing'.
+        return (status, None if status == "idle" else step)
+    except Exception:  # noqa: BLE001 — best-effort; never stall the main loop
+        return (None, None)
+
+
 def _post_heartbeat(inflight: set[str], force: bool = False) -> bool:
-    """Best-effort liveness ping for hosted relay dashboards."""
+    """Best-effort liveness + core-status ping. Liveness feeds hosted dashboards;
+    the status/step feed the broker's presence sweep (agent working/available/…)."""
     global _heartbeat_disabled, _last_heartbeat_at
     if _heartbeat_disabled:
         return False
@@ -185,15 +230,24 @@ def _post_heartbeat(inflight: set[str], force: bool = False) -> bool:
     if not force and now - _last_heartbeat_at < HEARTBEAT_INTERVAL:
         return False
     _last_heartbeat_at = now
+    _status, _step = _read_core_status()
     try:
-        _req("POST", "/v1/heartbeat", {
+        payload = {
             "client": "sutando-relay-client",
             "protocol_version": 1,
             "provider": PROVIDER,
             "tier": LOCAL_TIER,
             "inflight": len(inflight),
-            "capabilities": ["task-ack", "heartbeat", "result-skip-markers"],
-        }, timeout=10)
+            "capabilities": ["task-ack", "heartbeat", "result-skip-markers",
+                             "core-status"],
+        }
+        # Only include when present so a status-less node never clobbers the
+        # broker's last-known core-status (the broker only records on presence).
+        if _status is not None:
+            payload["status"] = _status
+        if _step is not None:
+            payload["step"] = _step
+        _req("POST", "/v1/heartbeat", payload, timeout=10)
         return True
     except urllib.error.HTTPError as e:
         if e.code in (404, 405):
@@ -222,6 +276,30 @@ def _write_task(task: dict) -> str | None:
     dest = TASKS_DIR / f"{tid}.txt"
     # Idempotent: don't re-write a task already queued, claimed, or archived.
     if dest.exists() or any(TASKS_DIR.glob(f"{tid}.claimed-*")):
+        return tid
+    # Relay redelivery of already-handled work: on reconnect the relay replays
+    # its unacked pool, including tasks this node long since processed (the
+    # 2026-06-30 and 2026-07-01 500-task floods). If the core already archived
+    # the task file, or the result was already delivered and archived, don't
+    # re-queue — drop a [no-send] result instead so the normal result drain
+    # re-acks it upstream and clears it from inflight.
+    _task_archive = TASKS_DIR / "archive"
+    task_archived = (
+        # legacy flat layout: tasks/archive/<taskId>.txt
+        (_task_archive / f"{tid}.txt").exists()
+        # active month-partitioned layout: tasks/archive/YYYY-MM/<taskId>.txt
+        # (see src/task-bridge.ts). Glob one level of month subdirs for this
+        # exact task id — cheap (one stat per month dir, not a full tree walk).
+        or next(_task_archive.glob(f"*/{tid}.txt"), None) is not None
+    )
+    if (task_archived
+            or (ARCHIVE_RESULTS_DIR / f"{tid}.txt").exists()
+            or next(ARCHIVE_RESULTS_DIR.glob(f"{tid}-[0-9]*.txt"), None)):
+        rfile = RESULTS_DIR / f"{tid}.txt"
+        if not rfile.exists():
+            RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+            rfile.write_text("[no-send] relay redelivery of already-handled task\n")
+        _log(f"dedup: {tid} already handled — not re-queued")
         return tid
     TASKS_DIR.mkdir(parents=True, exist_ok=True)
     lines = []

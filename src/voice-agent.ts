@@ -271,12 +271,33 @@ function getPendingToolCalls(toolName?: string) {
 // Meeting mode state — persists across Gemini reconnects
 // =============================================================================
 let meetingActive = false;
+// Third base mode (mirrors discord-voice PR #39: active ⊕ meeting ⊕ presenter,
+// mutually exclusive). Toggled via switch_mode("presenter"); previously the
+// prompt referenced a presenter_mode tool that only exists on installs with
+// the talk-highlight manifest skill — on installs without it the phrase went
+// to a nonexistent tool and presenter mode could never engage by voice.
+let presenterActive = false;
+// PR #1879 sentinel (notification mute): bridges + check-pending-questions
+// read <workspace>/state/presenter-mode.sentinel (ISO expiry inside). Voice
+// toggle syncs it so "presenter mode on" also mutes notifications.
+const PRESENTER_SENTINEL_MINUTES = 120;
+function syncPresenterSentinel() {
+	const sentinel = join(WORKSPACE_DIR, 'state', 'presenter-mode.sentinel');
+	try {
+		if (presenterActive) {
+			mkdirSync(join(WORKSPACE_DIR, 'state'), { recursive: true });
+			const expire = new Date(Date.now() + PRESENTER_SENTINEL_MINUTES * 60_000);
+			writeFileSync(sentinel, expire.toISOString().replace(/\.\d{3}Z$/, 'Z') + '\n');
+		} else {
+			unlinkSync(sentinel);
+		}
+	} catch {}
+}
 // Sentinel for the 3-mode indicator (menu-bar + web-badge read this).
-// Presenter mode is tracked separately by the iclr-highlight server on :7877.
 function writeVoiceModeSentinel() {
 	try {
 		mkdirSync(join(WORKSPACE_DIR, 'state'), { recursive: true });
-		writeFileSync(join(WORKSPACE_DIR, 'state', 'voice-mode.txt'), meetingActive ? 'meeting' : 'active');
+		writeFileSync(join(WORKSPACE_DIR, 'state', 'voice-mode.txt'), presenterActive ? 'presenter' : meetingActive ? 'meeting' : 'active');
 	} catch {}
 }
 
@@ -289,11 +310,14 @@ function applyModeRequest() {
 		const reqPath = join(WORKSPACE_DIR, 'state', 'voice-mode.request');
 		const req = readFileSync(reqPath, 'utf-8').trim().toLowerCase();
 		unlinkSync(reqPath);
+		const wantPresenter = req === 'presenter';
 		const want = req === 'meeting';
-		if (meetingActive === want) return; // no-op if already in that mode
+		if (meetingActive === want && presenterActive === wantPresenter) return; // no-op if already in that mode
 		meetingActive = want;
+		presenterActive = wantPresenter;
 		writeVoiceModeSentinel();
-		console.log(`${ts()} [Meeting] External request applied: mode=${want ? 'meeting' : 'active'}`);
+		syncPresenterSentinel();
+		console.log(`${ts()} [Meeting] External request applied: mode=${wantPresenter ? 'presenter' : want ? 'meeting' : 'active'}`);
 	} catch {
 		// no request file or delete failed — both are fine (silent poll)
 	}
@@ -325,17 +349,20 @@ writeVoiceModeSentinel();
 const switchModeTool: ToolDefinition = {
 	name: 'switch_mode',
 	description:
-		'Switch between active mode and meeting mode. ' +
+		'Switch between active, meeting, and presenter mode (mutually exclusive). ' +
 		'Call switch_mode("meeting") when user says "take notes", "be silent", "meeting mode", "passive mode", or joins a meeting. ' +
-		'Call switch_mode("active") when user says "I need you", "come back", "active mode", or the meeting ends. ' +
+		'Call switch_mode("presenter") when user says "presenter mode on", "going live", "starting the talk", "the talk starts", or "I am on stage". ' +
+		'Call switch_mode("active") when user says "I need you", "come back", "active mode", "presenter mode off", "talk is done", or the meeting ends. ' +
 		'In meeting mode: listen to everything and track discussion internally, but produce ZERO audio output and do NOT call any other tools — unless explicitly addressed by name ("Sutando" or "hey Sutando").',
 	parameters: z.object({
-		mode: z.enum(['active', 'meeting']).describe('"meeting" = silent note-taker, "active" = normal assistant'),
+		mode: z.enum(['active', 'meeting', 'presenter']).describe('"meeting" = silent note-taker, "presenter" = on-stage co-presenter (mutes notifications), "active" = normal assistant'),
 	}),
 	execution: 'inline',
 	async execute(args) {
-		const { mode } = args as { mode: 'active' | 'meeting' };
+		const { mode } = args as { mode: 'active' | 'meeting' | 'presenter' };
 		meetingActive = mode === 'meeting';
+		presenterActive = mode === 'presenter';
+		syncPresenterSentinel();
 		// Sync the on-disk sentinel so menu-bar consumers (Sutando.app
 		// pollVoiceMode + web-client /voice-mode endpoint) reflect the
 		// switch immediately. Without this, voice-triggered switch_mode
@@ -346,6 +373,9 @@ const switchModeTool: ToolDefinition = {
 		console.log(`${ts()} [Meeting] Mode switched to: ${mode}`);
 		if (mode === 'meeting') {
 			return { status: 'meeting_mode', instruction: 'You are now in meeting mode. Listen and track the discussion internally. Produce ZERO audio output unless someone says "Sutando." The ONLY tool you may call unprompted is save_meeting_note — call it every 5-10 minutes to capture key decisions, action items, and discussion points. When you exit meeting mode, call save_meeting_note with type "summary" for a final recap. Do not call work or any other tools unless explicitly addressed.' };
+		}
+		if (mode === 'presenter') {
+			return { status: 'presenter_mode', say: 'Presenter mode on — notifications muted. Break a leg.', instruction: 'You are now in presenter mode (on-stage co-presenter). Notifications are muted for the audience. Follow the CO-PRESENTER protocol from your context for slide cues. Exit ONLY when the user says "presenter mode off", "talk is done", or "active mode" — then call switch_mode("active").' };
 		}
 		return { status: 'active_mode', instruction: 'Back to active mode. You can speak and use all tools normally.' };
 	},
@@ -507,7 +537,7 @@ let voiceSessionRef: VoiceSession | null = null;
 // resolver function.
 import { resolveCurrentMode as resolveCurrentModeImpl, type ModeState } from './voice-mode-resolver.js';
 function resolveCurrentMode(): ModeState {
-	return resolveCurrentModeImpl({ meetingActive });
+	return resolveCurrentModeImpl({ meetingActive, presenterActive });
 }
 
 const mainAgentTools: ToolDefinition[] = [workTool, getTaskStatus, switchModeTool, saveMeetingNoteTool, ...inlineTools];
@@ -603,45 +633,59 @@ const mainAgent: MainAgent = {
 		'Named after Stands from JoJo\'s Bizarre Adventure — a personal spirit that fights for you.',
 		'Every Sutando evolves differently based on what its user needs. You earned your name and identity.',
 		(() => { try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); return si.name ? `Your Stand name is ${si.name}. Origin: ${si.nameOrigin || 'earned through use'}. When asked your name or who you are, say "I\'m Sutando — ${si.name}."` : ''; } catch { return ''; } })(),
-		// Optional context file — for presentations, meeting prep, etc. (gitignored)
-		// Reads $SUTANDO_MEMORY_DIR/voice-contexts/<active>.txt where <active> is
-		// the trimmed contents of $SUTANDO_MEMORY_DIR/voice-contexts/active
-		// (legacy $SUTANDO_PRIVATE_DIR honored via memoryDirEnv()).
-		// Falls back to public-repo voice-context.txt when the env var is unset
-		// or the pointer/file is missing. Switcher tool: set_voice_context(name)
-		// from skills/personal-voice-context/ writes the pointer.
+		// Optional context file — a per-talk script for presentations, meeting prep,
+		// teaching, etc. (gitignored). Voice contexts are NOT memory, so they no
+		// longer live under $SUTANDO_MEMORY_DIR — only core memory does (Chi
+		// 2026-06-29: "only memories should live there"). New canonical layout:
+		//   content (fleet-shared): <workspace>/voice-contexts/<name>.txt
+		//   active pointer (per-host): <workspace>/hosts/<host>/voice-context-active
+		// The memory-dir location ($SUTANDO_MEMORY_DIR/voice-contexts/) is kept as
+		// a READ-ONLY legacy fallback during the transition (~30 days), so existing
+		// installs keep loading until writers (set_voice_context, deep-research-qa)
+		// migrate. Public-repo voice-context.txt is the final fallback. Switcher:
+		// set_voice_context(name) from skills/personal-voice-context/.
 		(() => {
-			// Log which voice-context file was loaded so the operator can see at
-			// a glance whether the dynamic loader picked up the memory dir or
-			// fell through to the public fallback. Silent loads are hard to
-			// debug — Apr 29 spent 30+ minutes diff'ing files because the load
-			// path was opaque.
-			try {
-				const privateRoot = memoryDirEnv();
-				if (privateRoot) {
-					const root = privateRoot.replace(/^~/, process.env.HOME || '');
-					const pointerPath = join(root, 'voice-contexts', 'active');
-					const name = readFileSync(pointerPath, 'utf-8').trim();
-					// Whitelist the pointer content to a safe basename. Reject any
-					// path-like input — `../../foo` could otherwise escape the
-					// voice-contexts/ dir via join() and load arbitrary `.txt`
-					// content into the system prompt.
-					if (name && /^[A-Za-z0-9._-]+$/.test(name)) {
-						const ctxPath = join(root, 'voice-contexts', `${name}.txt`);
+			const SAFE = /^[A-Za-z0-9._-]+$/;
+			const memRoot = (() => {
+				const m = memoryDirEnv();
+				return m ? m.replace(/^~/, process.env.HOME || '') : '';
+			})();
+			// Resolve the active-context NAME: per-host workspace pointer (canonical,
+			// via personalPath which probes <ws>/hosts/<host>/ first), then the legacy
+			// SHARED memory-dir pointer as a transition fallback.
+			const pointerCandidates = [personalPath('voice-context-active')];
+			if (memRoot) pointerCandidates.push(join(memRoot, 'voice-contexts', 'active'));
+			let name = '';
+			for (const p of pointerCandidates) {
+				try {
+					const n = readFileSync(p, 'utf-8').trim();
+					if (n) { name = n; break; }
+				} catch {}
+			}
+			// Whitelist the pointer content to a safe basename. Reject any path-like
+			// input — `../../foo` could otherwise escape the voice-contexts/ dir via
+			// join() and load arbitrary `.txt` content into the system prompt.
+			if (name && SAFE.test(name)) {
+				// Resolve CONTENT: fleet-shared workspace dir (canonical), then the
+				// legacy memory-dir as a read-only fallback.
+				const contentCandidates = [join(WORKSPACE_DIR, 'voice-contexts', `${name}.txt`)];
+				if (memRoot) contentCandidates.push(join(memRoot, 'voice-contexts', `${name}.txt`));
+				for (const ctxPath of contentCandidates) {
+					try {
 						const content = readFileSync(ctxPath, 'utf-8');
 						const byteLen = Buffer.byteLength(content, 'utf-8');
 						console.log(`${ts()} [voice-context] loaded ${content.length} chars / ${byteLen} bytes from ${ctxPath}`);
 						return content;
-					}
+					} catch {}
 				}
-			} catch {}
+			}
 			try {
 				const content = readFileSync('voice-context.txt', 'utf-8');
 				const byteLen = Buffer.byteLength(content, 'utf-8');
 				console.log(`${ts()} [voice-context] loaded ${content.length} chars / ${byteLen} bytes from voice-context.txt (fallback)`);
 				return content;
 			} catch {
-				console.log(`${ts()} [voice-context] no context loaded (no env, no pointer, no fallback file)`);
+				console.log(`${ts()} [voice-context] no context loaded (no pointer, no fallback file)`);
 				return '';
 			}
 		})(),
@@ -706,7 +750,7 @@ const mainAgent: MainAgent = {
 			? '⚠️ MEETING MODE IS CURRENTLY ACTIVE. You are an invisible note-taker. Listen to all audio and track: speakers, topics, decisions, action items. Produce ZERO audio output unless someone says "Sutando" or "hey Sutando." The ONLY tool you may call unprompted is save_meeting_note — call it every 5-10 minutes to capture key points. Do NOT call work or other tools unless explicitly addressed. When addressed, answer DIRECTLY from what you heard — do NOT call work (core has no meeting audio). "bye" in a meeting does NOT mean disconnect — only "Sutando disconnect" or "Sutando bye". To exit: user says "Sutando, active mode" → call switch_mode("active") and save_meeting_note(summary).'
 			: '- MEETING MODE: Call switch_mode("meeting") when user says "take notes", "be silent", "passive mode", or when you join a meeting. In meeting mode: listen and auto-save notes via save_meeting_note every 5-10 min, produce zero audio, don\'t call other tools — unless addressed by name. Call switch_mode("active") to resume.'
 		)(),
-		'- PRESENTER MODE: Call presenter_mode("on") when user says "presenter mode on", "going live", "starting the talk", "the talk starts", or "I am on stage". Call presenter_mode("off") when user says "presenter mode off", "talk is done", "stop presenting", or "done presenting". Do NOT route these phrases to work — they are direct tool triggers. presenter_mode("on") returns a "say" field; speak it verbatim as your FIRST utterance.',
+		'- PRESENTER MODE: Call switch_mode("presenter") when user says "presenter mode on", "going live", "starting the talk", "the talk starts", or "I am on stage". Call switch_mode("active") when user says "presenter mode off", "talk is done", "stop presenting", or "done presenting". Do NOT route these phrases to work — they are direct tool triggers. switch_mode("presenter") returns a "say" field; speak it verbatim as your FIRST utterance.',
 		'- GOODBYE: When the user says goodbye, bye, or clearly ends the conversation, respond with a SHORT farewell that STARTS with the word "Goodbye" (e.g. "Goodbye! Talk to you later."). Keep it under one sentence. The session will close automatically. Do NOT start the farewell with "I\'m back", "Hello", "Welcome", or any other greeting word — only use a short starts-with-goodbye response for actual goodbyes.',
 		'- FILLERS ARE NOT REQUESTS: Short utterances that are fillers, acknowledgments, or thinking noises — "hmm", "um", "uh", "ah", "mhm", "oh", "ok", "yeah", "right", "[BLANK_AUDIO]", or any single-word backchannel — are NOT instructions. Do NOT call work, do NOT say "queued up" or "working on it", do NOT narrate. Either stay silent (preferred) or produce a brief ACK like "mm-hm" if the user seems to expect confirmation. Only act when the user issues a clear directive or question.',
 		'- LOW-CONFIDENCE WAKE-WORD / NO REQUEST: If you are NOT fully confident you heard your name (noisy audio, ambient speech that might just sound like "Sutando"), OR you heard your name clearly but the utterance is JUST a presence check with no actual ask ("are you there?", "hello?", standalone "Sutando", "hey Sutando"), respond with ONE short syllable — "mm?" or "yes?" — NOT a multi-sentence greeting. Do NOT say "Hey, I\'m right here. What can I do for you?" or any variation of "I\'m here, what\'s up". Save the full greeting for cases where the user clearly addressed you AND attached a real request or question. A wrong short ack is cheap; a wrong long greeting is annoying.',
