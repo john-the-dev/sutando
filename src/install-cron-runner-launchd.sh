@@ -132,6 +132,44 @@ case "$cmd" in
         bootout_if_loaded
         launchctl bootstrap "$DOMAIN" "$DEST"
         echo "  Loaded via $SERVICE"
+
+        # Post-install self-test: prove one launchd-spawned tick can WRITE the
+        # workspace. A launchd agent touching a workspace under ~/Documents
+        # needs the python binary to hold a Documents/Full Disk Access TCC
+        # grant — without it the job looks healthy while every workspace write
+        # EPERMs silently, which is exactly the silent failure this runner
+        # exists to prevent. cron-runner.py persists its state file on every
+        # tick whenever crons.json has entries, so a forced tick + fresh state
+        # write is an end-to-end proof.
+        H="$(hostname | sed 's/\..*//')"
+        CRONS_FILE="$WORKSPACE/hosts/$H/crons.json"
+        STATE_FILE="$WORKSPACE/state/cron-runner-state.json"
+        if ! "$PYTHON_BIN" -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])) else 1)' "$CRONS_FILE" 2>/dev/null; then
+            echo "  Self-test: skipped — $CRONS_FILE is missing or empty (state file"
+            echo "    is only written when crons.json has entries). Re-run --status after"
+            echo "    adding entries and check $STATE_FILE appears."
+        else
+            before_epoch="$(date +%s)"
+            launchctl kickstart "$SERVICE" 2>/dev/null || true
+            st_ok=""
+            for _ in $(seq 1 20); do
+                if [ -f "$STATE_FILE" ]; then
+                    st_m="$(stat -f %m "$STATE_FILE" 2>/dev/null || echo 0)"
+                    if [ "$st_m" -ge "$before_epoch" ]; then st_ok=1; break; fi
+                fi
+                sleep 0.5
+            done
+            if [ -n "$st_ok" ]; then
+                echo "  Self-test: OK — forced tick wrote $STATE_FILE (workspace writable from launchd)."
+            else
+                echo "  Self-test: FAILED — no fresh $STATE_FILE within 10s of a forced tick."
+                echo "    The job is loaded but its workspace writes are likely blocked by macOS TCC"
+                echo "    (workspace under ~/Documents needs a grant for the python binary)."
+                echo "    Grant: System Settings → Privacy & Security → Full Disk Access → add:"
+                echo "      $PYTHON_BIN"
+                echo "    then verify with: bash $0 --status"
+            fi
+        fi
         echo
         echo "Sutando — cron-runner is now running every 60s."
         echo "  • Emits tasks/task-cron-*.txt for each due \"launchd\": true crons.json entry"
