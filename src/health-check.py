@@ -373,9 +373,12 @@ def fix_down_bridges(checks: list) -> list:
         ):
             log_path = WORKSPACE_DIR / "logs" / f"{c['name']}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.Popen([sys.executable, str(REPO_DIR / "src" / f"{c['name']}.py")],
-                             stdout=open(str(log_path), "a"), stderr=subprocess.STDOUT,
-                             start_new_session=True)
+            # `with` closes the parent's handle after Popen; the child holds
+            # its own dup of the fd, so the log stays writable.
+            with open(str(log_path), "a") as log_f:
+                subprocess.Popen([sys.executable, str(REPO_DIR / "src" / f"{c['name']}.py")],
+                                 stdout=log_f, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
             restarted.append(c["name"])
     return restarted
 
@@ -1222,6 +1225,10 @@ def run_all_checks() -> list[dict]:
             pids = []
 
         if not pids:
+            # This exact detail string is a contract: fix_down_bridges()
+            # matches it verbatim to pick restart candidates (and the
+            # health-check-fix-down-bridges test locks it). Change both
+            # together or --fix goes blind to dead bridges again.
             checks.append({"name": name, "status": "warn", "detail": "configured but not running"})
             continue
 
@@ -2341,7 +2348,10 @@ def main():
     # bridge (see fix_down_bridges for the incident that motivated this).
     if do_fix:
         for name in fix_down_bridges(checks):
-            print(f"  {name}: restarted (was not running)")
+            # "attempted", not "restarted": bridges boot slowly, so an in-run
+            # liveness recheck is unreliable — the next health run's verdict
+            # is the source of truth.
+            print(f"  {name}: restart attempted (was not running)")
 
     # Emit task on the RESIDUAL failure set when --fix ran (per PR #640 v2
     # review). The no-fix path emits earlier, before --quiet / --json early
