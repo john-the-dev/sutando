@@ -21,7 +21,7 @@ def load_agent_api():
 class TestAgentApiCoreLimit(unittest.TestCase):
     def test_detects_session_limit_reset_text(self):
         mod = load_agent_api()
-        pane = "You've hit your session limit \u00b7 resets 9:50am (America/Los_Angeles)\n"
+        pane = "You've hit your session limit · resets 9:50am (America/Los_Angeles)\n"
         state = mod.detect_core_session_limit(pane)
 
         self.assertTrue(state["limited"])
@@ -31,6 +31,27 @@ class TestAgentApiCoreLimit(unittest.TestCase):
     def test_no_limit_text_is_not_limited(self):
         mod = load_agent_api()
         self.assertEqual(mod.detect_core_session_limit("❯ "), {"limited": False})
+
+    def test_stale_scrollback_not_reported_as_limited(self):
+        """Limit text in scrollback followed by a fresh REPL prompt = session reset; not limited."""
+        mod = load_agent_api()
+        pane = (
+            "You’ve hit your session limit · resets 9:50am (America/Los_Angeles)\n"
+            "some output\n"
+            "❯ continuing work after reset\n"
+        )
+        self.assertEqual(mod.detect_core_session_limit(pane), {"limited": False})
+
+    def test_limit_with_no_subsequent_prompt_is_still_limited(self):
+        """Limit text with no REPL prompt after it = genuinely limited."""
+        mod = load_agent_api()
+        pane = (
+            "❯ previous session activity\n"
+            "You’ve hit your session limit · resets 10:00am (America/Los_Angeles)\n"
+        )
+        state = mod.detect_core_session_limit(pane)
+        self.assertTrue(state["limited"])
+        self.assertEqual(state["reset"], "10:00am (America/Los_Angeles)")
 
 
 if __name__ == "__main__":

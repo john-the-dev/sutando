@@ -119,6 +119,8 @@ task_history = {}
 voice_desired_state = "disconnected"
 
 SESSION_LIMIT_RE = re.compile(r"You(?:'|\u2019)ve hit your session limit\s*(?:\u00b7|-)\s*resets\s+([^\r\n]+)", re.IGNORECASE)
+# REPL prompt line \u2014 its presence after the limit text means the limit has reset.
+_PROMPT_RE = re.compile(r"^\u276f\s", re.MULTILINE)
 
 
 def detect_core_session_limit(capture_text=None) -> dict:
@@ -132,9 +134,24 @@ def detect_core_session_limit(capture_text=None) -> dict:
             text = subprocess.run(cmd, capture_output=True, text=True, timeout=0.75).stdout
         except Exception:
             text = ""
-    match = SESSION_LIMIT_RE.search(text or "")
-    if not match:
+
+    lines = (text or "").splitlines()
+    limit_pos = -1
+    prompt_pos = -1
+    for i, line in enumerate(lines):
+        if SESSION_LIMIT_RE.search(line):
+            limit_pos = i
+        if _PROMPT_RE.match(line):
+            prompt_pos = i
+
+    if limit_pos < 0:
         return {"limited": False}
+    # A fresh REPL prompt appearing after the limit text means the session
+    # has already reset \u2014 the scrollback is stale.
+    if prompt_pos > limit_pos:
+        return {"limited": False}
+
+    match = SESSION_LIMIT_RE.search(lines[limit_pos])
     reset = match.group(1).strip().rstrip(".")
     message = f"Claude session limit reached; resets {reset}"
     return {"limited": True, "reset": reset, "message": message}
