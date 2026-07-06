@@ -104,6 +104,12 @@ jobs:
       - name: Run shell standalone tests
         run: |
           failed=0
+          # Load the known-failures allowlist (suites that fail on ubuntu-latest
+          # due to macOS-specific tooling or timing). Allowlisted suites still run
+          # and their output is printed, but a failure does NOT set failed=1.
+          # New regressions in the other suites still fail CI immediately.
+          # Burn this list to zero: https://github.com/sonichi/sutando/issues/1934
+          known_failures_file="tests/shell-ci-known-failures.txt"
           while IFS= read -r f; do
             echo "→ $f"
             # `if ! assignment=$(...)` exempts the command from `bash -e` (GitHub's
@@ -121,7 +127,12 @@ jobs:
             if ! output=$(timeout -k 5 120 bash "$f" 2>&1); then
               echo "✖ shell test failed: $f"
               echo "$output"
-              failed=1
+              # Only gate CI if this suite is not in the known-failures allowlist.
+              if ! grep -qxF "$f" "$known_failures_file" 2>/dev/null; then
+                failed=1
+              else
+                echo "  (known failure — not gating CI; see $known_failures_file)"
+              fi
             else
               echo "$output" | grep -E 'FAIL|^Summary' || true
             fi
