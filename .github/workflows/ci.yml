@@ -106,12 +106,16 @@ jobs:
           failed=0
           while IFS= read -r f; do
             echo "→ $f"
-            output=$(bash "$f" 2>&1)
-            rc=$?
-            echo "$output" | grep -E 'FAIL|^Summary' || true
-            if [ $rc -ne 0 ]; then
+            # `if ! assignment=$(...)` exempts the command from `bash -e` (GitHub's
+            # default for run: steps) while still capturing output + status. A bare
+            # `output=$(bash "$f")` would abort the whole step on the first failing
+            # suite — losing this step's diagnostics and masking every later suite.
+            if ! output=$(bash "$f" 2>&1); then
+              echo "✖ shell test failed: $f"
               echo "$output"
               failed=1
+            else
+              echo "$output" | grep -E 'FAIL|^Summary' || true
             fi
           done < <(find tests -name '*.test.sh' -not -path '*/node_modules/*' | sort)
           exit "$failed"
