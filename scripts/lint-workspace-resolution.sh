@@ -43,9 +43,16 @@ mode="${1:-all}"  # all | --diff
 
 # Patterns that signal direct workspace resolution.
 # Each pattern is a single ERE alternation we feed grep -E.
-# Note: PATTERN_ENV covers both JS (process.env.SUTANDO_WORKSPACE,
-# process.env['SUTANDO_WORKSPACE']) and Python/shell equivalents.
-PATTERN_ENV='(process\.env|process\.env\[)["'\'']?SUTANDO_WORKSPACE|os\.environ(\.get)?\(["'\'']SUTANDO_WORKSPACE|os\.getenv\(["'\'']SUTANDO_WORKSPACE'
+# PATTERN_ENV covers every JS + Python access form:
+#   JS:     process.env.SUTANDO_WORKSPACE          (dot)
+#           process.env['SUTANDO_WORKSPACE']       (bracket, either quote)
+#   Python: os.environ["SUTANDO_WORKSPACE"]        (subscript, either quote)
+#           os.environ.get("SUTANDO_WORKSPACE")
+#           os.getenv("SUTANDO_WORKSPACE")
+# (The pre-#1824 matcher only caught the JS bracket + Python call forms —
+# the common dot/subscript forms passed clean. Self-test:
+# tests/lint-workspace-resolution.test.sh keeps one offender per form.)
+PATTERN_ENV='process\.env(\.|\[["'\'']?)SUTANDO_WORKSPACE|os\.environ(\.get\(|\[)["'\'']SUTANDO_WORKSPACE|os\.getenv\(["'\'']SUTANDO_WORKSPACE'
 PATTERN_HARDCODED_HOME='\.sutando/workspace'
 PATTERN_REPO_WALK='Path\(__file__\)\.resolve\(\)\.parent\.parent'
 
@@ -73,7 +80,7 @@ PATTERN_DOC_ENV_PATH='\$SUTANDO_WORKSPACE/'
 # SUTANDO_RESOLVED_WORKSPACE (set by launch.sh) as the primary path and
 # keeps $SUTANDO_WORKSPACE + ~/.sutando/workspace as documented fallbacks.
 # See PR #1823.
-ALLOWED='^(src/sutando_config\.(py|ts)|src/workspace_default\.(py|ts)|src/util_paths\.py|src/startup\.sh|src/migration_safety_helpers\.sh|scripts/lint-workspace-resolution\.sh|scripts/install-git-hooks\.sh|scripts/sutando-config\.sh|scripts/sync-memory\.sh|scripts/sutando-migrate\.sh|scripts/sweep-stranded-claims\.sh|tests/[^/]+\.(test\.)?(py|ts|sh|js)|skills/overlay-apps/app/(control-server|main)\.js)$'
+ALLOWED='^(src/sutando_config\.(py|ts)|src/workspace_default\.(py|ts)|src/util_paths\.py|src/startup\.sh|src/migration_safety_helpers\.sh|scripts/lint-workspace-resolution\.sh|scripts/install-git-hooks\.sh|scripts/sutando-config\.sh|scripts/sync-memory\.sh|scripts/sutando-migrate\.sh|scripts/sweep-stranded-claims\.sh|tests/([^/]+/)*[^/]+\.(test\.)?(py|ts|sh|js)|skills/overlay-apps/app/(control-server|main)\.js)$'
 
 # Allowed .md files — legitimate uses of `$SUTANDO_WORKSPACE/path` in
 # prose, e.g. the workspace contract docs that DESCRIBE the legacy form
