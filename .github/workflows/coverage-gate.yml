@@ -1,0 +1,31 @@
+name: Coverage Gate
+
+# Enforce >= 95% unit-test coverage on changed Python lines (diff coverage).
+# The whole-tree number is printed informationally in the job log; the gate
+# itself only judges lines added/changed by the PR, so pre-existing legacy
+# coverage debt never reds an unrelated PR. See docs/testing-coverage.md.
+
+on:
+  pull_request:
+    branches: [main, staging-workspace-revamp]
+
+jobs:
+  coverage-gate:
+    name: diff coverage >= 95% (python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # diff-cover needs the base branch locally to compute changed lines.
+          fetch-depth: 0
+
+      - name: Install coverage tooling + test deps
+        run: python3 -m pip install coverage diff-cover 'detect-secrets>=1.5.0'
+
+      - name: Run coverage gate
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: bash scripts/coverage-gate.sh
