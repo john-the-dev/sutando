@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Regression test for POST /answer accepting free-form pending questions.
+"""Regression tests for free-form pending questions in agent-api.
 
-The web UI lists free-form `##` sections from pending-questions.md as Q1/Q2...
-POST /answer must accept that same set. Previously it skipped sections without
-**Status:**/**Options:** markers, so answering a visible Q1 returned 404.
+GET /tasks/active must list free-form ## sections from pending-questions.md
+and skip [RESOLVED] sections. POST /answer must accept that same set;
+previously it skipped sections without Status:/Options: markers (404 on a
+visible question). Both paths are tested against a live ThreadingHTTPServer.
 """
 from __future__ import annotations
 
@@ -99,8 +100,71 @@ class TestAgentApiAnswerFreeform(unittest.TestCase):
             urllib.request.urlopen(req, timeout=5)
         self.assertEqual(ctx.exception.code, 404)
 
+    def get_tasks_active(self):
+        with urllib.request.urlopen(self.base + "/tasks/active", timeout=5) as r:
+            return json.loads(r.read().decode())
 
-if __name__ == "__main__":
+    def test_freeform_question_visible_in_tasks_active(self):
+        """Free-form ## section without Status:/Options: must appear in /tasks/active."""
+        pq = self.workspace / "pending-questions.md"
+        pq.write_text(
+            "# Pending Questions\n\n"
+            "## Should we migrate the DB now?\n\n"
+            "Context: the migration has been tested on staging.\n"
+        )
+        body = self.get_tasks_active()
+        self.assertEqual(len(body["questions"]), 1)
+        self.assertIn("Should we migrate", body["questions"][0]["text"])
+
+    def test_resolved_question_excluded_from_tasks_active(self):
+        """[RESOLVED ...] sections must not appear in /tasks/active."""
+        pq = self.workspace / "pending-questions.md"
+        pq.write_text(
+            "# Pending Questions\n\n"
+            "## [RESOLVED] Old decision\n\n"
+            "This was already answered.\n\n"
+            "## Open question\n\n"
+            "Still pending.\n"
+        )
+        body = self.get_tasks_active()
+        titles = [q["text"] for q in body["questions"]]
+        self.assertNotIn("[RESOLVED] Old decision", titles)
+        self.assertIn("Open question", titles)
+
+    def test_preamble_not_counted_as_question(self):
+        """Text before the first ## header must not generate a question entry."""
+        pq = self.workspace / "pending-questions.md"
+        pq.write_text(
+            "# Pending Questions\n\nSome preamble text.\n\n"
+            "## Real question\n\nActual question body.\n"
+        )
+        body = self.get_tasks_active()
+        self.assertEqual(len(body["questions"]), 1)
+        self.assertEqual(body["questions"][0]["text"], "Real question")
+
+    def test_concurrent_requests_do_not_block(self):
+        """Two simultaneous GET /tasks/active requests must both complete (ThreadingHTTPServer)."""
+        results = []
+        errors = []
+
+        def fetch():
+            try:
+                with urllib.request.urlopen(self.base + "/tasks/active", timeout=5) as r:
+                    results.append(r.status)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=fetch) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=6)
+
+        self.assertEqual(errors, [], f"Concurrent requests failed: {errors}")
+        self.assertEqual(results, [200, 200])
+
+
+if __name__  == "__main__":
     suite = unittest.TestLoader().loadTestsFromTestCase(TestAgentApiAnswerFreeform)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)
