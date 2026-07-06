@@ -34,6 +34,22 @@ coverage (informational)") so the trend is visible. Once it approaches the
 target, flip the gate to a global floor by adding a
 `python3 -m coverage report --fail-under=95` step.
 
+## Where the numbers show up
+
+Every gate run posts a **sticky PR comment** (one comment, updated per push
+— marker `<!-- coverage-gate-comment -->`) with the diff-coverage verdict,
+the whole-tree percentage, and the per-file uncovered-lines table on
+failure. The same content lands in the Actions job summary.
+
+Mechanically this is two workflows: the gate (`coverage-gate.yml`) runs on
+`pull_request` — where fork PRs get a read-only token — and uploads
+`coverage-summary.md` as an artifact; `coverage-comment.yml` fires on
+`workflow_run` in the base-repo context with `pull-requests: write` and
+posts it. It never checks out PR code, which is what keeps the write token
+safe. Note `workflow_run` executes the default branch's copy of the file,
+so the comment half activates once merged to main; until then the numbers
+are in the job summary.
+
 ## What counts / doesn't count
 
 - **Scope**: `src/`, `scripts/`, `skills/` Python (see `.coveragerc`).

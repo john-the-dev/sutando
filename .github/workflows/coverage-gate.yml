@@ -4,6 +4,12 @@ name: Coverage Gate
 # The whole-tree number is printed informationally in the job log; the gate
 # itself only judges lines added/changed by the PR, so pre-existing legacy
 # coverage debt never reds an unrelated PR. See docs/testing-coverage.md.
+#
+# The gate writes coverage-summary.md and uploads it as an artifact; the
+# companion workflow_run job (.github/workflows/coverage-comment.yml) posts
+# it as a sticky PR comment. Two-stage on purpose: fork PRs run here with a
+# read-only GITHUB_TOKEN, so the comment must be posted by a workflow that
+# runs in the base-repo context WITHOUT checking out PR code.
 
 on:
   pull_request:
@@ -29,3 +35,18 @@ jobs:
         env:
           BASE_REF: origin/${{ github.base_ref }}
         run: bash scripts/coverage-gate.sh
+
+      - name: Stamp PR number for the comment workflow
+        if: always()
+        run: echo "${{ github.event.pull_request.number }}" > pr-number.txt
+
+      - name: Upload summary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-summary
+          path: |
+            coverage-summary.md
+            pr-number.txt
+          if-no-files-found: ignore
+          retention-days: 3
