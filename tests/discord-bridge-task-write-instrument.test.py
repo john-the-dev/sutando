@@ -1,151 +1,142 @@
 #!/usr/bin/env python3
-"""Structural regression tests: discord-bridge task-write instrumentation (#1763).
+"""Behavioral regression tests for discord-bridge task-write instrumentation (#1763).
 
 PR #1763 wrapped the task_file.write_text() call in a try/except to make
-silent message drops diagnosable. Before the fix, an exception during the
-f-string build or write would silently lose the message with no log entry;
-every other early-return path already logs its reason.
-
-Post-fix behavior:
-  - SUCCESS: prints "[task-write] wrote <file> (@user, #chan, tier=…)"
-  - FAILURE: prints "[task-write] FAILED for @user in #chan (…): ExcType: msg"
-            then returns (bridge continues; the drop is now observable)
-
-Absence of BOTH lines in logs pinpoints a new/unmapped path; presence of
-FAILED pinpoints the write as the culprit. Purely diagnostic — no happy-path
-behavior change.
+silent message drops diagnosable. `_write_task_file` is the helper that
+encapsulates this logic; tested here by simulating real write failures.
 
 Run: python3 tests/discord-bridge-task-write-instrument.test.py
 Exit 0 on pass, 1 on fail.
 """
 from __future__ import annotations
 
+import importlib.util
+import os
 import sys
+import tempfile
+import types
 import unittest
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parent.parent
-SRC = (REPO / "src" / "discord-bridge.py").read_text()
 
 
-def _task_write_block() -> str:
-    """Return the source window covering the task-write try/except block."""
-    # Anchor on the instrumentation comment, which is stable and unique.
-    anchor = "early-return log pinpoints a new path"
-    start = SRC.find(anchor)
-    if start < 0:
-        # Fall back to the try: line just before task_file.write_text
-        start = SRC.rfind("try:\n        task_file.write_text(")
-    if start < 0:
-        return ""
-    return SRC[start : start + 1200]
+def _load_bridge():
+    """Load discord-bridge with a minimal discord stub (no live connection)."""
+    if "discord" not in sys.modules:
+        stub = types.ModuleType("discord")
+        stub.Intents = type("Intents", (), {
+            "default": staticmethod(lambda: type("I", (), {"message_content": False})()),
+        })
+        stub.Client = type("Client", (), {
+            "__init__": lambda self, **kw: None,
+            "event": staticmethod(lambda fn: fn),
+        })
+        stub.File = type("File", (), {})
+        stub.DMChannel = type("DMChannel", (), {})
+        stub.Object = lambda id: type("Object", (), {"id": id})()
+        stub.MessageType = type("MessageType", (), {"default": 0, "reply": 19})()
+        sys.modules["discord"] = stub
+
+    tmp = tempfile.mkdtemp(prefix="sutando-tw-test-")
+    os.environ.setdefault("DISCORD_BOT_TOKEN", "test-token-not-real")
+    os.environ["SUTANDO_WORKSPACE"] = tmp
+    os.environ["SUTANDO_TEST_MODE"] = "1"
+    (Path(tmp) / "state").mkdir(parents=True, exist_ok=True)
+    (Path(tmp) / "tasks").mkdir(parents=True, exist_ok=True)
+
+    spec = importlib.util.spec_from_file_location(
+        "discord_bridge", REPO / "src" / "discord-bridge.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod, tmp
 
 
-class TestDiscordTaskWriteInstrumentation(unittest.TestCase):
+bridge, _tmp = _load_bridge()
 
-    def setUp(self):
-        self._block = _task_write_block()
-        self.assertGreater(len(self._block), 0, "task-write try/except block not found in discord-bridge.py")
 
-    # ------------------------------------------------------------------
-    # try/except wraps the write
-    # ------------------------------------------------------------------
+class TestWriteTaskFile(unittest.TestCase):
+    """Behavioral tests for _write_task_file — the task-write instrumentation helper."""
 
-    def test_write_wrapped_in_try(self):
-        """task_file.write_text() must be inside a try block."""
-        self.assertIn(
-            "try:",
-            self._block,
-            "task_file.write_text must be wrapped in a try: block",
+    def _capture(self, fn, *args, **kwargs):
+        """Call fn, capture stdout, return (return_value, printed_text)."""
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            result = fn(*args, **kwargs)
+        return result, buf.getvalue()
+
+    def test_success_returns_true(self):
+        task_file = Path(_tmp) / "tasks" / "task-test-success.txt"
+        ok, _ = self._capture(
+            bridge._write_task_file, task_file, "content", "user1", "general", "owner", 111
         )
-        self.assertIn(
-            "task_file.write_text(",
-            self._block,
-            "task_file.write_text must be present in the instrumented block",
+        self.assertTrue(ok)
+
+    def test_success_prints_wrote_tag(self):
+        task_file = Path(_tmp) / "tasks" / "task-test-wrote.txt"
+        _, out = self._capture(
+            bridge._write_task_file, task_file, "content", "user1", "general", "owner", 112
         )
-
-    def test_except_catches_exception(self):
-        """The except clause must catch all exceptions (Exception) to log the failure."""
-        self.assertIn(
-            "except Exception as _tw_exc:",
-            self._block,
-            "except clause must catch Exception as _tw_exc for the FAILED log",
-        )
-
-    # ------------------------------------------------------------------
-    # FAILED log line
-    # ------------------------------------------------------------------
-
-    def test_failed_log_uses_task_write_tag(self):
-        """The failure log line must use the [task-write] FAILED tag for greppability."""
-        self.assertIn(
-            '"  [task-write] FAILED',
-            self._block,
-            "failure log must start with '[task-write] FAILED' for structured log search",
-        )
-
-    def test_failed_log_includes_username(self):
-        """The failure log must include the @username so the drop is attributable."""
-        self.assertIn(
-            "FAILED for @{username}",
-            self._block,
-            "failure log must include '@{username}' to identify the sender",
-        )
-
-    def test_failed_log_includes_exception_type(self):
-        """The failure log must include the exception type and message for debugging."""
-        self.assertIn(
-            "{type(_tw_exc).__name__}: {_tw_exc}",
-            self._block,
-            "failure log must include exception type and message for root-cause diagnosis",
-        )
-
-    def test_failed_path_returns_after_logging(self):
-        """After logging FAILED, the handler must return (bridge continues processing)."""
-        failed_pos = self._block.find('"  [task-write] FAILED')
-        return_pos = self._block.find("\n        return\n", failed_pos)
-        self.assertGreater(failed_pos, 0, "[task-write] FAILED not found")
-        self.assertGreater(
-            return_pos,
-            failed_pos,
-            "return must appear after the FAILED log so bridge continues on drop",
-        )
-
-    # ------------------------------------------------------------------
-    # SUCCESS log line
-    # ------------------------------------------------------------------
-
-    def test_success_log_uses_task_write_tag(self):
-        """The success log must use the [task-write] wrote tag."""
-        self.assertIn(
-            '"  [task-write] wrote',
-            self._block,
-            "success log must use '[task-write] wrote' tag for structured log search",
-        )
+        self.assertIn("[task-write] wrote", out)
 
     def test_success_log_includes_filename(self):
-        """The success log must include the task filename for cross-referencing."""
-        self.assertIn(
-            "{task_file.name}",
-            self._block,
-            "success log must include {task_file.name} to identify the written file",
+        task_file = Path(_tmp) / "tasks" / "task-test-filename.txt"
+        _, out = self._capture(
+            bridge._write_task_file, task_file, "content", "alice", "mychan", "owner", 113
         )
+        self.assertIn(task_file.name, out)
 
     def test_success_log_includes_tier(self):
-        """The success log must include the access tier for per-tier accountability."""
-        success_start = self._block.find('"  [task-write] wrote')
-        self.assertGreater(success_start, 0)
-        success_line = self._block[success_start : success_start + 200]
-        self.assertIn(
-            "tier={access_tier}",
-            success_line,
-            "success log must include 'tier={access_tier}' for owner-vs-team auditing",
+        task_file = Path(_tmp) / "tasks" / "task-test-tier.txt"
+        _, out = self._capture(
+            bridge._write_task_file, task_file, "content", "alice", "mychan", "team", 114
         )
+        self.assertIn("tier=team", out)
+
+    def test_failure_returns_false(self):
+        readonly = Path(_tmp) / "tasks" / "task-test-ro.txt"
+        with patch.object(Path, "write_text", side_effect=PermissionError("read-only")):
+            ok, _ = self._capture(
+                bridge._write_task_file, readonly, "content", "user1", "general", "owner", 200
+            )
+        self.assertFalse(ok)
+
+    def test_failure_prints_failed_tag(self):
+        p = Path(_tmp) / "tasks" / "task-test-fail-tag.txt"
+        with patch.object(Path, "write_text", side_effect=OSError("disk full")):
+            _, out = self._capture(
+                bridge._write_task_file, p, "content", "bob", "chan2", "owner", 201
+            )
+        self.assertIn("[task-write] FAILED", out)
+
+    def test_failure_log_includes_username(self):
+        p = Path(_tmp) / "tasks" / "task-test-fail-user.txt"
+        with patch.object(Path, "write_text", side_effect=OSError("disk full")):
+            _, out = self._capture(
+                bridge._write_task_file, p, "content", "charlie", "chan3", "owner", 202
+            )
+        self.assertIn("@charlie", out)
+
+    def test_failure_log_includes_exception_type(self):
+        p = Path(_tmp) / "tasks" / "task-test-fail-exc.txt"
+        with patch.object(Path, "write_text", side_effect=PermissionError("no write")):
+            _, out = self._capture(
+                bridge._write_task_file, p, "content", "dave", "chan4", "owner", 203
+            )
+        self.assertIn("PermissionError", out)
+
+    def test_failure_does_not_raise(self):
+        """A write exception must be caught — bridge must continue processing."""
+        p = Path(_tmp) / "tasks" / "task-test-no-raise.txt"
+        with patch.object(Path, "write_text", side_effect=RuntimeError("unexpected")):
+            try:
+                bridge._write_task_file(p, "content", "eve", "chan5", "other", 204)
+            except Exception as exc:
+                self.fail(f"_write_task_file propagated an exception: {exc}")
 
 
 if __name__ == "__main__":
-    runner = unittest.TextTestRunner(verbosity=2)
-    result = runner.run(
-        unittest.TestLoader().loadTestsFromTestCase(TestDiscordTaskWriteInstrumentation)
-    )
-    sys.exit(0 if result.wasSuccessful() else 1)
+    unittest.main(verbosity=2)

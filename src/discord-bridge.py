@@ -2323,6 +2323,21 @@ async def on_message_edit(before, after):
     await _handle_discord_message(after, force=True)
 
 
+def _write_task_file(task_file: Path, content: str, username: str,
+                     channel_name: str, access_tier: str, message_id: int) -> bool:
+    """Write a task file with diagnostic instrumentation. Returns True on success."""
+    try:
+        task_file.write_text(content)
+    except Exception as _tw_exc:
+        print(f"  [task-write] FAILED for @{username} in #{channel_name} "
+              f"(tier={access_tier}, msg={message_id}): "
+              f"{type(_tw_exc).__name__}: {_tw_exc}", flush=True)
+        return False
+    print(f"  [task-write] wrote {task_file.name} "
+          f"(@{username}, #{channel_name}, tier={access_tier})", flush=True)
+    return True
+
+
 async def _handle_discord_message(message, force=False):
     if message.author == client.user:
         return
@@ -3212,32 +3227,27 @@ async def _handle_discord_message(message, force=False):
     # would otherwise lose the message with no trace). Log the outcome either way
     # — a future drop now self-diagnoses: absence of BOTH this line and an
     # early-return log pinpoints a new path; a FAILED line pinpoints the write.
-    try:
-        task_file.write_text(
-            f"id: {task_id}\n"
-            f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
-            f"task: {user_task_text}\n"
-            f"source: discord\n"
-            f"interaction_type: message\n"
-            f"{media_headers}"
-            f"channel_id: {message.channel.id}\n"
-            f"channel_name: {channel_name}\n"
-            f"guild_name: {guild_name}\n"
-            f"source_message_id: {message.id}\n"
-            f"{parent_msg_line}"
-            f"user_id: {message.author.id}\n"
-            f"access_tier: {access_tier}\n"
-            f"priority: {priority}\n"
-            f"{tier_instructions.get(access_tier, tier_instructions['other'])}"
-            f"{discord_skill_hints}"
-        )
-    except Exception as _tw_exc:
-        print(f"  [task-write] FAILED for @{username} in #{channel_name} "
-              f"(tier={access_tier}, msg={message.id}): "
-              f"{type(_tw_exc).__name__}: {_tw_exc}", flush=True)
+    task_content = (
+        f"id: {task_id}\n"
+        f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+        f"task: {user_task_text}\n"
+        f"source: discord\n"
+        f"interaction_type: message\n"
+        f"{media_headers}"
+        f"channel_id: {message.channel.id}\n"
+        f"channel_name: {channel_name}\n"
+        f"guild_name: {guild_name}\n"
+        f"source_message_id: {message.id}\n"
+        f"{parent_msg_line}"
+        f"user_id: {message.author.id}\n"
+        f"access_tier: {access_tier}\n"
+        f"priority: {priority}\n"
+        f"{tier_instructions.get(access_tier, tier_instructions['other'])}"
+        f"{discord_skill_hints}"
+    )
+    if not _write_task_file(task_file, task_content, username, channel_name,
+                            access_tier, message.id):
         return
-    print(f"  [task-write] wrote {task_file.name} "
-          f"(@{username}, #{channel_name}, tier={access_tier})", flush=True)
     pending_replies[task_id] = message.channel
     pending_task_tiers[task_id] = access_tier
     # Observability: one inbound accepted-message event.
