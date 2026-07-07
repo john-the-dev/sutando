@@ -10,6 +10,7 @@ Exit 0 on pass, 1 on fail.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
 import sys
@@ -136,6 +137,102 @@ class TestWriteTaskFile(unittest.TestCase):
                 bridge._write_task_file(p, "content", "eve", "chan5", "other", 204)
             except Exception as exc:
                 self.fail(f"_write_task_file propagated an exception: {exc}")
+
+
+class _FakeTypingCtx:
+    async def __aenter__(self): pass
+    async def __aexit__(self, *a): pass
+
+
+class TestHandleMessageCallSite(unittest.TestCase):
+    """Integration tests covering the task_content build + _write_task_file call
+    in _handle_discord_message (lines that differ from the pre-refactor code)."""
+
+    def setUp(self):
+        self._orig_tasks_dir = bridge.TASKS_DIR
+        self._int_dir = Path(_tmp) / "tasks_int"
+        self._int_dir.mkdir(exist_ok=True)
+        bridge.TASKS_DIR = self._int_dir
+
+        _discord = sys.modules["discord"]
+
+        async def _noop_observe(_m): pass
+        self._orig_observe = bridge._observe_for_mod
+        bridge._observe_for_mod = _noop_observe
+
+        self._orig_load_allowed = bridge.load_allowed
+        self._orig_load_policy = bridge.load_policy
+        bridge.load_allowed = lambda: {"999"}
+        bridge.load_policy = lambda: "allowlist"
+
+        self._orig_intercept = bridge.intercept_vault_commands
+        bridge.intercept_vault_commands = lambda t: types.SimpleNamespace(
+            text=t, stored=[], failed=[])
+
+        self._orig_write_owner = getattr(bridge, "write_owner_activity", None)
+        bridge.write_owner_activity = lambda *a, **kw: None
+
+        self._orig_plugin_hook = bridge._plugin_message_reply
+        bridge._plugin_message_reply = lambda *a, **kw: (False, None)
+
+        bridge.client.user = types.SimpleNamespace(id=1)
+        bridge.seen_message_ids.clear()
+
+        ch = _discord.DMChannel()
+        ch.id = 777
+        ch.typing = lambda: _FakeTypingCtx()
+
+        class _Author:
+            id = 999
+            bot = False
+            def __str__(self): return "testowner#0000"
+
+        self._msg = types.SimpleNamespace(
+            author=_Author(),
+            content="run health check please",
+            channel=ch,
+            id=88888,
+            embeds=[],
+            attachments=[],
+            reference=None,
+            guild=None,
+            message_snapshots=[],
+            type=0,
+            mentions=[],
+            role_mentions=[],
+        )
+
+    def tearDown(self):
+        bridge.TASKS_DIR = self._orig_tasks_dir
+        bridge._observe_for_mod = self._orig_observe
+        bridge.load_allowed = self._orig_load_allowed
+        bridge.load_policy = self._orig_load_policy
+        bridge.intercept_vault_commands = self._orig_intercept
+        if self._orig_write_owner is not None:
+            bridge.write_owner_activity = self._orig_write_owner
+        bridge._plugin_message_reply = self._orig_plugin_hook
+
+    def test_owner_dm_writes_task_file(self):
+        """_handle_discord_message must build task_content and call _write_task_file."""
+        asyncio.run(bridge._handle_discord_message(self._msg))
+        task_files = list(self._int_dir.glob("task-*.txt"))
+        self.assertEqual(len(task_files), 1, "expected exactly one task file")
+        body = task_files[0].read_text()
+        self.assertIn("source: discord", body)
+        self.assertIn("access_tier: owner", body)
+        self.assertIn("run health check please", body)
+
+    def test_write_failure_skips_pending_enqueue(self):
+        """When _write_task_file returns False, pending_replies must not grow."""
+        before = len(bridge.pending_replies)
+        orig_wtf = bridge._write_task_file
+        bridge._write_task_file = lambda *a, **kw: False
+        try:
+            asyncio.run(bridge._handle_discord_message(self._msg))
+        finally:
+            bridge._write_task_file = orig_wtf
+        self.assertEqual(len(bridge.pending_replies), before,
+                         "pending_replies must not grow on write failure")
 
 
 if __name__ == "__main__":
