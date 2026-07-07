@@ -122,6 +122,32 @@ print(f'5h: {d[\"utilization_5h\"]:.0%} (resets in {m5}min at {r5.strftime(\"%I:
   fi
   echo ""
 
+  # Relay notes — cross-session narrative continuity (#1738)
+  # Written by /relay skill and /proactive-loop step 7; consumed here so
+  # the next session sees intent/judgment the structured snapshot can't carry.
+  # Each file is moved to relay/processed/ after being read (drain-on-read).
+  echo "## Relay Notes"
+  RELAY_DIR="$WORKSPACE_DIR/relay"
+  if [ -d "$RELAY_DIR" ]; then
+    # ls -1t = newest-first; awk reversal = oldest-first (chronological order)
+    relay_files=$(ls -1t "$RELAY_DIR"/relay-*.md 2>/dev/null | awk '{a[i++]=$0} END{for(j=i-1;j>=0;j--) print a[j]}')
+    if [ -z "$relay_files" ]; then
+      echo "(none)"
+    else
+      mkdir -p "$RELAY_DIR/processed"
+      while IFS= read -r rfile; do
+        [ -f "$rfile" ] || continue
+        echo "### $(basename "$rfile")"
+        cat "$rfile"
+        echo ""
+        mv "$rfile" "$RELAY_DIR/processed/$(basename "$rfile")"
+      done <<< "$relay_files"
+    fi
+  else
+    echo "(relay dir not yet created)"
+  fi
+  echo ""
+
   # Stars
   echo "## Repo Stats"
   gh api repos/sonichi/sutando --jq '.stargazers_count, .forks_count' 2>/dev/null | tr '\n' ' ' | awk '{print $1 " stars, " $2 " forks"}' || echo "(couldn't fetch)"

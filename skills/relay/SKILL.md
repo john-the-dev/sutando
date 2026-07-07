@@ -1,6 +1,6 @@
 ---
 name: relay
-description: "Write a handoff/continuity note for the NEXT Sutando session. Captures what was just in flight, what to check first, what might go wrong, and implicit context the structured snapshot doesn't carry. Read first by /catchup-after-startup."
+description: "Write a handoff/continuity note for the NEXT Sutando session. Captures what was just in flight, what to check first, what might go wrong, and implicit context the structured snapshot doesn't carry. Consumed by session-handoff.sh on context compaction."
 user-invocable: true
 ---
 
@@ -29,7 +29,7 @@ workspace/relay/
 
 - **File naming:** `relay-{epoch}.md` — sortable + greppable, matches the `task-{epoch}.txt` shape.
 - **Multiple files allowed:** `/relay` always creates a NEW file by default. `--append` appends to the LATEST unprocessed `relay-*.md` instead of creating a new one.
-- **Consumption:** catchup-after-startup reads ALL unprocessed `relay-*.md` files in mtime order (oldest first), prints them as section 0 of its briefing, then `mv`s each one to `processed/` (mirroring the result-watcher drain pattern).
+- **Consumption:** `session-handoff.sh` (fired on context compaction by the PreCompact hook) reads ALL unprocessed `relay-*.md` files in mtime order (oldest first), appends them as a "## Relay Notes" section in `session-state.md`, then `mv`s each one to `processed/` (mirroring the result-watcher drain pattern).
 - **Cleanup:** kept indefinitely on local disk. Tiny files (~200-500 bytes each); a year of relay notes is < 1 MB. Sync via the workspace-sync engine (`scripts/sync-workspace.sh`) for fleet visibility — the legacy `sync-memory.sh` flow is deprecated in v0.3.0 and removed in v0.4.0.
 
 ## What to write
@@ -67,7 +67,7 @@ If the session was genuinely uneventful (read-only, no decisions, no in-flight w
 
 - **Manual-invocation only.** Auto-refresh (writing/updating from `/proactive-loop`) deferred to Phase 2 once we see how owners actually use the manual path.
 - **No quality-gate (refuse-on-thin-note).** Always write whatever the LLM produces. Quality-gate deferred to Phase 2 pending observation.
-- **Read-side** lives in `/catchup-after-startup` — see that skill for the read-then-archive flow.
+- **Read-side** lives in `src/session-handoff.sh` — the PreCompact hook fires it on every context compaction; it drains relay notes into `session-state.md` and archives them to `processed/`.
 
 ## Phase 2 ideas (NOT in scope)
 
