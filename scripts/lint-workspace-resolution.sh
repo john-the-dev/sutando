@@ -61,7 +61,7 @@ PATTERN_DOC_ENV_PATH='\$SUTANDO_WORKSPACE/'
 # branch when the wrapper script isn't reachable (e.g. non-checkout
 # installs). The fallback path is documented in each script's comments;
 # new contributors should still go through the wrapper.
-ALLOWED='^(src/sutando_config\.(py|ts)|src/workspace_default\.(py|ts)|src/util_paths\.py|src/startup\.sh|src/migration_safety_helpers\.sh|scripts/lint-workspace-resolution\.sh|scripts/install-git-hooks\.sh|scripts/sutando-config\.sh|scripts/sync-memory\.sh|scripts/sutando-migrate\.sh|scripts/sweep-stranded-claims\.sh|tests/[^/]+\.(test\.)?(py|ts|sh))$'
+ALLOWED='^(src/sutando_config\.(py|ts)|src/workspace_default\.(py|ts)|src/util_paths\.py|src/startup\.sh|src/migration_safety_helpers\.sh|scripts/lint-workspace-resolution\.sh|scripts/install-git-hooks\.sh|scripts/sutando-config\.sh|scripts/sync-memory\.sh|scripts/sutando-migrate\.sh|scripts/sweep-stranded-claims\.sh|tests/[^/]+\.(test\.)?(py|ts|sh)|skills/overlay-apps/app/(control-server|main)\.js)$'
 
 # Allowed .md files — legitimate uses of `$SUTANDO_WORKSPACE/path` in
 # prose, e.g. the workspace contract docs that DESCRIBE the legacy form
@@ -76,8 +76,8 @@ if [[ "$mode" == "--diff" ]]; then
   # Added or modified files vs base.
   files="$(git diff --name-only --diff-filter=AM "$base"...HEAD)"
 else
-  # All tracked files of relevant types — code (.py/.ts/.tsx/.sh/.bash) + docs (.md).
-  files="$(git ls-files -- '*.py' '*.ts' '*.tsx' '*.sh' '*.bash' '*.md')"
+  # All tracked files of relevant types — code (.py/.ts/.tsx/.js/.mjs/.sh/.bash) + docs (.md).
+  files="$(git ls-files -- '*.py' '*.ts' '*.tsx' '*.js' '*.mjs' '*.sh' '*.bash' '*.md')"
 fi
 
 if [[ -z "$files" ]]; then
@@ -112,7 +112,7 @@ for f in $files; do
   fi
 
   # Code branch (the original lint).
-  [[ "$f" =~ \.(py|ts|tsx|sh|bash)$ ]] || continue
+  [[ "$f" =~ \.(py|ts|tsx|js|mjs|sh|bash)$ ]] || continue
   if grep -E -q "$ALLOWED" <<< "$f"; then continue; fi
 
   if [[ "$mode" == "--diff" ]]; then

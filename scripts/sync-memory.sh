@@ -246,7 +246,7 @@ fi
 if [ -f "$SCRIPT_PARENT/scripts/sutando-config.sh" ]; then
     WS_DIR="$(bash "$SCRIPT_PARENT/scripts/sutando-config.sh" workspace)"
 else
-    WS_DIR="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+    WS_DIR="${SUTANDO_WORKSPACE:-$HOME/sutando-workspace}"
 fi
 # Disambiguation guard: if WS_DIR points at a public-repo checkout (a
 # legacy-shaped SUTANDO_WORKSPACE value, or — on truly broken installs —
