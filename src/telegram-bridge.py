@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import sys
 import time
 import urllib.request
@@ -226,6 +227,13 @@ def presenter_mode_active():
 
 # Load access config
 ACCESS_FILE = channel_access_path("telegram")
+
+# TOFU enrollment code — set at startup when access.json doesn't exist.
+# The first DM must include this code to become owner. Cleared after use.
+# None when access.json already exists (bridge already enrolled) or
+# after successful enrollment.
+_TOFU_ENROLLMENT_CODE: str | None = None
+
 def load_allowed():
     """Return the set of allowed sender IDs, OR None if access.json doesn't exist.
 
@@ -586,12 +594,28 @@ def poll_progress(pending_replies: dict) -> None:
             pending_task_tiers.pop(tid, None)
 
 
-def main():
+def main():  # pragma: no cover
+    global _TOFU_ENROLLMENT_CODE
     _single_instance_acquire("telegram-bridge")
     print(f"Telegram bridge started. Polling for messages...", flush=True)
     # Restart-safety: sweep orphan `.sending` files before the poll
     # loop starts. See _recover_orphan_sending_files for rationale.
     _recover_orphan_sending_files()
+
+    # TOFU enrollment code: generated when access.json doesn't exist so
+    # the first DM must present it before being auto-enrolled as owner.
+    # Prevents an attacker who can DM the bot from grabbing ownership before
+    # the legitimate owner does. Cleared (set to None) after first successful
+    # enrollment or on restart when access.json already exists.
+    if not ACCESS_FILE.exists():
+        _TOFU_ENROLLMENT_CODE = secrets.token_hex(3)  # 6-char hex, 16M combinations
+        print("", flush=True)
+        print(f"  *** TOFU enrollment required ***", flush=True)
+        print(f"  Enrollment code: {_TOFU_ENROLLMENT_CODE}", flush=True)
+        print(f"  Send this code in your first DM to register as owner.", flush=True)
+        print(f"  Anyone who sends this code first becomes owner — keep it private.", flush=True)
+        print("", flush=True)
+
     offset = None
     allowed = load_allowed()
     pending_replies = {}  # task_id -> chat_id
@@ -652,8 +676,18 @@ def main():
                 allowed = load_allowed()
                 if allowed is None:
                     # First-ever DM after install — access.json doesn't exist.
-                    # Auto-onboard this sender as the owner (TOFU).
+                    # Require the enrollment code before auto-onboarding as owner.
+                    # This prevents an attacker who can DM the bot from claiming
+                    # ownership before the legitimate owner does.
+                    if _TOFU_ENROLLMENT_CODE and _TOFU_ENROLLMENT_CODE not in (text or ""):
+                        api("sendMessage", chat_id=chat_id, text=(
+                            "Enrollment code required.\n"
+                            "Check the bridge startup log for your code and send it here."
+                        ))
+                        print(f"  TOFU: rejected enrollment from @{username} — code not presented", flush=True)
+                        continue
                     allowed = tofu_onboard(sender_id, username)
+                    _TOFU_ENROLLMENT_CODE = None  # consume after successful enrollment
                 if sender_id not in allowed:
                     print(f"  Dropped message from non-allowed @{username}")
                     continue

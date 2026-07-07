@@ -38,6 +38,7 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 import sys
 import threading
 import time
@@ -195,6 +196,12 @@ def presenter_mode_active() -> bool:
 
 
 ACCESS_FILE = channel_access_path("slack")
+
+# TOFU enrollment code — set at startup when access.json doesn't exist.
+# The first DM must include this code to become owner. Cleared after use.
+# None when access.json already exists (bridge already enrolled) or after
+# successful enrollment. See telegram-bridge.py for the same mechanism.
+_TOFU_ENROLLMENT_CODE: str | None = None
 
 # In-memory mirror of access.json. Updated on every successful read.
 # Used by tofu_onboard() to detect and recover from external deletions
@@ -411,9 +418,28 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
         pass
 
     # Access control via TOFU
+    global _TOFU_ENROLLMENT_CODE
     allowed = load_allowed()
     if allowed is None:
+        # TOFU state — require enrollment code before auto-onboarding as owner.
+        # This prevents an attacker who can DM the bot from claiming ownership
+        # before the legitimate owner does.
+        channel = event.get("channel") or user_id
+        if _TOFU_ENROLLMENT_CODE and _TOFU_ENROLLMENT_CODE not in (text or ""):
+            try:
+                app.client.chat_postMessage(
+                    channel=channel,
+                    text=(
+                        "Enrollment code required.\n"
+                        "Check the bridge startup log for your code and send it here."
+                    ),
+                )
+            except Exception:
+                pass
+            print(f"  TOFU: rejected enrollment from {user_id} — code not presented", flush=True)
+            return None
         allowed = tofu_onboard(user_id, username)
+        _TOFU_ENROLLMENT_CODE = None  # consume after successful enrollment
     if user_id not in allowed:
         print(f"  Dropped message from non-allowed user {user_id}", flush=True)
         return None
@@ -1023,13 +1049,26 @@ def _recover_orphan_sending_files() -> int:
         print(f"  [startup] recovered {recovered} orphan .sending file(s)", flush=True)
     return recovered
 
-def main():
+def main():  # pragma: no cover
+    global _TOFU_ENROLLMENT_CODE
     _single_instance_acquire("slack-bridge")
     print("Slack bridge started. Socket Mode connecting...", flush=True)
     _recover_orphan_sending_files()
     # Prime the in-memory access cache so tofu_onboard() can detect external
     # deletions even on the very first inbound message after a restart (#899).
     load_allowed()
+
+    # TOFU enrollment code: generated when access.json doesn't exist so
+    # the first DM must present it before being auto-enrolled as owner.
+    if not ACCESS_FILE.exists():
+        _TOFU_ENROLLMENT_CODE = secrets.token_hex(3)  # 6-char hex, 16M combinations
+        print("", flush=True)
+        print(f"  *** TOFU enrollment required ***", flush=True)
+        print(f"  Enrollment code: {_TOFU_ENROLLMENT_CODE}", flush=True)
+        print(f"  Send this code in your first DM to register as owner.", flush=True)
+        print(f"  Anyone who sends this code first becomes owner — keep it private.", flush=True)
+        print("", flush=True)
+
     threading.Thread(target=result_watcher, name="slack-result-watcher", daemon=True).start()
     threading.Thread(target=_no_events_hint_thread, name="slack-no-events-hint", daemon=True).start()
     handler = SocketModeHandler(app, APP_TOKEN)
