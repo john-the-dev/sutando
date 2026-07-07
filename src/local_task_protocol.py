@@ -285,12 +285,19 @@ def find_archived_task(tasks_dir: Path, task_id: str) -> Path | None:
 
 def iter_archived_tasks(tasks_dir: Path) -> Iterable[Path]:
     """Yield every archived task file (flat legacy + month-partitioned),
-    for corpus sweeps and golden tests."""
+    for corpus sweeps and golden tests.
+
+    Only yields files whose stem is a valid task id — skips non-task files
+    (e.g. answer-Q* response records) that may share the archive directory.
+    """
     archive_root = tasks_dir / "archive"
     if not archive_root.is_dir():
         return
     for p in sorted(archive_root.glob("*.txt")):
-        yield p
+        if valid_task_id(p.stem):
+            yield p
     for entry in sorted(archive_root.iterdir()):
         if entry.is_dir() and _MONTH_DIR_RE.match(entry.name):
-            yield from sorted(entry.glob("*.txt"))
+            for p in sorted(entry.glob("*.txt")):
+                if valid_task_id(p.stem):
+                    yield p
