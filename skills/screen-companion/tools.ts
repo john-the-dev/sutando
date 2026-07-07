@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { loadConfig, discoverConfigs, renderGoal } from './scripts/load-config.js';
 import { readSelection as defaultReadSelection, type SelectionResult } from './scripts/read-selection.js';
-import { registerVisionOnContributor, callUpdateTools, callRestoreTools, captureSendFrame, getFullToolSurface } from '../../src/vision-tools.js';
+import { registerVisionOnContributor, registerFrameContextProvider, callUpdateTools, callRestoreTools, captureSendFrame, getFullToolSurface } from '../../src/vision-tools.js';
 
 function resolveWorkspace(): string {
 	const env = process.env.SUTANDO_WORKSPACE;
@@ -45,6 +45,17 @@ registerVisionOnContributor(() => {
 		`call the \`activate_screen_companion\` tool with the matching mode + their goal. ` +
 		`If the goal doesn't match a configured mode, operate normally with screen awareness.`
 	);
+});
+
+// Frame-context provider: injects the user's current AX/Chrome text selection
+// alongside every auto-streamed frame (push and pull paths) — issue #1425.
+// Mirrors the pull-path selection-first behavior from PR #1409 so guided-setup
+// and other push-mode sessions also get exact selected text without the model
+// having to call vision_query explicitly.
+registerFrameContextProvider(() => {
+	const sel = _readSelection();
+	if (!sel || !sel.text) return null;
+	return `[Selected text on screen: ${sel.text}]`;
 });
 
 const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });

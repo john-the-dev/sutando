@@ -174,6 +174,30 @@ export function _getVisionOnContributorCount(): number {
 	return visionOnContributors.length;
 }
 
+// ── Frame context providers (issue #1425) ───────────────────────────────────
+// Skills register a sync-or-async callback that may return extra text context
+// to inject alongside each captured frame. If a provider returns non-empty
+// text it is sent as a turnComplete=false user turn immediately before the
+// frame, so the model sees both the exact context and the visual.
+// Returning null/undefined means "nothing to add" — no extra message is sent.
+export type FrameContextProvider = () => string | null | undefined | Promise<string | null | undefined>;
+const frameContextProviders: FrameContextProvider[] = [];
+
+/** Register a frame-context provider called before each captured frame send.
+ *  Returns an unregister function (useful for tests). */
+export function registerFrameContextProvider(fn: FrameContextProvider): () => void {
+	frameContextProviders.push(fn);
+	return () => {
+		const i = frameContextProviders.indexOf(fn);
+		if (i >= 0) frameContextProviders.splice(i, 1);
+	};
+}
+
+/** Visible for tests. */
+export function _getFrameContextProviderCount(): number {
+	return frameContextProviders.length;
+}
+
 // TODO(roadmap §5 Now: "Define DeviceSession"): Replace this single-session
 // global with a DeviceSession map keyed by device ID. Today push-mode senders
 // (browser, Mentra glasses, Discord/Telegram photo helper, phone agent) all
@@ -452,6 +476,22 @@ async function captureAndSend(source: VisionSource): Promise<{ ok: boolean; erro
 	const sendFile = getSendFile();
 	if (!sendFile) return { ok: false, error: 'no active voice session' };
 	const frame = await source.capture();
+	// Call registered frame-context providers (issue #1425: selection-first for push path).
+	// Each provider may return extra text context (e.g. the user's current AX text
+	// selection). Non-empty results are injected as a turnComplete=false user turn
+	// immediately before the frame so the model sees both exact text and the visual.
+	if (frameContextProviders.length > 0) {
+		const results = await Promise.all(frameContextProviders.map(fn => {
+			try { return Promise.resolve(fn()); } catch { return Promise.resolve(null); }
+		}));
+		const text = results.filter((r): r is string => typeof r === 'string' && r.length > 0).join('\n');
+		if (text) {
+			const transport = sessionRef?.transport;
+			if (transport && typeof transport.sendContent === 'function') {
+				try { transport.sendContent([{ role: 'user', text }], false); } catch { /* best-effort */ }
+			}
+		}
+	}
 	sendFile(frame.data.toString('base64'), frame.mimeType);
 	return { ok: true };
 }
