@@ -213,11 +213,14 @@ check("task_body on file with no task: line is empty",
       ltp.task_body("id: t\ntimestamp: ts\n") == "")
 
 # 7. Task-id validation (traversal gate).
+# Charset matches gateway _valid_tid: [A-Za-z0-9._-]{1,64}, "."/"..") blocked (#1960).
+# Live producers use task-*, ask-*, sc-ask-*, reco-skill-* — all must pass.
 for good in ("task-1783377232367", "task-chat-1783379117", "task-phone-1", "task-gh-5",
-             "task-health-1700", "task-summary-1"):
+             "task-health-1700", "task-summary-1",
+             "ask-1783377232367", "sc-ask-1783379117", "reco-skill-9012"):
     check(f"id ok: {good}", ltp.valid_task_id(good))
-for bad in ("", "task-", "task-../../etc", "task-a b", "task-a/b", "result-1",
-            "task-" + "x" * 200, "task-.hidden"):
+for bad in ("", "task-../../etc", "task-a b", "task-a/b",
+            "x" * 65, ".", ".."):
     check(f"id rejected: {bad[:24]!r}", not ltp.valid_task_id(bad))
 
 # 8. Archive rules.
