@@ -1034,6 +1034,18 @@ def check_notes_split_brain() -> "dict | None":
     }
 
 
+def _should_skip_bridge(channel_name: str, env_path: Path) -> bool:
+    """True if SKIP_<CHANNEL>=1 is set in the main .env or as an env var.
+
+    Lets operators silence a bridge on a specific host without removing its
+    token from the shared config (issue #1916). The flag is per-host: set it
+    in the main .env on the host where the bridge should NOT run. Both the
+    health-check (no warn) and --fix (no restart) honor it.
+    """
+    var = f"SKIP_{channel_name.upper()}"
+    return (env_path.exists() and f"{var}=1" in env_path.read_text()) or os.environ.get(var) == "1"
+
+
 def run_all_checks() -> list[dict]:
     checks = []
 
@@ -1169,11 +1181,10 @@ def run_all_checks() -> list[dict]:
                         checks.append(ngrok_c)
 
     # Messaging bridges (optional — only check if configured and not skipped)
-    skip_telegram = (env_path.exists() and "SKIP_TELEGRAM=1" in env_path.read_text()) or os.environ.get("SKIP_TELEGRAM") == "1"
     channels_dir = claude_home_path("channels")
     for name, proc_name in [("telegram-bridge", "telegram-bridge"), ("discord-bridge", "discord-bridge")]:
         channel_name = name.replace("-bridge", "")
-        if channel_name == "telegram" and skip_telegram:
+        if _should_skip_bridge(channel_name, env_path):
             continue
         env_file = channels_dir / channel_name / ".env"
         access_file = channels_dir / channel_name / "access.json"

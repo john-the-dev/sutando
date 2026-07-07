@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Tests for _should_skip_bridge() — issue #1916.
+
+SKIP_TELEGRAM / SKIP_DISCORD / SKIP_SLACK env vars let operators silence a
+bridge on a specific host without removing its token from shared config.
+The helper is read by both the health-check (no warn) and --fix (no restart).
+
+Run: python3 tests/health-check-bridge-skip.test.py
+"""
+import importlib.util
+import os
+import sys
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
+REPO = Path(__file__).resolve().parent.parent
+spec = importlib.util.spec_from_file_location("health_check", REPO / "src" / "health-check.py")
+hc = importlib.util.module_from_spec(spec)
+sys.modules["health_check"] = hc
+spec.loader.exec_module(hc)
+
+failures = []
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    print(("  ok  " if cond else "  FAIL ") + name + (f" — {detail}" if detail and not cond else ""))
+    if not cond:
+        failures.append(name)
+
+
+_no_env = Path("/nonexistent/.env")
+
+# ── env-var path ─────────────────────────────────────────────────────────────
+
+with patch.dict(os.environ, {"SKIP_TELEGRAM": "1"}, clear=False):
+    check("env var SKIP_TELEGRAM=1 → skip telegram",
+          hc._should_skip_bridge("telegram", _no_env))
+    check("env var SKIP_TELEGRAM=1 → does not skip discord",
+          not hc._should_skip_bridge("discord", _no_env))
+
+with patch.dict(os.environ, {"SKIP_DISCORD": "1"}, clear=False):
+    check("env var SKIP_DISCORD=1 → skip discord",
+          hc._should_skip_bridge("discord", _no_env))
+    check("env var SKIP_DISCORD=1 → does not skip telegram",
+          not hc._should_skip_bridge("telegram", _no_env))
+
+with patch.dict(os.environ, {"SKIP_SLACK": "1"}, clear=False):
+    check("env var SKIP_SLACK=1 → skip slack",
+          hc._should_skip_bridge("slack", _no_env))
+
+check("no skip vars → returns False",
+      not hc._should_skip_bridge("telegram", _no_env) and
+      not hc._should_skip_bridge("discord", _no_env))
+
+# ── .env file path ───────────────────────────────────────────────────────────
+
+with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+    f.write("SKIP_TELEGRAM=1\nSOME_OTHER=val\n")
+    _env_file = Path(f.name)
+
+try:
+    check(".env SKIP_TELEGRAM=1 → skip telegram",
+          hc._should_skip_bridge("telegram", _env_file))
+    check(".env SKIP_TELEGRAM=1 → does not skip discord",
+          not hc._should_skip_bridge("discord", _env_file))
+finally:
+    _env_file.unlink()
+
+with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+    f.write("SKIP_DISCORD=1\n")
+    _env_file2 = Path(f.name)
+
+try:
+    check(".env SKIP_DISCORD=1 → skip discord",
+          hc._should_skip_bridge("discord", _env_file2))
+    check(".env SKIP_DISCORD=1 → does not skip telegram",
+          not hc._should_skip_bridge("telegram", _env_file2))
+finally:
+    _env_file2.unlink()
+
+# ── env var value must be exactly "1" ────────────────────────────────────────
+
+with patch.dict(os.environ, {"SKIP_DISCORD": "0"}, clear=False):
+    check("SKIP_DISCORD=0 is not a skip", not hc._should_skip_bridge("discord", _no_env))
+
+with patch.dict(os.environ, {"SKIP_DISCORD": "true"}, clear=False):
+    check("SKIP_DISCORD=true is not a skip (must be '1')",
+          not hc._should_skip_bridge("discord", _no_env))
+
+if failures:
+    sys.exit(1)
+print("PASS — _should_skip_bridge tests")
