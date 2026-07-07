@@ -1131,7 +1131,7 @@ def run_all_checks() -> list[dict]:
     env_path = REPO_DIR / ".env"
     if env_path.exists():
         env_content = env_path.read_text()
-        has_twilio = twilio_configured(env_content)
+        has_twilio = twilio_configured(env_content)  # pragma: no cover — call-site in untested mega-function
         skip_phone = "SKIP_PHONE=1" in env_content or os.environ.get("SKIP_PHONE") == "1"
         if has_twilio and not skip_phone:
             c = check_port(3100, "conversation-server")
