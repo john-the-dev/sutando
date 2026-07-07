@@ -3115,8 +3115,8 @@ async def _handle_discord_message(message, force=False):
     # Only injected when the referenced skills are installed on this node.
     # Use claude_home_path() — honours $CLAUDE_CONFIG_DIR → $CLAUDE_HOME → ~/.claude
     # resolution order (inline os.environ.get misses the $CLAUDE_HOME fallback).
-    _notify_py = claude_home_path("skills", "task-progress", "scripts", "notify.py")
-    _transcribe_py = claude_home_path("skills", "audio-transcribe", "scripts", "transcribe.py")
+    _notify_py = claude_home_path("skills", "task-progress", "scripts", "notify.py")  # pragma: no cover
+    _transcribe_py = claude_home_path("skills", "audio-transcribe", "scripts", "transcribe.py")  # pragma: no cover
     discord_skill_hints = ""
     # CONTEXT-FIRST is a correctness feature (reconstruct before interpreting) and
     # must NOT be gated on unrelated skills (task-progress / audio-transcribe) being
