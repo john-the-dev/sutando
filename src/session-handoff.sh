@@ -30,7 +30,7 @@ else
             REPO="$_cand"; break
         fi
     done
-    REPO="${REPO:-${SUTANDO_REPO_DIR:-$HOME/Desktop/sutando}}"
+    REPO="${REPO:-$HOME/Desktop/sutando}"
 fi
 export PATH="/opt/homebrew/bin:$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"
 STATE_FILE="$REPO/session-state.md"
