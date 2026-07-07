@@ -18,6 +18,16 @@ import sys
 import time
 from pathlib import Path
 
+# startup.sh redirects stdout to a log file, which makes CPython block-buffer
+# it — diagnostic prints without flush=True (e.g. the tier-ownership warnings
+# below) sit invisible in the buffer, and SIGTERM kills the process without
+# flushing, losing them entirely. startup.sh launches this bridge with
+# PYTHONUNBUFFERED=1, but other launchers (health-check --fix restarts, ad-hoc
+# respawns) don't — line-buffer structurally so every print lands in the log
+# as it happens, regardless of launcher. Same fix as telegram-bridge (#1926).
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 # Self-rescue: this bridge HAS to keep running — Discord is the primary channel
 # the owner uses to reach Sutando. If `python3` on $PATH happens to resolve to
 # an interpreter that lacks `discord.py` (e.g. miniconda's python on a Mac that

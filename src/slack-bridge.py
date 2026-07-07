@@ -44,6 +44,15 @@ import time
 import urllib.request
 from pathlib import Path
 
+# startup.sh redirects stdout to a log file, which makes CPython block-buffer
+# it — diagnostic prints without flush=True sit invisible in the buffer, and
+# SIGTERM kills the process without flushing, losing them entirely. Unlike
+# discord-bridge, this bridge isn't even launched with PYTHONUNBUFFERED=1 —
+# line-buffer structurally so every print lands in the log as it happens.
+# Same fix as telegram-bridge (#1926).
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from task_priority import default_priority_for_source  # noqa: E402
 
