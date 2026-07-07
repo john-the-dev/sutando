@@ -86,17 +86,14 @@ check("discord: every line has the delivered disposition + discord surface",
       all(l.split("\t")[2:] == ["delivered", "discord"] for l in lines))
 
 # Skip-marker audit: [no-send] → no_send, [deduped:] → deduped (§7 spec).
-# result_audit.record() is already imported at top of discord-bridge.py so
-# we call through the same reference the production code uses.
-import result_audit as _ra  # noqa: E402 (after module load to share workspace)
-
+# Call _record_skip_audit() so coverage hits the production helper lines.
 AUDIT.write_text("")  # fresh slate for skip-marker checks
 
-_ra.record("task-skip-1", "no_send", "discord")
+db._record_skip_audit("task-skip-1", "no-send")
 check("discord: [no-send] writes no_send audit line",
       "\ttask-skip-1\tno_send\tdiscord" in AUDIT.read_text())
 
-_ra.record("task-skip-2", "deduped", "discord")
+db._record_skip_audit("task-skip-2", "deduped")
 check("discord: [deduped:] writes deduped audit line",
       "\ttask-skip-2\tdeduped\tdiscord" in AUDIT.read_text())
 

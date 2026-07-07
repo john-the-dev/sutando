@@ -3435,6 +3435,12 @@ def _mark_delivered(task_id: str) -> None:
     result_audit.record(task_id, "delivered", "discord")
 
 
+def _record_skip_audit(task_id: str, skip_value: str) -> None:
+    """Record §7 audit disposition for a skip-marked result (no_send / deduped)."""
+    _disp = "deduped" if skip_value == "deduped" else "no_send"
+    result_audit.record(task_id, _disp, "discord")
+
+
 def _is_delivered(task_id: str) -> bool:
     """True iff the sentinel for `task_id` exists."""
     try:
@@ -3625,8 +3631,7 @@ async def poll_results():
                     print(f"  Skipped (already replied or deduped): {task_id}")
                     # §7 audit: skip-marked results are resolved deliveries, not
                     # silent voids — one line per resolved result per spec.
-                    _disp = "deduped" if _skip.value == "deduped" else "no_send"
-                    result_audit.record(task_id, _disp, "discord")
+                    _record_skip_audit(task_id, _skip.value)
                     archive_file(result_file, "results", task_id)
                     task_file = find_task_file(TASKS_DIR, task_id) or TASKS_DIR / f"{task_id}.txt"
                     archive_file(task_file, "tasks", task_id)

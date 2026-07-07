@@ -144,15 +144,12 @@ check("slack wiring: redirect actually posts to the target channel",
 
 # Skip-marker audit (§7): [no-send] and [deduped:] results are resolved
 # deliveries — not silent voids — and each must get one audit line.
-# These are exercised through the result_watcher() skip path, which calls
-# result_audit.record() directly (not via _send_reply). Test by calling
-# result_audit.record() with the expected dispositions and checking the ledger.
-import result_audit as _ra  # noqa: E402
+# Call _record_skip_audit() so coverage hits the production helper lines.
 _audit.write_text("")  # fresh slate for skip checks
-_ra.record("task-noslack", "no_send", "slack")
+mod._record_skip_audit("task-noslack", "no-send")
 check("slack wiring: [no-send] writes no_send audit line",
       "\ttask-noslack\tno_send\tslack" in _audit.read_text())
-_ra.record("task-dedupslack", "deduped", "slack")
+mod._record_skip_audit("task-dedupslack", "deduped")
 check("slack wiring: [deduped:] writes deduped audit line",
       "\ttask-dedupslack\tdeduped\tslack" in _audit.read_text())
 
