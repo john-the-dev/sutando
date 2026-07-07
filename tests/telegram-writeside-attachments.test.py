@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Telegram write-side media-attachment headers — interaction-model 4D, step 1.5 slice 2.
 
-Second bridge to emit the structured header trio (content_modalities /
-media_form / attachments) alongside the legacy [Photo|File|Voice ...] body line
-(dual-write, additive). Covers telegram-bridge's local `_modality_for_mime` +
-`_media_attachment_headers` helpers and their round-trip through the
-local_task_protocol parsers. (The two helpers are duplicated from discord for
-now; both collapse into local_task_protocol once slack lands the same pair —
-rule of three.)
+Telegram emits the structured header trio (content_modalities / media_form /
+attachments) alongside the legacy [Photo|File|Voice ...] body line (dual-write,
+additive). After the rule-of-three promotion in #1992 the two bridge-local helpers
+were removed; this test now exercises `local_task_protocol.modality_for_mime` and
+`local_task_protocol.media_attachment_headers` directly and asserts the headers
+round-trip through the LTP parsers.
 
 Run: python3 tests/telegram-writeside-attachments.test.py   (exit 0 pass / 1 fail)
 """
@@ -45,14 +44,14 @@ def _load(name: str, path: Path):
 ltp = _load("local_task_protocol", REPO / "src" / "local_task_protocol.py")
 tg = _load("tgbridge_ws", REPO / "src" / "telegram-bridge.py")
 
-# ── 1. _modality_for_mime — files included (the owner's question: pdf/doc → file) ──
+# ── 1. modality_for_mime — files included (the owner's question: pdf/doc → file) ──
 for mime, want in {"image/jpeg": "image", "audio/ogg": "audio", "video/mp4": "video",
                    "application/pdf": "file", "application/zip": "file", "": "file",
                    "text/csv": "file"}.items():
-    check(f"_modality_for_mime({mime!r}) == {want}", tg._modality_for_mime(mime) == want)
+    check(f"modality_for_mime({mime!r}) == {want}", ltp.modality_for_mime(mime) == want)
 
-# ── 2. _media_attachment_headers ──
-check("empty refs → '' (text-only unchanged)", tg._media_attachment_headers([], "hi") == "")
+# ── 2. media_attachment_headers (LTP) ──
+check("empty refs → '' (text-only unchanged)", ltp.media_attachment_headers([], True) == "")
 
 photo = ltp.AttachmentRef(locator="/tmp/tg/1_photo.jpg", mime="image/jpeg",
                           filename="1_photo.jpg", size=88123)
@@ -61,17 +60,17 @@ doc = ltp.AttachmentRef(locator="/tmp/tg/2_report.pdf", mime="application/pdf",
 voice = ltp.AttachmentRef(locator="/tmp/tg/3_voice.ogg", mime="audio/ogg",
                           filename="3_voice.ogg", size=5120)
 
-h_img = tg._media_attachment_headers([photo], "look at this")
+h_img = ltp.media_attachment_headers([photo], True)
 check("photo+caption → content_modalities image,text", "content_modalities: image,text\n" in h_img, h_img)
 check("media_form attachment present", "media_form: attachment\n" in h_img)
 check("attachments json present", "attachments: [" in h_img)
 
 check("document → file modality (owner's files question)",
-      "content_modalities: file\n" in tg._media_attachment_headers([doc], ""))
+      "content_modalities: file\n" in ltp.media_attachment_headers([doc], False))
 check("voice → audio modality",
-      "content_modalities: audio\n" in tg._media_attachment_headers([voice], ""))
+      "content_modalities: audio\n" in ltp.media_attachment_headers([voice], False))
 check("no caption → text modality omitted",
-      "content_modalities: image\n" in tg._media_attachment_headers([photo], ""))
+      "content_modalities: image\n" in ltp.media_attachment_headers([photo], False))
 
 # ── 3. round-trip through a realistic telegram task-mid file ──
 task = (
@@ -80,7 +79,7 @@ task = (
     "task: [Telegram @qingyun] look at this\n[Photo attached: /tmp/tg/1_photo.jpg]\n"
     "source: telegram\n"
     "interaction_type: message\n"
-    f"{tg._media_attachment_headers([photo], 'look at this')}"
+    f"{ltp.media_attachment_headers([photo], True)}"
     "chat_id: 55\n"
     "priority: normal\n"
 )
@@ -105,4 +104,4 @@ for k in ("attachments", "content_modalities", "media_form"):
 if failures:
     print(f"\nFAIL — {len(failures)} check(s) failed: {failures}")
     raise SystemExit(1)
-print("\nPASS — telegram write-side media-attachment headers")
+print("\nPASS — telegram write-side media-attachment headers (LTP helpers)")

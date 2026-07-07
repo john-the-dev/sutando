@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Discord write-side media-attachment headers — interaction-model 4D, step 1.5 slice 2.
 
-The bridge now emits the structured header trio (`content_modalities` /
-`media_form` / `attachments`) ALONGSIDE the legacy `[File attached:]` body line
-(dual-write, additive). This covers the two pure helpers that build those
-headers — `_modality_for_mime` and `_media_attachment_headers` — and asserts the
-emitted headers round-trip back through the local_task_protocol parsers in a
-realistic task-mid file.
+The bridge emits the structured header trio (`content_modalities` / `media_form` /
+`attachments`) ALONGSIDE the legacy `[File attached:]` body line (dual-write,
+additive). After the rule-of-three promotion in #1992 the two bridge-local helpers
+were removed; this test now exercises `local_task_protocol.modality_for_mime` and
+`local_task_protocol.media_attachment_headers` directly, plus discord-specific
+`_ref_from_attachment`, and asserts the headers round-trip through the LTP parsers.
 
 discord-bridge's module load has side effects (discord SDK import, token read),
 so we stub them and run hermetically. Mirrors tests/bridge-audit-wiring.test.py.
@@ -60,12 +60,12 @@ except ImportError:
 ltp = _load("local_task_protocol", REPO / "src" / "local_task_protocol.py")
 db = _load("dbridge_ws", REPO / "src" / "discord-bridge.py")
 
-# ── 1. _modality_for_mime mapping ──
+# ── 1. modality_for_mime mapping (now in LTP, promoted from discord-bridge) ──
 cases = {"image/png": "image", "image/jpeg": "image", "audio/ogg": "audio",
          "video/mp4": "video", "application/pdf": "file", "text/plain": "file",
          "": "file", "IMAGE/PNG": "image"}
 for mime, want in cases.items():
-    check(f"_modality_for_mime({mime!r}) == {want}", db._modality_for_mime(mime) == want)
+    check(f"modality_for_mime({mime!r}) == {want}", ltp.modality_for_mime(mime) == want)
 
 # ── 1b. _ref_from_attachment reads discord SDK attributes defensively ──
 class _FakeAtt:
@@ -86,14 +86,14 @@ r2 = db._ref_from_attachment(_FakeAtt(content_type=None, size=None, filename="x.
 check("missing content_type → empty mime", r2.mime == "")
 check("missing size → 0", r2.size == 0)
 
-# ── 2. _media_attachment_headers: empty refs → "" (text-only path untouched) ──
+# ── 2. media_attachment_headers: empty refs → "" (text-only path untouched) ──
 check("no attachments → no headers (text-only unchanged)",
-      db._media_attachment_headers([], "hello") == "")
+      ltp.media_attachment_headers([], True) == "")
 
 # ── 3. header trio built for an image with a caption ──
 ref = ltp.AttachmentRef(locator="/tmp/discord-inbox/1_s.png", mime="image/png",
                         filename="s.png", size=438707)
-hdrs = db._media_attachment_headers([ref], "describe this")
+hdrs = ltp.media_attachment_headers([ref], True)
 check("emits content_modalities", "content_modalities: image,text\n" in hdrs, hdrs)
 check("emits media_form attachment", "media_form: attachment\n" in hdrs, hdrs)
 check("emits attachments json header", "attachments: [" in hdrs, hdrs)
@@ -101,14 +101,14 @@ check("header block is newline-terminated (composes into the write f-string)", h
 check("no stray embedded blank line breaks the header run", "\n\n" not in hdrs)
 
 # caption absent → no `text` modality
-hdrs_nocap = db._media_attachment_headers([ref], "")
+hdrs_nocap = ltp.media_attachment_headers([ref], False)
 check("no caption → text modality omitted",
       "content_modalities: image\n" in hdrs_nocap, hdrs_nocap)
 
 # a non-image attachment → file modality
 pdf = ltp.AttachmentRef(locator="/tmp/x.pdf", mime="application/pdf", size=10)
 check("pdf → file modality",
-      "content_modalities: file\n" in db._media_attachment_headers([pdf], ""))
+      "content_modalities: file\n" in ltp.media_attachment_headers([pdf], False))
 
 # ── 4. round-trip through a realistic task-mid file (discord is a task-mid writer) ──
 # Assemble exactly as the write block does, including the legacy body line.
@@ -119,7 +119,7 @@ task_file = (
     f"task: {body}\n"
     "source: discord\n"
     "interaction_type: message\n"
-    f"{db._media_attachment_headers([ref], 'describe this')}"
+    f"{ltp.media_attachment_headers([ref], True)}"
     "channel_id: 123\n"
     "access_tier: owner\n"
 )
@@ -145,4 +145,4 @@ for k in ("attachments", "content_modalities", "media_form"):
 if failures:
     print(f"\nFAIL — {len(failures)} check(s) failed: {failures}")
     raise SystemExit(1)
-print("\nPASS — discord write-side media-attachment headers")
+print("\nPASS — discord write-side media-attachment headers (LTP helpers)")
