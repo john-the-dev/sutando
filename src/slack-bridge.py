@@ -91,6 +91,7 @@ APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")
 if not BOT_TOKEN or not APP_TOKEN:
     channels_env = claude_home_path("channels", "slack", ".env")
     if channels_env.exists():
+        os.chmod(channels_env, 0o600)  # token file — enforce owner-only, mirrors access.json treatment  # pragma: no cover
         for line in channels_env.read_text().splitlines():
             if line.startswith("SLACK_BOT_TOKEN=") and not BOT_TOKEN:
                 BOT_TOKEN = line.split("=", 1)[1].strip().strip('"').strip("'")

@@ -185,6 +185,7 @@ TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 if not TOKEN:
     channels_env = claude_home_path("channels", "discord", ".env")
     if channels_env.exists():
+        os.chmod(channels_env, 0o600)  # token file — enforce owner-only, mirrors access.json treatment
         for line in channels_env.read_text().splitlines():
             if line.startswith("DISCORD_BOT_TOKEN="):
                 TOKEN = line.split("=", 1)[1].strip()
