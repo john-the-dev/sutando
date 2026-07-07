@@ -64,7 +64,10 @@ def load_bridge():
     spec = importlib.util.spec_from_loader("bridge", loader=None)
     bridge = importlib.util.module_from_spec(spec)
     bridge.__file__ = str(REPO / "src" / "discord-bridge.py")
-    exec(src, bridge.__dict__)
+    # compile() with the real filename so coverage.py attributes lines to
+    # src/discord-bridge.py rather than an anonymous <string> frame.
+    code = compile(src, bridge.__file__, "exec")
+    exec(code, bridge.__dict__)
     return bridge
 
 
