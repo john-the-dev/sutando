@@ -102,6 +102,9 @@ _KNOWN_KEY_SET = frozenset(KNOWN_HEADER_KEYS)
 # (`tasks/<id>.txt`, `results/<id>.txt`). NOT restricted to `task-` prefix:
 # real producers also emit `ask-*`, `sc-ask-*`, and `reco-skill-*` ids
 # that `find_archived_task` must be able to look up (issue #1960).
+# Leading `-` is accepted intentionally — mirrors `_valid_tid` and is safe
+# because ids are only used in Path-based operations, never interpolated raw
+# into shell args.
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
