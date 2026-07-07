@@ -163,6 +163,74 @@ class TestAgentApiAnswerFreeform(unittest.TestCase):
         self.assertEqual(errors, [], f"Concurrent requests failed: {errors}")
         self.assertEqual(results, [200, 200])
 
+    def test_answer_skips_resolved_section_in_loop(self):
+        """[RESOLVED] section before the target question must be preserved — line 873."""
+        pq = self.workspace / "pending-questions.md"
+        pq.write_text(
+            "# Pending Questions\n\n"
+            "## [RESOLVED] Q1 — old decision\n\n"
+            "This was answered long ago.\n\n"
+            "## Should we bump the version?\n\n"
+            "The release is ready.\n"
+        )
+        # Q2 is the open question (Q1 is the [RESOLVED] section)
+        status, body = self.post_answer("Q2", "yes, bump it")
+        self.assertEqual(status, 200)
+        updated = pq.read_text()
+        self.assertIn("[RESOLVED] Q1 — old decision", updated)
+        self.assertIn("Should we bump the version", updated)
+        self.assertIn("**Status:** Answered — yes, bump it", updated)
+
+    def test_answer_replaces_status_waiting_marker(self):
+        """Section with **Status:** Waiting gets the marker replaced in-place — line 881."""
+        pq = self.workspace / "pending-questions.md"
+        pq.write_text(
+            "# Pending Questions\n\n"
+            "## Deploy to prod?\n\n"
+            "Staging tests passed.\n\n"
+            "**Status:** Waiting for owner response\n"
+        )
+        status, body = self.post_answer("Q1", "yes, deploy now")
+        self.assertEqual(status, 200)
+        updated = pq.read_text()
+        # The Waiting marker is replaced (not appended)
+        self.assertNotIn("**Status:** Waiting", updated)
+        self.assertIn("**Status:** Answered — yes, deploy now", updated)
+
+    def test_answer_with_empty_section_preserved(self):
+        """Empty ## section (blank after split) is passed through unchanged — line 864."""
+        pq = self.workspace / "pending-questions.md"
+        # An empty ## section arises when two consecutive ## headers appear.
+        pq.write_text(
+            "# Pending Questions\n\n"
+            "## \n\n"            # empty section title/body
+            "## Open question\n\n"
+            "Still pending.\n"
+        )
+        # Q2 is "Open question" (Q1 is the empty section)
+        status, body = self.post_answer("Q2", "acknowledged")
+        self.assertEqual(status, 200)
+        updated = pq.read_text()
+        self.assertIn("Open question", updated)
+        self.assertIn("**Status:** Answered — acknowledged", updated)
+
+    def test_answer_skips_sub_heading_section(self):
+        """Section whose title begins with '#' (sub-heading mis-parse) is skipped — lines 870-871."""
+        pq = self.workspace / "pending-questions.md"
+        pq.write_text(
+            "# Pending Questions\n\n"
+            "## # Stale header artefact\n\n"  # title = "# Stale header artefact"
+            "Legacy content.\n\n"
+            "## Real question\n\n"
+            "Active pending item.\n"
+        )
+        # Q2 is "Real question" (Q1 is the # sub-heading section skipped)
+        status, body = self.post_answer("Q2", "done")
+        self.assertEqual(status, 200)
+        updated = pq.read_text()
+        self.assertIn("Real question", updated)
+        self.assertIn("**Status:** Answered — done", updated)
+
 
 if __name__  == "__main__":
     suite = unittest.TestLoader().loadTestsFromTestCase(TestAgentApiAnswerFreeform)
