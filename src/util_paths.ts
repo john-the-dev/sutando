@@ -23,7 +23,7 @@
 // environments miss startup-only warnings, so logging at every resolution is
 // intentional).
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { resolveWorkspace } from './workspace_default.js';
@@ -205,7 +205,6 @@ const _CAPTURE_TOKEN_PATH = join(process.env.HOME || '', '.config', 'sutando', '
  */
 export function readCaptureToken(): string | undefined {
 	try {
-		const { readFileSync } = require('node:fs');
 		const tok = readFileSync(_CAPTURE_TOKEN_PATH, 'utf8').trim();
 		return tok || undefined;
 	} catch {
