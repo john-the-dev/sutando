@@ -666,7 +666,7 @@ fi
 # Serves the research webapp with the live (read-only) portfolio panel and keeps
 # its snapshot fresh via a background refresher daemon. No-op if not initialised.
 if [ -d "$REPO/skills/portfolio-research" ]; then
-  if [ ! -d "${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}/research/portfolio/webapp" ]; then
+  if [ ! -d "$WORKSPACE/research/portfolio/webapp" ]; then
     bash "$REPO/skills/portfolio-research/scripts/init-evergreen-webapp.sh" \
       > "$LOGS_DIR/portfolio-dashboard.log" 2>&1 || true
   fi
@@ -801,10 +801,10 @@ else
   echo "  ~ telegram bridge (no token — optional)"
 fi
 
-# Remote relay bridge (optional channel — generic, same shape as the discord/
+# Remote gateway bridge (optional channel — generic, same shape as the discord/
 # telegram/slack blocks below). Config + token live in the channel .env, resolved
 # via the same claude-home-path helper; the bridge itself ships in src/ (provider-
-# neutral, like the others). Relay protocol: docs/remote-relay-protocol.md.
+# neutral, like the others). Relay protocol: docs/remote-gateway-protocol.md.
 # Deliberately silent when unconfigured — a Sutando-only user never sees it.
 # Back-compat: also detect/honor a legacy AG2_REMOTE_* token written to the repo
 # .env by older onboarding, so existing agents keep reconnecting after this lands
@@ -818,11 +818,11 @@ if _RELAY_ENV="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path channel
   REMOTE_TASK_TOKEN="${REMOTE_TASK_TOKEN:-${AG2_REMOTE_TOKEN:-}}"
   REMOTE_TASK_TIER="${REMOTE_TASK_TIER:-${AG2_REMOTE_TIER:-team}}"
   export REMOTE_TASK_TOKEN REMOTE_TASK_TIER
-  if ! pgrep -f "remote-relay-bridge" > /dev/null 2>&1; then
-    python3 "$REPO/src/remote-relay-bridge.py" > "$LOGS_DIR/remote-relay-bridge.log" 2>&1 &
-    echo "  ✓ relay bridge"
+  if ! pgrep -f "remote-gateway-bridge" > /dev/null 2>&1; then
+    python3 "$REPO/src/remote-gateway-bridge.py" > "$LOGS_DIR/remote-gateway-bridge.log" 2>&1 &
+    echo "  ✓ gateway bridge"
   else
-    echo "  ✓ relay bridge (already running)"
+    echo "  ✓ gateway bridge (already running)"
   fi
 fi
 
@@ -858,7 +858,7 @@ if _DC_ENV="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path channels/d
     echo "  ~ discord bridge (no python with discord.py — run: /opt/homebrew/bin/pip3 install discord.py)"
   elif ! pgrep -f "discord-bridge" > /dev/null 2>&1; then
     echo "  Starting Discord bridge with $PYTHON_WITH_DISCORD..."
-    "$PYTHON_WITH_DISCORD" src/discord-bridge.py > "$LOGS_DIR/discord-bridge.log" 2>&1 &
+    PYTHONUNBUFFERED=1 "$PYTHON_WITH_DISCORD" src/discord-bridge.py > "$LOGS_DIR/discord-bridge.log" 2>&1 &
     echo "  ✓ discord bridge"
   else
     echo "  ✓ discord bridge (already running)"

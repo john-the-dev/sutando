@@ -15,6 +15,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var hotKeyActions: [UInt32: String] = [:]  // hotkey id → action name
     var lastDropTime: Date = .distantPast
     var isRecordingVideo: Bool = false  // ⌃R start/stop toggle state
+    var videoClipMenuItem: NSMenuItem?  // menu row that shows 🔴 while recording
     var screencaptureInFlight: Bool = false  // guards against stacked crosshair launches
     // Runtime state lives under the per-user workspace dir, not the repo
     // checkout. **Delegates to SutandoConfig.resolveWorkspace()** as of the
@@ -213,10 +214,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Menu Bar
 
+    /// Recording indicator on the Drop Video Clip MENU ROW (Susan 2026-07-02
+    /// asked for the indicator on this exact row, not elsewhere): while
+    /// recording, the row reads "🔴 Drop Video Clip — recording…"; back to the
+    /// plain label once stopped. The toggle notifications alone weren't
+    /// enough — a missed notification left no way to tell whether the
+    /// recorder was still rolling.
+    func setRecordingIndicator(_ on: Bool) {
+        DispatchQueue.main.async {
+            guard let item = self.videoClipMenuItem else { return }
+            let glyph = (item.representedObject as? String) ?? ""
+            // Same leading-marker convention as the Mode rows (● = active):
+            // the Drop Video Clip row itself says whether the recorder rolls.
+            item.title = on ? "🔴 Drop Video Clip — recording… \(glyph)"
+                            : "Drop Video Clip \(glyph)"
+        }
+    }
+
     func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
-            let avatarPath = repoRoot + "/assets/stand-avatar.png"
+            let avatarPath = workspace + "/assets/stand-avatar.png"
             if let image = NSImage(contentsOfFile: avatarPath) {
                 image.size = NSSize(width: 18, height: 18)
                 image.isTemplate = false
@@ -241,7 +259,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         for hk in hotkeys {
             guard let (label, sel) = actionToSelector[hk.action] else { continue }
             let glyph = displayLabel(key: hk.key, modifiers: hk.modifiers)
-            menu.addItem(NSMenuItem(title: "\(label) (\(glyph))", action: sel, keyEquivalent: ""))
+            let item = NSMenuItem(title: "\(label) (\(glyph))", action: sel, keyEquivalent: "")
+            if hk.action == "drop_video_clip" {
+                // Recording indicator lives ON this row (Susan 2026-07-02
+                // on this exact row): stash the hotkey glyph so
+                // setRecordingIndicator can rebuild both title states.
+                item.representedObject = "(\(glyph))"
+                videoClipMenuItem = item
+            }
+            menu.addItem(item)
         }
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Open Web UI", action: #selector(openWebUI), keyEquivalent: ""))
@@ -889,7 +915,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Composited onto the top-right corner of the 18×18 avatar so the
     /// menu bar continuously signals mode without taking an extra slot.
     func avatarImage(presenterActive: Bool, meetingActive: Bool = false) -> NSImage? {
-        let avatarPath = repoRoot + "/assets/stand-avatar.png"
+        let avatarPath = workspace + "/assets/stand-avatar.png"
         guard let base = NSImage(contentsOfFile: avatarPath) else { return nil }
         base.size = NSSize(width: 18, height: 18)
         base.isTemplate = false
@@ -1148,8 +1174,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return "\(modSymbols)\(key)"
     }
 
+    /// Publish the resolved hotkeys to `<workspace>/state/hotkeys.json` so the
+    /// web UI + dashboard render the real bindings instead of hardcoding their
+    /// own copies (which drifted — this is the single source they read). Same
+    /// atomic tmp+replace as the status-file writers above.
+    private func publishHotkeys(_ hotkeys: [(action: String, key: String, modifiers: [String])]) {
+        let entries = hotkeys.map { hk in
+            ["action": hk.action,
+             "label": displayLabel(key: hk.key, modifiers: hk.modifiers),
+             "key": hk.key,
+             "modifiers": hk.modifiers] as [String: Any]
+        }
+        guard let json = try? JSONSerialization.data(withJSONObject: entries, options: [.prettyPrinted]) else { return }
+        let stateDir = workspace + "/state"
+        try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
+        let dst = URL(fileURLWithPath: stateDir + "/hotkeys.json")
+        let tmp = URL(fileURLWithPath: stateDir + "/hotkeys.json.tmp")
+        do {
+            try json.write(to: tmp, options: [.atomic])
+            _ = try FileManager.default.replaceItemAt(dst, withItemAt: tmp)
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+        }
+    }
+
     func registerHotKey() {
         let hotkeys = loadHotkeyConfig()
+        publishHotkeys(hotkeys)
         var statuses: [String] = []
         for (idx, hk) in hotkeys.enumerated() {
             guard let keyCode = AppDelegate.keyNameToCode[hk.key] else {
@@ -1673,6 +1724,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 // Recording began — flip state; nothing to drop until stop.
                 if status == "recording" || status == "already_recording" {
                     isRecordingVideo = true
+                    setRecordingIndicator(true)
                     appendLog(logFile, "[\(timestamp)] dropVideoClip: recording started")
                 } else {
                     notify("Sutando", "Couldn't start recording (\(status))")
@@ -1682,6 +1734,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             // Stopping — flip state and drop the produced clip.
             isRecordingVideo = false
+            setRecordingIndicator(false)
             guard status == "ok", let path = json["path"] as? String else {
                 notify("Sutando", "Recording stopped, no clip (\(status))")
                 appendLog(logFile, "[\(timestamp)] dropVideoClip(stop): \(status)")
@@ -1893,6 +1946,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         id: task-\(ts)
         timestamp: \(ISO8601DateFormatter().string(from: Date()))
         source: context-drop
+        interaction_type: system_event
         task: User dropped context via hotkey. Process this:
         \(content)
         """
