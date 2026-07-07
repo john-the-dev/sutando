@@ -176,6 +176,95 @@ class TestExtractCallers(unittest.TestCase):
             result = _extract_personal_path_args_ts(Path(tmp))
             self.assertIn("stand-identity.json", result)
 
+    def test_py_attribute_call_extracts_arg(self):
+        """Attribute-style call (util.personal_path("x")) is extracted — line 111-112."""
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "test.py"
+            f.write_text('util.personal_path("attr-style.json")\n')
+            result = _extract_personal_path_args_py(Path(tmp))
+            self.assertIn("attr-style.json", result)
+
+    def test_py_skips_non_personal_path_calls(self):
+        """Non-matching function names skip the arg extraction — line 114."""
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "test.py"
+            f.write_text('some_other_func("irrelevant.json")\n')
+            result = _extract_personal_path_args_py(Path(tmp))
+            self.assertNotIn("irrelevant.json", result)
+
+    def test_py_skips_call_with_no_args(self):
+        """personal_path() with no arguments does not crash — line 116."""
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "test.py"
+            f.write_text('personal_path()\n')
+            result = _extract_personal_path_args_py(Path(tmp))
+            self.assertEqual(result, {})
+
+    def test_py_skips_syntax_error_file(self):
+        """SyntaxError in a source file is swallowed — lines 98-99."""
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "broken.py"
+            f.write_text('def oops(\n')  # unclosed paren → SyntaxError
+            result = _extract_personal_path_args_py(Path(tmp))
+            self.assertEqual(result, {})
+
+    def test_ts_skips_node_modules(self):
+        """TS files inside node_modules are skipped — line 141."""
+        with tempfile.TemporaryDirectory() as tmp:
+            nm = Path(tmp) / "node_modules" / "pkg"
+            nm.mkdir(parents=True)
+            f = nm / "util.ts"
+            f.write_text("const x = personalPath('in-node-modules.json');\n")
+            result = _extract_personal_path_args_ts(Path(tmp))
+            self.assertNotIn("in-node-modules.json", result)
+
+    def test_ts_skips_unreadable_file(self):
+        """OSError reading a TS file is swallowed — lines 148-149."""
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "locked.ts"
+            f.write_text("const x = personalPath('locked.json');\n")
+            f.chmod(0o000)
+            try:
+                result = _extract_personal_path_args_ts(Path(tmp))
+                self.assertNotIn("locked.json", result)
+            finally:
+                f.chmod(0o644)  # restore so tmpdir cleanup works
+
+    def test_parse_class_rules_warns_on_missing_array(self):
+        """parse_class_rules prints WARN and returns [] when no CLASS_RULES block — lines 59,63."""
+        import io
+        from contextlib import redirect_stdout
+        orig_repo = _ns["REPO"]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            p = tmp_path / "migrate.sh"
+            p.write_text("#!/bin/bash\n# no CLASS_RULES here\necho hello\n")
+            _ns["REPO"] = tmp_path
+            buf = io.StringIO()
+            try:
+                with redirect_stdout(buf):
+                    rules = _parse_class_rules(p)
+                self.assertEqual(rules, [])
+                self.assertIn("WARN", buf.getvalue())
+            finally:
+                _ns["REPO"] = orig_repo
+
+    def test_parse_class_rules_skips_blank_line_in_rules(self):
+        """Blank lines inside CLASS_RULES body are skipped — line 69 (continue)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "migrate.sh"
+            f.write_text(
+                "#!/bin/bash\n"
+                "CLASS_RULES=(\n"
+                "\n"  # blank line inside the array
+                '    "stand-identity.json|newest-mtime"\n'
+                ")\n"
+            )
+            rules = _parse_class_rules(f)
+            self.assertEqual(len(rules), 1)
+            self.assertEqual(rules[0], ("stand-identity.json", "newest-mtime"))
+
 
 class TestRunLintNoOp(unittest.TestCase):
 
