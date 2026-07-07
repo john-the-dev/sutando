@@ -48,9 +48,9 @@ sys.path.insert(0, str(SRC_DIR))
 try:
     from workspace_default import resolve_workspace  # type: ignore
     WORKSPACE = Path(resolve_workspace())
-except Exception:
+except Exception:  # pragma: no cover — only fires outside a checkout (can't import workspace_default)
     # Defensive fallback for non-checkout installs — matches CLAUDE.md default.
-    WORKSPACE = SRC_DIR.parent / "workspace"
+    WORKSPACE = SRC_DIR.parent / "workspace"  # pragma: no cover
 
 
 def host_slug() -> str:

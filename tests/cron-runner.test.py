@@ -107,6 +107,13 @@ def test_bad_expr_raises():
         check(True, "malformed expr raises ValueError")
 
 
+def test_month_filter():
+    # Line 108: cron_matches returns False when the month field doesn't match.
+    # expr "0 6 * 7 *" fires only in July (month=7). August (tm_mon=8) must reject.
+    check(not cr.cron_matches("0 6 * 7 *", _lt(2026, 8, 1, 6, 0)),
+          "month filter rejects a date outside the specified month")
+
+
 # --- 2. due_since catch-up --------------------------------------------------
 def _epoch(y, mo, d, h, mi):
     return int(time.mktime((y, mo, d, h, mi, 0, 0, 0, -1)))
@@ -154,6 +161,23 @@ def test_emit_task_prompt_skill():
         check("task: /morning-briefing" in body, "prompt_skill rendered as slash command")
 
 
+# --- 3b. _load_json fallback -------------------------------------------------
+def test_load_json_fallback():
+    # Lines 141-142: _load_json returns the default when the file is missing or
+    # contains invalid JSON — guards the "first-ever run" and corrupt-state cases.
+    import json
+    check(cr._load_json(Path("/nonexistent/__cron_runner_test__.json"), []) == [],
+          "_load_json returns default list when file is missing")
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        f.write("not valid json {{{")
+        bad_path = Path(f.name)
+    try:
+        check(cr._load_json(bad_path, {}) == {},
+              "_load_json returns default dict for invalid JSON")
+    finally:
+        bad_path.unlink(missing_ok=True)
+
+
 # --- 4. run() tick: launchd-flag filtering + state persistence --------------
 def test_run_only_fires_launchd_entries():
     with tempfile.TemporaryDirectory() as d:
@@ -183,6 +207,54 @@ def test_run_only_fires_launchd_entries():
         # Second tick at the same minute — state was persisted, so no re-fire.
         emitted2 = cr.run(now_epoch=now)
         check(emitted2 == [], "no double-fire: persisted state suppresses re-emit")
+
+
+def test_run_skips_entry_missing_name_or_expr():
+    # Line 183: `continue` for entries missing name or cron — defensive guard
+    # against malformed crons.json entries (typo or partial write).
+    import json
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        cr.TASKS_DIR = root / "tasks"
+        cr.CRONS_FILE = root / "crons.json"
+        cr.STATE_FILE = root / "state" / "cron-runner-state.json"
+        now = _epoch(2026, 7, 2, 6, 2)
+        cr.CRONS_FILE.write_text(json.dumps([
+            {"cron": "2 6 * * *", "prompt": "x", "launchd": True},  # missing name
+            {"name": "no-cron", "prompt": "x", "launchd": True},     # missing cron
+        ]))
+        cr.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cr.STATE_FILE.write_text(json.dumps({}))
+        emitted = cr.run(now_epoch=now)
+        check(emitted == [], "entries missing name or cron are silently skipped")
+
+
+def test_run_skips_entry_with_bad_cron_expr():
+    # Lines 189-191: ValueError from a malformed cron expression is caught and
+    # the entry is skipped with a stderr message (does not crash the runner).
+    import io
+    import json
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        cr.TASKS_DIR = root / "tasks"
+        cr.CRONS_FILE = root / "crons.json"
+        cr.STATE_FILE = root / "state" / "cron-runner-state.json"
+        now = _epoch(2026, 7, 2, 6, 2)
+        cr.CRONS_FILE.write_text(json.dumps([
+            {"name": "bad", "cron": "not a valid expr", "prompt": "x", "launchd": True},
+        ]))
+        cr.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cr.STATE_FILE.write_text(json.dumps({}))
+        buf = io.StringIO()
+        import sys as _sys
+        old_stderr = _sys.stderr
+        _sys.stderr = buf
+        try:
+            emitted = cr.run(now_epoch=now)
+        finally:
+            _sys.stderr = old_stderr
+        check(emitted == [], "entry with bad cron expr is skipped")
+        check("skipping bad" in buf.getvalue(), "skip message written to stderr")
 
 
 def _run_all():
