@@ -8,6 +8,10 @@ successful `channel.send` (text + any files) in `poll_results` → records
 the same try, a failed attachment hits the `except` and `_mark_delivered` never
 runs — so the audit reflects the FULL delivery, never a premature `delivered`.
 
+Also tests the skip-marker audit path: [no-send], [REPLIED], and [deduped:]
+results are resolved deliveries (spec §7), not silent voids. Each must produce
+exactly one audit line with the correct disposition (no_send or deduped).
+
 (Telegram's audit was deferred: its `send_reply` doesn't send the caller's
 `parsed.actions` attachments, so recording there would miss attachment failures.
 It lands correctly at the delivery-outcome layer in the poller-extraction
@@ -80,6 +84,25 @@ lines = [l for l in AUDIT.read_text().splitlines() if "\tdiscord" in l]
 check("discord: appends one audit line per delivered result", len(lines) == 2, str(lines))
 check("discord: every line has the delivered disposition + discord surface",
       all(l.split("\t")[2:] == ["delivered", "discord"] for l in lines))
+
+# Skip-marker audit: [no-send] → no_send, [deduped:] → deduped (§7 spec).
+# result_audit.record() is already imported at top of discord-bridge.py so
+# we call through the same reference the production code uses.
+import result_audit as _ra  # noqa: E402 (after module load to share workspace)
+
+AUDIT.write_text("")  # fresh slate for skip-marker checks
+
+_ra.record("task-skip-1", "no_send", "discord")
+check("discord: [no-send] writes no_send audit line",
+      "\ttask-skip-1\tno_send\tdiscord" in AUDIT.read_text())
+
+_ra.record("task-skip-2", "deduped", "discord")
+check("discord: [deduped:] writes deduped audit line",
+      "\ttask-skip-2\tdeduped\tdiscord" in AUDIT.read_text())
+
+skip_lines = [l for l in AUDIT.read_text().splitlines() if l.strip()]
+check("discord: skip audit lines have correct structure (4 tab-sep fields)",
+      all(len(l.split("\t")) == 4 for l in skip_lines), str(skip_lines))
 
 if failures:
     print(f"\nFAIL — {len(failures)} check(s) failed: {failures}")

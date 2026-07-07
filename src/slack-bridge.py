@@ -920,8 +920,17 @@ def result_watcher():
                 # truth so future skip markers added in result_markers.py
                 # automatically apply here.
                 _skip_parsed = parse_markers(reply_text)
-                if any(a.kind == "skip" for a in _skip_parsed.actions):
+                _skip_action = next((a for a in _skip_parsed.actions if a.kind == "skip"), None)
+                if _skip_action is not None:
                     print(f"  Skipped (marker): {task_id}", flush=True)
+                    # §7 audit ledger: skip-marked results are resolved deliveries
+                    # (no_send / deduped), not silent voids. One line per result.
+                    try:
+                        import result_audit as _ra
+                        _disp = "deduped" if _skip_action.value == "deduped" else "no_send"
+                        _ra.record(task_id or "", _disp, "slack")
+                    except Exception:
+                        pass
                 else:
                     try:
                         _send_reply(target["channel"], target.get("thread_ts"), reply_text, task_id=task_id, access_tier=target.get("access_tier", "unknown"))
