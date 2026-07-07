@@ -69,6 +69,7 @@ except Exception:  # pragma: no cover — best-effort telemetry
         return None
 from task_archive import find_task_file  # noqa: E402
 from result_markers import parse_markers, dedup_cross_channel_target, dedup_requeue_count, build_requeued_task  # noqa: E402
+import local_task_protocol  # noqa: E402
 from task_body_guard import confine_user_content  # noqa: E402
 import progress_stream  # noqa: E402  — pure helpers for the progress-streamer (poll_progress)
 from vault_intercept import intercept_vault_commands, redact_vault_commands  # noqa: E402
@@ -2745,6 +2746,7 @@ async def _handle_discord_message(message, force=False):
         }
         access["pending"] = pending
         ACCESS_FILE.write_text(json.dumps(access, indent=2))
+        os.chmod(ACCESS_FILE, 0o600)  # don't inherit umask 644 — file holds owner's Discord user IDs
         await message.channel.send(f"Pairing required. Ask the owner to run:\n`/discord:access pair {code}`")
         print(f"  Pairing requested: @{username} ({sender_id}) code={code}")
         return
@@ -3293,6 +3295,7 @@ async def _handle_discord_message(message, force=False):
             f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
             f"task: {user_task_text}\n"
             f"source: discord\n"
+            f"interaction_type: message\n"
             f"channel_id: {message.channel.id}\n"
             f"channel_name: {channel_name}\n"
             f"guild_name: {guild_name}\n"
@@ -3343,6 +3346,7 @@ def save_to_allowlist(sender_id):
         data.setdefault("allowFrom", []).append(sender_id)
         ACCESS_FILE.parent.mkdir(parents=True, exist_ok=True)
         ACCESS_FILE.write_text(json.dumps(data, indent=2))
+        os.chmod(ACCESS_FILE, 0o600)  # don't inherit umask 644 — file holds owner's Discord user IDs
 
 
 async def poll_approved():
@@ -4310,12 +4314,22 @@ def _task_source(task_id: str):
     if not tf:
         return None
     try:
-        for ln in tf.read_text(encoding="utf-8", errors="replace").splitlines():
-            if ln.startswith("source:"):
-                return ln.split(":", 1)[1].strip().lower() or None
+        # Lenient protocol parser (step 3b): full scan, first occurrence wins
+        # — exact legacy semantics, needed because this probe classifies files
+        # of ANY era and the voice writer was task-mid until mid-2026 (23
+        # archived voice tasks have source: after task:; the stricter
+        # stop-at-task: parser flips their DM verdict — caught by the corpus
+        # sweep in tests/discord-task-source-invariance.test.py).
+        # pragma-no-cover rationale: this module cannot import in the
+        # coverage-gate env (discord.py isn't installed there), so these two
+        # glue lines are unmeasurable; their semantics are covered by
+        # tests/discord-task-source-invariance.test.py, which dual-runs the
+        # extraction against the legacy implementation over the full corpus.
+        src = local_task_protocol.parse_task_headers_lenient(  # pragma: no cover
+            tf.read_text(encoding="utf-8", errors="replace")).get("source")
+        return (src or "").strip().lower() or None  # pragma: no cover
     except OSError:
         return None
-    return None
 
 
 def _dm_fallback_eligible(task_id: str) -> bool:
