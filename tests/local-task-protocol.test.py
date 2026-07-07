@@ -213,11 +213,14 @@ check("task_body on file with no task: line is empty",
       ltp.task_body("id: t\ntimestamp: ts\n") == "")
 
 # 7. Task-id validation (traversal gate).
+# Accepts any producer prefix — real archive has task-*, ask-*, sc-ask-*,
+# reco-skill-* all coexisting (issue #1960). Charset mirrors gateway _valid_tid.
 for good in ("task-1783377232367", "task-chat-1783379117", "task-phone-1", "task-gh-5",
-             "task-health-1700", "task-summary-1"):
+             "task-health-1700", "task-summary-1",
+             "ask-1783379117", "sc-ask-1234", "reco-skill-9999", "result-1"):
     check(f"id ok: {good}", ltp.valid_task_id(good))
-for bad in ("", "task-", "task-../../etc", "task-a b", "task-a/b", "result-1",
-            "task-" + "x" * 200, "task-.hidden"):
+for bad in ("", ".", "..", "task-../../etc", "task-a b", "task-a/b",
+            "task-" + "x" * 200, "x" * 65, "has/slash", "has\x00null"):
     check(f"id rejected: {bad[:24]!r}", not ltp.valid_task_id(bad))
 
 # 8. Archive rules.
@@ -247,13 +250,18 @@ except Exception:
 if (corpus / "archive").is_dir():
     n = bad = no_id = 0
     infidel = 0
+    vid_rejected = 0  # ids that exist but valid_task_id rejects (#1960)
     for p in ltp.iter_archived_tasks(corpus):
         n += 1
         try:
             text = p.read_text(errors="replace")
             h = ltp.parse_task_headers(text)
-            if not (h.get("id") or ltp.valid_task_id(p.stem.split(".")[-1] if "." in p.stem else p.stem)):
+            stem = p.stem.split(".")[-1] if "." in p.stem else p.stem
+            tid = h.get("id") or stem
+            if not tid:
                 no_id += 1
+            elif not ltp.valid_task_id(tid):
+                vid_rejected += 1
             # Body fidelity (Codex P2): every post-task: line that is NOT a
             # vocabulary header line must survive into the trusted body.
             ht = ltp.parse_task_headers_trusted(text)
@@ -275,6 +283,8 @@ if (corpus / "archive").is_dir():
             bad += 1
     check(f"live corpus: {n} files parse without throwing", bad == 0, f"{bad} threw")
     check(f"live corpus: id recoverable everywhere", no_id == 0, f"{no_id} lacked ids")
+    check(f"live corpus: all archive ids accepted by valid_task_id",
+          vid_rejected == 0, f"{vid_rejected} rejected (ask-*, sc-ask-*, reco-skill-* etc. must pass)")
     check(f"live corpus: trusted-body fidelity (no non-header line lost)",
           infidel == 0, f"{infidel} files lost lines")
 else:

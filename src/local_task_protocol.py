@@ -96,22 +96,24 @@ KNOWN_HEADER_KEYS = (
 )
 _KNOWN_KEY_SET = frozenset(KNOWN_HEADER_KEYS)
 
-# Task-id shape: `task-<slug>` where slug is dash-separated [a-z0-9] segments
-# (task-1783..., task-chat-1783..., task-phone-..., task-summary-...,
-# task-gh-..., task-health-...). Mirrors the gateway bridge's `_valid_tid`
-# defense: ids become filenames, so the charset is the path-traversal guard.
-TASK_ID_RE = re.compile(r"^task-[A-Za-z0-9][A-Za-z0-9-]{0,120}$")
+# Task-id shape mirrors the gateway bridge's `_valid_tid` exactly:
+# letters, digits, dots, and dashes; max 64 chars; `.` and `..` rejected
+# explicitly. The charset is the path-traversal guard — ids become filenames
+# (`tasks/<id>.txt`, `results/<id>.txt`). NOT restricted to `task-` prefix:
+# real producers also emit `ask-*`, `sc-ask-*`, and `reco-skill-*` ids
+# that `find_archived_task` must be able to look up (issue #1960).
+TASK_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 def valid_task_id(tid: str) -> bool:
     """True iff `tid` is a well-formed task id, safe to embed in a filename.
 
-    Rejects path separators, dots, whitespace, and empty/oversized ids — the
-    id is used as `tasks/<tid>.txt` and `results/<tid>.txt`, so this is the
-    single traversal gate for readers that accept ids from message content
-    (e.g. `[deduped: <tid>]` holders).
+    Rejects path separators, whitespace, empty/oversized ids, and the special
+    dot-names `.` / `..`. Matches the gateway bridge's `_valid_tid` charset
+    exactly so `find_archived_task` accepts every id shape any live producer
+    can emit (`task-*`, `ask-*`, `sc-ask-*`, `reco-skill-*`, …).
     """
-    return bool(TASK_ID_RE.match(tid or ""))
+    return bool(TASK_ID_RE.match(tid or "")) and tid not in (".", "..")
 
 
 # ── Header parsing ───────────────────────────────────────────────────────────
