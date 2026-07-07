@@ -20,6 +20,8 @@ import os
 import re
 import sys
 import tempfile
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -144,7 +146,9 @@ check("slack wiring: redirect actually posts to the target channel",
 
 # Skip-marker audit (§7): [no-send] and [deduped:] results are resolved
 # deliveries — not silent voids — and each must get one audit line.
-# Call _record_skip_audit() so coverage hits the production helper lines.
+# Two layers tested:
+#   1. _record_skip_audit() directly (covers the helper function body)
+#   2. result_watcher() skip path (covers the refactored call site + condition lines)
 _audit.write_text("")  # fresh slate for skip checks
 mod._record_skip_audit("task-noslack", "no-send")
 check("slack wiring: [no-send] writes no_send audit line",
@@ -152,6 +156,25 @@ check("slack wiring: [no-send] writes no_send audit line",
 mod._record_skip_audit("task-dedupslack", "deduped")
 check("slack wiring: [deduped:] writes deduped audit line",
       "\ttask-dedupslack\tdeduped\tslack" in _audit.read_text())
+
+# result_watcher integration: exercise the actual skip-path branch in the
+# poll loop (lines 933-934, 938 in slack-bridge.py). Set up a pending task
+# whose result file has [no-send], run the watcher in a daemon thread for
+# one iteration, then verify the audit line was written.
+_audit.write_text("")
+_ws_task = "task-rw-skip-test"
+(mod.RESULTS_DIR / f"{_ws_task}.txt").write_text("[no-send]\n")
+with mod.pending_replies_lock:
+    mod.pending_replies[_ws_task] = {
+        "channel": "C0FAKE", "thread_ts": None,
+        "access_tier": "unknown", "submitted_at": time.time(),
+    }
+_rw_thread = threading.Thread(target=mod.result_watcher, daemon=True)
+_rw_thread.start()
+time.sleep(0.3)  # first iteration completes before the 1s sleep
+check("slack wiring: result_watcher [no-send] writes no_send via skip path",
+      "\t" + _ws_task + "\tno_send\tslack" in _audit.read_text(),
+      _audit.read_text() if _audit.exists() else "(no audit file)")
 
 if failures:
     print(f"\nFAIL — {len(failures)} check(s) failed: {failures}")

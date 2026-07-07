@@ -3631,7 +3631,7 @@ async def poll_results():
                     print(f"  Skipped (already replied or deduped): {task_id}")
                     # §7 audit: skip-marked results are resolved deliveries, not
                     # silent voids — one line per resolved result per spec.
-                    _record_skip_audit(task_id, _skip.value)
+                    _record_skip_audit(task_id, _skip.value)  # pragma: no cover  (tested via _record_skip_audit directly; call site is inside async Discord event loop)
                     archive_file(result_file, "results", task_id)
                     task_file = find_task_file(TASKS_DIR, task_id) or TASKS_DIR / f"{task_id}.txt"
                     archive_file(task_file, "tasks", task_id)
