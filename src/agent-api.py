@@ -50,11 +50,13 @@ def _safe_id(raw: str) -> str:
 
 
 def validate_twilio_signature(handler, body: str) -> bool:
-    """Validate X-Twilio-Signature if TWILIO_AUTH_TOKEN is configured.
-    Returns True if valid or if token not configured (local dev)."""
+    """Validate X-Twilio-Signature against TWILIO_AUTH_TOKEN.
+    Fails closed — returns False when the token is not configured so that
+    unauthenticated requests cannot create tasks via the /twilio/* endpoints.
+    TWILIO_AUTH_TOKEN must be set in .env for these endpoints to accept webhooks."""
     auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
     if not auth_token:
-        return True
+        return False
     import hmac, hashlib, base64
     from urllib.parse import parse_qs
 
