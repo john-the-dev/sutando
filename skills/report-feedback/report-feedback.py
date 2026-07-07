@@ -39,17 +39,27 @@ def resolve_workspace() -> Path:
 def read_cloud_auth(ws: Path):
     """Return (apiBase, token) if signed in to Sutando Cloud, else (None, None).
 
-    Prefers cloud-auth.json on disk (the same file the desktop reads); falls
-    back to the metering env the desktop supervisor injects for signed-in runs.
+    Matches the desktop's readCloudAuth (electron/ipc.cjs): the record lives at
+    ``<workspace>/cloud-auth.json`` and "signed in" simply means a ``token`` is
+    present (there is no ``signedIn`` field). We also probe the packaged-app
+    canonical workspace (~/.sutando/repo/workspace) so the skill finds the token
+    even when it runs from a different checkout than the desktop uses. Falls
+    back to the metering env the supervisor injects for signed-in runs.
     """
+    seen: set[str] = set()
     for p in (
-        ws / "state" / "auth" / "cloud-auth.json",
-        Path.home() / "Library/Application Support/@stando/ui/cloud-auth.json",
+        ws / "cloud-auth.json",  # <workspace>/cloud-auth.json — where the desktop writes it
+        Path.home() / ".sutando" / "repo" / "workspace" / "cloud-auth.json",  # packaged-app default (per workspace contract)
+        Path.home() / "Library" / "Application Support" / "@stando" / "ui" / "cloud-auth.json",  # legacy
     ):
+        rp = str(p)
+        if rp in seen:
+            continue
+        seen.add(rp)
         try:
             if p.exists():
                 d = json.loads(p.read_text())
-                if d.get("signedIn") and d.get("token"):
+                if d.get("token"):  # signed in == has token (matches desktop)
                     return (d.get("apiBase") or "https://sutando.ag2.ai"), d["token"]
         except Exception:
             continue
