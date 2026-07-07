@@ -19,10 +19,44 @@ import argparse
 import json
 import os
 import platform
+import re
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+
+def _redact(text: str) -> str:
+    """Best-effort scrub of secrets/PII before a log excerpt leaves the machine.
+
+    A backstop, not a guarantee: the /api/feedback mirror is a private Slack
+    channel today, but /api/feedback can also open GitHub issues, so we mask the
+    obvious leak vectors (auth headers, key=value secrets, common token formats,
+    and the home-dir username) rather than ship raw logs. Kept deliberately
+    simple — it should never throw or mangle the excerpt beyond recognition.
+    """
+    if not text:
+        return text
+    # Authorization: Bearer <tok>  /  "Bearer abc123"
+    text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+", "Bearer <redacted>", text)
+    # token=... / api_key: "..." / secret=... / password=... / authorization=...
+    text = re.sub(
+        r"(?i)\b(token|api[_-]?key|secret|password|passwd|authorization)\b"
+        r"(\s*[:=]\s*)(\"?)([^\s\"',;]+)",
+        r"\1\2\3<redacted>",
+        text,
+    )
+    # Common provider token formats (sk-..., xoxb-..., ghp_..., github_pat_..., AKIA...)
+    text = re.sub(
+        r"\b(sk|xox[baprs]|ghp|gho|ghs|github_pat|AKIA)[_-][A-Za-z0-9_\-]{6,}",
+        "<redacted-token>",
+        text,
+    )
+    # Home dir → /Users/<user> so the OS username doesn't leak
+    home = str(Path.home())
+    if home and home != "/":
+        text = text.replace(home, "/Users/<user>")
+    return text
 
 
 def resolve_workspace() -> Path:
@@ -92,7 +126,7 @@ def logs_excerpt(ws: Path):
         for f in files:
             tail = "\n".join(f.read_text(errors="replace").splitlines()[-40:])
             parts.append(f"===== {f.name} (last 40 lines) =====\n{tail}")
-        return "\n\n".join(parts)[-8000:], [f.name for f in files]
+        return _redact("\n\n".join(parts))[-8000:], [f.name for f in files]
     except Exception:
         return None, []
 
@@ -127,7 +161,11 @@ def main() -> None:
         "kind": a.kind,
         "severity": a.severity,
         "title": a.title.strip(),
-        "body": a.body.strip() or None,
+        # Always a string — the /api/feedback schema types `body` as string and
+        # rejects null (400 invalid_payload). Mirror the desktop form, which
+        # sends the trimmed body (possibly ""). Fall back to the title so an
+        # empty-body report still carries context.
+        "body": a.body.strip() or a.title.strip(),
         "context": ctx,
     }
     req = urllib.request.Request(
