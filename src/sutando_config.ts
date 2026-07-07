@@ -305,7 +305,7 @@ export function resolveWorkspace(repoRoot?: string): string {
 	if (typeof ws === 'string' && ws) {
 		resolved = resolve(ws.replace(/^~/, homedir()));
 	} else if (root === undefined) {
-		resolved = resolve(join(homedir(), '.sutando', 'workspace'));
+		resolved = resolve(join(homedir(), 'sutando-workspace'));
 	} else {
 		resolved = resolve(join(root, HARDCODED_WORKSPACE_DEFAULT_REL));
 	}

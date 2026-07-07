@@ -24,7 +24,7 @@ import { registerVisionOnContributor, callUpdateTools, callRestoreTools, capture
 function resolveWorkspace(): string {
 	const env = process.env.SUTANDO_WORKSPACE;
 	if (env) return env.replace(/^~/, process.env.HOME ?? '');
-	return join(process.env.HOME ?? '', '.sutando', 'workspace');
+	return join(process.env.HOME ?? '', 'sutando-workspace');
 }
 
 // Contributor for the screen-share-started system note. Tells Gemini the
