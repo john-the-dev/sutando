@@ -39,6 +39,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -118,6 +119,7 @@ task_history = {}
 # Voice state: "connected" or "disconnected". Toggled via /voice/toggle.
 # Web client polls /voice/state and connects/disconnects accordingly.
 voice_desired_state = "disconnected"
+_voice_state_lock = threading.Lock()
 
 
 
@@ -763,7 +765,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/voice/toggle":
             if not self.check_auth():
                 return
-            voice_desired_state = "connected" if voice_desired_state == "disconnected" else "disconnected"
+            with _voice_state_lock:
+                voice_desired_state = "connected" if voice_desired_state == "disconnected" else "disconnected"
             self.send_json(200, {"state": voice_desired_state})
             return
 
