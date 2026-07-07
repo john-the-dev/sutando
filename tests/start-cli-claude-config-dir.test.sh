@@ -49,6 +49,9 @@ setup_sandbox() {
   BIN_STUB="$SANDBOX/bin"
   export HOME="$SANDBOX/home"
   export SUTANDO_WORKSPACE="$SANDBOX/workspace"
+  # Hermetic: parent session's CLAUDE_CONFIG_DIR must not bleed into start-cli's
+  # helper-absent test (it would appear in the env-dump and cause a false FAIL).
+  unset CLAUDE_CONFIG_DIR
 
   mkdir -p "$REPO_FAKE/scripts" "$REPO_FAKE/src" "$REPO_FAKE/src/agent/claude/cli" "$BIN_STUB" \
            "$HOME" "$SUTANDO_WORKSPACE/state"
@@ -61,10 +64,9 @@ exit 0
 EOF
   chmod +x "$BIN_STUB/claude"
 
-  # Stub `pgrep` — start-cli's L34/L48 use pgrep to detect an existing
-  # sutando-core session and short-circuit to "already running". The TEST
-  # runner itself IS a claude process, so real pgrep would match and the
-  # spawn path never runs. Stub returns exit 1 (no matches found).
+  # Stub `pgrep` — kept for forward-compat (some code paths may still call it),
+  # but session detection now goes through `tmux has-session` (see session_exists()
+  # in start-cli.sh). The stub here is a no-op safety net; exit 1 = no match.
   cat > "$BIN_STUB/pgrep" << 'EOF'
 #!/bin/bash
 exit 1
@@ -88,7 +90,10 @@ case "\$1" in
     while [ "\$#" -gt 0 ] && [ "\$1" != "claude" ]; do shift; done
     if [ "\$1" = "claude" ]; then exec "\$@"; fi
     ;;
-  has-session|kill-session|start-server|set-option|bind|attach)
+  has-session)
+    exit 1  # no session exists — lets tests exercise the fresh-spawn path
+    ;;
+  kill-session|start-server|set-option|bind|attach)
     :  # no-op
     ;;
 esac
@@ -108,9 +113,11 @@ EOF
   if [ "$helper_present" = "yes" ]; then
     cp "$REAL_REPO/scripts/sutando-config.sh" "$REPO_FAKE/scripts/"
     cp "$REAL_REPO/src/sutando_config.py" "$REPO_FAKE/src/"
+    # Use absolute path so workspace resolves to $SANDBOX/workspace (the same
+    # dir the mkdir above created), avoiding a mismatch with ${REPO_DIR}/workspace.
     cat > "$REPO_FAKE/sutando.config.json" << EOF
 {
-  "workspace": {"path": "\${REPO_DIR}/workspace"},
+  "workspace": {"path": "$SANDBOX/workspace"},
   "claude_sutando_config_dir": {"subdir": "$helper_subdir"}
 }
 EOF
@@ -173,8 +180,10 @@ test_valid_config_exports_env() {
     echo "  FAIL: CLAUDE_CONFIG_DIR not in claude's env"
     cleanup_sandbox; return 1
   fi
-  # Must point at SUTANDO_WORKSPACE/.claude-sutando.
-  expected="CLAUDE_CONFIG_DIR=$SUTANDO_WORKSPACE/.claude-sutando"
+  # Must point at SANDBOX/workspace/.claude-sutando. Normalize via realpath
+  # because sutando-config.sh resolves the path (macOS /var → /private/var).
+  ws_real="$(python3 -c "import os; print(os.path.realpath('$SANDBOX/workspace'))")"
+  expected="CLAUDE_CONFIG_DIR=${ws_real}/.claude-sutando"
   if [ "$ccd_in_env" != "$expected" ]; then
     echo "  FAIL: CLAUDE_CONFIG_DIR mismatch"
     echo "    expected : $expected"
