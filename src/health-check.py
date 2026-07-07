@@ -35,8 +35,9 @@ try:
 except ImportError:  # non-POSIX (e.g. Windows) — the lock degrades to a no-op
     fcntl = None
 
-REPO_DIR = Path(__file__).parent.parent
-sys.path.insert(0, str(Path(__file__).parent))
+_hc_real = os.path.realpath(__file__)  # resolve workspace/src symlink before walking up
+REPO_DIR = Path(_hc_real).parent.parent
+sys.path.insert(0, str(Path(_hc_real).parent))
 from util_paths import claude_home_path, shared_personal_path  # noqa: E402
 from workspace_default import resolve_workspace, status_read_path  # noqa: E402
 
