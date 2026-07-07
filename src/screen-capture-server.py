@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 Screen capture HTTP server — runs in a terminal (has Screen Recording permission).
 The voice agent calls http://localhost:7845/capture to get instant screenshots.
@@ -36,7 +37,8 @@ def _load_or_create_capture_token() -> str | None:
             st = _os.lstat(_CAPTURE_TOKEN_PATH)
             if (stat.S_ISREG(st.st_mode) and (st.st_mode & 0o777) == 0o600
                     and st.st_uid == _os.getuid()):
-                existing = open(_CAPTURE_TOKEN_PATH).read().strip()
+                with open(_CAPTURE_TOKEN_PATH) as _f:
+                    existing = _f.read().strip()
                 if existing:
                     return existing
             _os.unlink(_CAPTURE_TOKEN_PATH)
