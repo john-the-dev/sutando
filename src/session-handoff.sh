@@ -138,9 +138,12 @@ print(f'5h: {d[\"utilization_5h\"]:.0%} (resets in {m5}min at {r5.strftime(\"%I:
       while IFS= read -r rfile; do
         [ -f "$rfile" ] || continue
         echo "### $(basename "$rfile")"
-        cat "$rfile"
-        echo ""
-        mv "$rfile" "$RELAY_DIR/processed/$(basename "$rfile")"
+        if cat "$rfile"; then
+          echo ""
+          mv "$rfile" "$RELAY_DIR/processed/$(basename "$rfile")"
+        else
+          echo "(read error — file left in place for retry)"
+        fi
       done <<< "$relay_files"
     fi
   else
