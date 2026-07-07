@@ -218,6 +218,28 @@ def test_rejection_reply_uses_event_channel():
         )
 
 
+def test_rejection_api_failure_is_swallowed():
+    """(a-fault) chat_postMessage raises → exception swallowed, _write_task still returns None."""
+    with _TempBridgeState():
+        BRIDGE._TOFU_ENROLLMENT_CODE = "fail11"
+
+        def _raise(**kw):
+            raise RuntimeError("Slack API down")
+
+        BRIDGE.app.client.chat_postMessage = _raise
+
+        event = _make_dm_event("U_ATTACKER", "no code here")
+        result = BRIDGE._write_task(event, "Slack DM", "no code here", "attacker")
+
+        assert result is None, (
+            "rejection path must return None even when chat_postMessage raises"
+        )
+        # Code must NOT be consumed when rejected (whether API call succeeded or not).
+        assert BRIDGE._TOFU_ENROLLMENT_CODE == "fail11", (
+            "enrollment code must survive a rejected (API-failure) enrollment attempt"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
@@ -228,6 +250,7 @@ def main() -> int:
         ("b-code-allows-with-correct-code", test_enrollment_code_gate_allows_with_correct_code),
         ("c-no-code-skips-gate", test_no_enrollment_code_skips_gate),
         ("a-extra-reply-channel", test_rejection_reply_uses_event_channel),
+        ("a-fault-api-failure-swallowed", test_rejection_api_failure_is_swallowed),
     ]
     failures = 0
     for label, fn in tests:
