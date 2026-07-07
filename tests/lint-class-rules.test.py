@@ -192,5 +192,125 @@ class TestRunLintNoOp(unittest.TestCase):
                         f"output must contain PASS or SKIP on main:\n{result.stdout}")
 
 
+# ---------------------------------------------------------------------------
+# Direct run_lint() coverage — calls the function with patched module globals
+# so every branch in run_lint()'s body is instrumented by coverage.py.
+#
+# Strategy: patch _ns["MIGRATE_SH"] and _ns["REPO"] to point at temporary
+# directories with synthetic content, then call _ns["run_lint"]() directly.
+# ---------------------------------------------------------------------------
+
+_run_lint = _ns["run_lint"]
+
+
+class TestRunLintDirect(unittest.TestCase):
+    """Direct run_lint() coverage using patched module globals.
+
+    All tests build a fake REPO inside a tempdir so that
+    MIGRATE_SH.relative_to(REPO) (used in run_lint's print statements) works.
+    """
+
+    def _make_fake_repo(self, rules: list[str] | None,
+                        src_py_files: dict[str, str] | None = None,
+                        src_ts_files: dict[str, str] | None = None) -> tuple[Path, Path]:
+        """Return (tmp_repo, migrate_sh_path). If rules is None, migrate_sh is absent."""
+        tmp_repo = Path(tempfile.mkdtemp(prefix="lint-test-repo-"))
+        scripts_dir = tmp_repo / "scripts"
+        scripts_dir.mkdir()
+        src_dir = tmp_repo / "src"
+        src_dir.mkdir()
+        (tmp_repo / "skills").mkdir()
+        for name, content in (src_py_files or {}).items():
+            (src_dir / name).write_text(content)
+        for name, content in (src_ts_files or {}).items():
+            (src_dir / name).write_text(content)
+        migrate_sh = tmp_repo / "scripts" / "sutando-migrate.sh"
+        if rules is not None:
+            body = "\n".join(f'    "{r}"' for r in rules)
+            migrate_sh.write_text(f"#!/bin/bash\nCLASS_RULES=(\n{body}\n)\n")
+        return tmp_repo, migrate_sh
+
+    def _patch_and_run(self, tmp_repo: Path, migrate_sh: Path) -> tuple[int, str]:
+        """Patch MIGRATE_SH and REPO, call run_lint(), return (returncode, stdout)."""
+        import io
+        from contextlib import redirect_stdout
+        orig_migrate = _ns["MIGRATE_SH"]
+        orig_repo = _ns["REPO"]
+        buf = io.StringIO()
+        try:
+            _ns["MIGRATE_SH"] = migrate_sh
+            _ns["REPO"] = tmp_repo
+            with redirect_stdout(buf):
+                rc = _run_lint()
+        finally:
+            _ns["MIGRATE_SH"] = orig_migrate
+            _ns["REPO"] = orig_repo
+        return rc, buf.getvalue()
+
+    def test_skip_when_migrate_sh_absent(self):
+        """run_lint returns 0 and prints SKIP when sutando-migrate.sh is missing."""
+        tmp_repo, migrate_sh = self._make_fake_repo(None)  # rules=None → no file written
+        rc, out = self._patch_and_run(tmp_repo, migrate_sh)
+        self.assertEqual(rc, 0)
+        self.assertIn("SKIP", out)
+
+    def test_skip_when_class_rules_empty(self):
+        """run_lint returns 0 when CLASS_RULES is empty."""
+        tmp_repo, migrate_sh = self._make_fake_repo([])
+        rc, out = self._patch_and_run(tmp_repo, migrate_sh)
+        self.assertEqual(rc, 0)
+        self.assertIn("SKIP", out)
+
+    def test_pass_when_no_personal_path_callers(self):
+        """run_lint returns 0 when src/ has no personal_path calls."""
+        tmp_repo, migrate_sh = self._make_fake_repo(
+            ["stand-identity.json|newest-mtime"],
+            src_py_files={"noop.py": "x = 1\n"}
+        )
+        rc, _ = self._patch_and_run(tmp_repo, migrate_sh)
+        self.assertEqual(rc, 0)
+
+    def test_pass_when_caller_has_compatible_classification(self):
+        """run_lint returns 0 when personal_path file is newest-mtime (workspace root)."""
+        tmp_repo, migrate_sh = self._make_fake_repo(
+            ["stand-identity.json|newest-mtime", "*|quarantine-unknown"],
+            src_py_files={"reader.py": 'personal_path("stand-identity.json")\n'}
+        )
+        rc, out = self._patch_and_run(tmp_repo, migrate_sh)
+        self.assertEqual(rc, 0)
+        self.assertIn("PASS", out)
+
+    def test_fail_when_caller_file_classified_rehome_state(self):
+        """run_lint returns 1 when a personal_path file is classified rehome-state."""
+        tmp_repo, migrate_sh = self._make_fake_repo(
+            ["stand-identity.json|rehome-state", "*|quarantine-unknown"],
+            src_py_files={"reader.py": 'personal_path("stand-identity.json")\n'}
+        )
+        rc, out = self._patch_and_run(tmp_repo, migrate_sh)
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL", out)
+
+    def test_note_when_caller_file_not_in_class_rules(self):
+        """run_lint returns 0 and emits NOTE when file has no matching rule (cls is None)."""
+        tmp_repo, migrate_sh = self._make_fake_repo(
+            # Only a specific rule that does NOT match "unlisted-thing.json"
+            ["stand-identity.json|newest-mtime"],
+            src_py_files={"reader.py": 'personal_path("unlisted-thing.json")\n'}
+        )
+        rc, out = self._patch_and_run(tmp_repo, migrate_sh)
+        self.assertEqual(rc, 0)
+        self.assertIn("NOTE", out)
+
+    def test_ts_caller_contributes_to_pass(self):
+        """run_lint handles TypeScript callers (personalPath) in addition to Python."""
+        tmp_repo, migrate_sh = self._make_fake_repo(
+            ["ts-state.json|newest-mtime", "*|quarantine-unknown"],
+            src_ts_files={"reader.ts": "const x = personalPath('ts-state.json');\n"}
+        )
+        rc, out = self._patch_and_run(tmp_repo, migrate_sh)
+        self.assertEqual(rc, 0)
+        self.assertIn("PASS", out)
+
+
 if __name__ == "__main__":
     unittest.main()
