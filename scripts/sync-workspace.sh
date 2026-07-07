@@ -637,12 +637,14 @@ _snapshot_per_host_config() {
 # v0.8 migration report (2026-06-06): plain `bash scripts/sync-workspace.sh`
 # silent-committed an uninitialized state.
 #
-# Sentinels we accept as proof of a real init (either suffices):
+# Sentinels we accept as proof of a real init (any one suffices):
 #   1. `.git/info/exclude` contains the generator marker from
 #      `_compose_exclude_content()` — proves we wrote the whitelist.
 #   2. `.sutando-vault/ws-id` — proves _init_impl reached its ws-id step (PR #1459).
+#   3. HEAD is on a flat `host/<hostname>` branch (no wsId segment) — pre-wsId init
+#      that _migrate_flat_branch will upgrade; ws-id is written later in the same run.
 #
-# If neither is present, refuse with a clear error pointing to --init.
+# If none is present, refuse with a clear error pointing to --init.
 # Override: `SUTANDO_SYNC_SKIP_INIT_GUARD=1` for an operator who knows what
 # they're doing (e.g. resurrecting a pre-marker init from before this fix).
 _assert_sync_initialized() {
@@ -655,6 +657,14 @@ _assert_sync_initialized() {
         return 0
     fi
     if [ -f "$_wsid" ]; then
+        return 0
+    fi
+    # Pre-wsId flat branch: HEAD is `host/<hostname>` with no wsId segment.
+    # _migrate_flat_branch will carry history into the wsId branch and _host_ws_segment
+    # will write .sutando-vault/ws-id before push-only runs — so this is safe to allow.
+    local _cur_branch
+    _cur_branch="$(git -C "$WORKSPACE_DIR" symbolic-ref --short HEAD 2>/dev/null || true)"
+    if [ "$_cur_branch" = "host/$(_host)" ]; then
         return 0
     fi
     die "${_caller}: $WORKSPACE_DIR has .git but sync was never initialized (no whitelist marker in .git/info/exclude and no .sutando-vault/ws-id). Refusing to push — git add -A here would commit the WHOLE workspace tree with NO carrier-set filter. Run: bash scripts/sync-workspace.sh --init  (or set SUTANDO_SYNC_SKIP_INIT_GUARD=1 to bypass at your own risk)"
