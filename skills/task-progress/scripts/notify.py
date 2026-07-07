@@ -18,13 +18,14 @@ import os
 import sys
 import urllib.request
 from pathlib import Path
+from typing import Optional
 
 
 MAX_PROGRESS_CHARS = 280
 MAX_PROGRESS_LINES = 4
 
 
-def _progress_message_error(message: str) -> str | None:
+def _progress_message_error(message: str) -> Optional[str]:
     """Return a validation error when a notify body looks like a final answer."""
     stripped = message.strip()
     if len(stripped) > MAX_PROGRESS_CHARS:
@@ -87,7 +88,7 @@ def _post(url: str, payload: dict, headers: dict) -> bool:
         return False
 
 
-def send_slack(channel_id: str, message: str, thread_ts: str | None = None) -> bool:
+def send_slack(channel_id: str, message: str, thread_ts: Optional[str] = None) -> bool:
     token = _token("slack", "SLACK_BOT_TOKEN")
     if not token:
         print("[task-progress] SLACK_BOT_TOKEN not found", file=sys.stderr)
