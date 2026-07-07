@@ -24,7 +24,7 @@ SESSION="sutando-core"
 
 session_exists() {
   command -v tmux > /dev/null 2>&1 || return 1
-  tmux -S "$TMUX_SOCKET" has-session -t "$SESSION" > /dev/null 2>&1
+  tmux -S "$TMUX_SOCKET" has-session -t "=$SESSION" > /dev/null 2>&1
 }
 
 # Optional working-directory override for the core `claude` process.
@@ -244,7 +244,7 @@ fi
 if [ "$1" = "--restart" ]; then
   if session_exists; then
     echo "Killing existing $SESSION session..."
-    tmux -S "$TMUX_SOCKET" kill-session -t "$SESSION" 2>/dev/null || true
+    tmux -S "$TMUX_SOCKET" kill-session -t "=$SESSION" 2>/dev/null || true
     # Poll for actual shutdown — robust on slow machines, faster on fast
     # ones (~1s ceiling) than a fixed sleep.
     for _ in 1 2 3 4 5; do
