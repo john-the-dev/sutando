@@ -76,6 +76,23 @@ class TestProgressMessageGuard(unittest.TestCase):
         self.assertIsNotNone(error)
         self.assertIn("too many lines", error)
 
+    def test_main_rejects_long_message(self):
+        with patch("sys.argv", [
+            "notify.py", "--source", "discord", "--channel-id", "C123",
+            "--message", "x" * 281,
+        ]):
+            rc = self.mod.main()
+        self.assertEqual(rc, 1)
+
+    def test_main_rejects_multiline_message(self):
+        msg = "\n".join(["line1", "line2", "line3", "line4", "line5"])
+        with patch("sys.argv", [
+            "notify.py", "--source", "discord", "--channel-id", "C123",
+            "--message", msg,
+        ]):
+            rc = self.mod.main()
+        self.assertEqual(rc, 1)
+
 
 class TestSendSlack(unittest.TestCase):
     def setUp(self):
