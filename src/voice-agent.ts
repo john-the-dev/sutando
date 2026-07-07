@@ -176,7 +176,7 @@ function acquirePidLock(): void {
 const VOICE_MODEL = process.env.VOICE_MODEL || 'gemini-2.5-flash';
 // Per-user voice config (native-audio model + googleSearch grounding) is
 // data, not code: it lives in the workspace, NOT in the git repo.
-//   live config: $SUTANDO_WORKSPACE/config/voice-agent.json
+//   live config: <workspace>/config/voice-agent.json
 //   template:    src/voice-agent.config.json.example (committed)
 // On first run, if the workspace config is missing, the committed .example
 // template is copied into place so the operator (and the switch_voice_config
