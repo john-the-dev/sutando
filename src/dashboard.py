@@ -352,7 +352,16 @@ def get_schedules() -> list[dict]:
             next_str = f'{nxt.strftime("%a %H:%M")} ({rel})'
         else:
             next_str = ">7d" if expr else "invalid"
-        out.append({"name": job.get("name", "?"), "cron": expr, "kind": kind, "next": next_str})
+        if job.get("description"):
+            desc = job["description"]
+        elif job.get("prompt_skill"):
+            desc = f'Runs the /{job["prompt_skill"]} skill'
+        else:
+            _p = re.sub(r"^Run:?\s*", "", (job.get("prompt") or "").strip())
+            desc = (_p[:100] + "…") if len(_p) > 100 else _p
+        desc = desc.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        out.append({"name": job.get("name", "?"), "cron": expr, "kind": kind,
+                    "next": next_str, "desc": desc})
     return out
 
 
@@ -474,7 +483,8 @@ def render_dashboard() -> str:
         for s in schedules:
             sched_rows += (
                 f'<tr>'
-                f'<td style="color:#8ab">{s["name"]}</td>'
+                f'<td style="color:#8ab">{s["name"]}'
+                f'<div style="font-size:9px;color:#555">{s.get("desc","")}</div></td>'
                 f'<td style="color:#666;font-family:monospace;font-size:10px">{s["cron"]}</td>'
                 f'<td style="color:#555;font-size:10px">{s["kind"]}</td>'
                 f'<td style="color:#4a8aaa">{s["next"]}</td>'
