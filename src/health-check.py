@@ -117,7 +117,7 @@ def check_port(port: int, name: str, probe: bool = False) -> dict:
                             if not chunk:
                                 break
                             drained += len(chunk)
-                    except OSError:
+                    except OSError:  # pragma: no cover — only fires on recv error mid-drain; not triggered in tests
                         pass
                 except Exception:
                     return {
