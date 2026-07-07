@@ -12,7 +12,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 REPO = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("health_check", REPO / "src" / "health-check.py")
@@ -87,6 +87,23 @@ with patch.dict(os.environ, {"SKIP_DISCORD": "0"}, clear=False):
 with patch.dict(os.environ, {"SKIP_DISCORD": "true"}, clear=False):
     check("SKIP_DISCORD=true is not a skip (must be '1')",
           not hc._should_skip_bridge("discord", _no_env))
+
+# ── run_all_checks() integration: calling site in the bridge loop ─────────────
+# Exercises the `if _should_skip_bridge(channel_name, env_path): continue`
+# line inside run_all_checks(). check_port is stubbed to avoid TCP connects;
+# SKIP_TELEGRAM + SKIP_DISCORD ensure the bridge-skip path fires immediately.
+
+def _stub_port(port, name, **kwargs):
+    return {"name": name, "status": "down", "detail": "mocked"}
+
+with patch.object(hc, "check_port", side_effect=_stub_port), \
+     patch.dict(os.environ, {"SKIP_TELEGRAM": "1", "SKIP_DISCORD": "1"}, clear=False):
+    _checks = hc.run_all_checks()
+    _names = {c["name"] for c in _checks}
+    check("run_all_checks: SKIP_TELEGRAM=1 → telegram-bridge absent",
+          "telegram-bridge" not in _names)
+    check("run_all_checks: SKIP_DISCORD=1 → discord-bridge absent",
+          "discord-bridge" not in _names)
 
 if failures:
     sys.exit(1)
