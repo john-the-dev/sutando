@@ -606,8 +606,16 @@ reap_wedged_listener() {
 }
 
 # 1. Voice agent (Gemini Live on port 9900)
+# If a launchd job owns this service, delegate to launchd so the two managers
+# don't fight over port 9900 (issue #1888 bug 2 — duplicate listeners when
+# launchd respawns while startup.sh's direct process still holds the port).
 reap_wedged_listener 9900 voice-agent
-if ! lsof -i :9900 > /dev/null 2>&1; then
+if launchctl print "gui/$(id -u)/com.sutando.voice-agent" > /dev/null 2>&1; then
+  if ! lsof -i :9900 > /dev/null 2>&1; then
+    launchctl kickstart "gui/$(id -u)/com.sutando.voice-agent" > /dev/null 2>&1 || true
+  fi
+  echo "  ✓ voice agent (launchd-supervised)"
+elif ! lsof -i :9900 > /dev/null 2>&1; then
   echo "  Starting voice agent (port 9900)..."
   npx tsx src/voice-agent.ts > "$LOGS_DIR/voice-agent.log" 2>&1 &
   echo "  ✓ voice agent"
@@ -616,8 +624,14 @@ else
 fi
 
 # 2. Web client (port 8080)
+# Same launchd-deconflict guard as voice-agent above (issue #1888 bug 2).
 reap_wedged_listener 8080 web-client
-if ! lsof -i :8080 > /dev/null 2>&1; then
+if launchctl print "gui/$(id -u)/com.sutando.web-client" > /dev/null 2>&1; then
+  if ! lsof -i :8080 > /dev/null 2>&1; then
+    launchctl kickstart "gui/$(id -u)/com.sutando.web-client" > /dev/null 2>&1 || true
+  fi
+  echo "  ✓ web client (launchd-supervised)"
+elif ! lsof -i :8080 > /dev/null 2>&1; then
   echo "  Starting web client (port 8080)..."
   npx tsx src/web-client.ts > "$LOGS_DIR/web-client.log" 2>&1 &
   echo "  ✓ web client"
