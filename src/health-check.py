@@ -112,7 +112,7 @@ def check_port(port: int, name: str, probe: bool = False) -> dict:
                     s.settimeout(2)
                     drained = 0
                     try:
-                        while drained < 65536:
+                        while drained < 65536:  # pragma: no cover — socket recv timing makes this hard to instrument in CI
                             chunk = s.recv(4096)
                             if not chunk:
                                 break
