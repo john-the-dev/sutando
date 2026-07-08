@@ -49,6 +49,7 @@ const HTML = /* html */ `<!DOCTYPE html>
     width: 100%; padding: 16px 20px;
     display: flex; align-items: center; gap: 14px;
     background: #0e0e18; border-bottom: 1px solid #1a1a2e;
+    position: sticky; top: 0; z-index: 10;
   }
   .header .avatar-wrap {
     position: relative; width: 60px; height: 60px; flex-shrink: 0;
