@@ -46,12 +46,14 @@ def _redact(text: str) -> str:
         r"\1\2\3<redacted>",
         text,
     )
-    # Common provider token formats (sk-..., xoxb-..., ghp_..., github_pat_..., AKIA...)
+    # Common provider token formats (sk-..., xoxb-..., ghp_..., github_pat_...)
     text = re.sub(
-        r"\b(sk|xox[baprs]|ghp|gho|ghs|github_pat|AKIA)[_-][A-Za-z0-9_\-]{6,}",
+        r"\b(sk|xox[baprs]|ghp|gho|ghs|github_pat)[_-][A-Za-z0-9_\-]{6,}",
         "<redacted-token>",
         text,
     )
+    # AWS access keys: AKIA + 16 uppercase alphanumeric (no separator — AKIAIOSFODNN7EXAMPLE)
+    text = re.sub(r"\bAKIA[A-Z0-9]{16}\b", "<redacted-token>", text)
     # Home dir → /Users/<user> so the OS username doesn't leak
     home = str(Path.home())
     if home and home != "/":
