@@ -367,7 +367,7 @@ def fix_down_bridges(checks: list) -> list:
     restarted = []
     for c in checks:
         if (
-            c["name"] in ("telegram-bridge", "discord-bridge")
+            c["name"] in ("telegram-bridge", "discord-bridge", "slack-bridge")
             and c["status"] == "warn"
             and c.get("detail") == "configured but not running"
         ):

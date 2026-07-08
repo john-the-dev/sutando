@@ -12,7 +12,7 @@ warn-fix pattern.
 
 Guards:
 
-  a) "configured but not running" warn → bridge restarted (both bridges)
+  a) "configured but not running" warn → bridge restarted (all 3 bridges)
   b) other bridge warns (multiple PIDs, token invalid, stale log) → untouched
   c) non-bridge checks with the same detail → untouched
   d) ok/fail bridge statuses → untouched (fail belongs to the main fix loop)
@@ -61,12 +61,13 @@ def case_a_down_bridges_restarted() -> list[str]:
     checks = [
         check("discord-bridge", "warn", "configured but not running"),
         check("telegram-bridge", "warn", "configured but not running"),
+        check("slack-bridge", "warn", "configured but not running"),
     ]
     restarted, spawned = run_with_popen_stub(checks)
-    if restarted != ["discord-bridge", "telegram-bridge"]:
-        fails.append(f"a) expected both bridges restarted, got {restarted}")
-    if len(spawned) != 2:
-        fails.append(f"a) expected 2 spawns, got {len(spawned)}")
+    if restarted != ["discord-bridge", "telegram-bridge", "slack-bridge"]:
+        fails.append(f"a) expected all 3 bridges restarted, got {restarted}")
+    if len(spawned) != 3:
+        fails.append(f"a) expected 3 spawns, got {len(spawned)}")
     for argv in spawned:
         if not str(argv[1]).endswith("-bridge.py"):
             fails.append(f"a) spawn argv doesn't target a bridge script: {argv}")
@@ -89,8 +90,8 @@ def case_b_other_bridge_warns_untouched() -> list[str]:
 def case_c_non_bridge_checks_untouched() -> list[str]:
     fails = []
     checks = [
-        check("slack-bridge", "warn", "configured but not running"),
         check("conversation-server", "warn", "configured but not running"),
+        check("credential-proxy", "warn", "configured but not running"),
     ]
     restarted, spawned = run_with_popen_stub(checks)
     if restarted or spawned:
