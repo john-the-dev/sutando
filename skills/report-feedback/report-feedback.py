@@ -46,9 +46,9 @@ def _redact(text: str) -> str:
         r"\1\2\3<redacted>",
         text,
     )
-    # Common provider token formats (sk-..., xoxb-..., ghp_..., github_pat_...)
+    # Common provider token formats (sk-..., xox*-..., xapp-..., ghp_..., github_pat_...)
     text = re.sub(
-        r"\b(sk|xox[baprs]|ghp|gho|ghs|github_pat)[_-][A-Za-z0-9_\-]{6,}",
+        r"\b(sk|xox[a-z]|xapp|ghp|gho|ghs|github_pat)[_-][A-Za-z0-9_\-]{6,}",
         "<redacted-token>",
         text,
     )
