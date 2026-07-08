@@ -73,17 +73,20 @@ def resolve_workspace() -> Path:
 def read_cloud_auth(ws: Path):
     """Return (apiBase, token) if signed in to Sutando Cloud, else (None, None).
 
-    Matches the desktop's readCloudAuth (electron/ipc.cjs): the record lives at
-    ``<workspace>/cloud-auth.json`` and "signed in" simply means a ``token`` is
-    present (there is no ``signedIn`` field). We also probe the packaged-app
-    canonical workspace (~/.sutando/repo/workspace) so the skill finds the token
-    even when it runs from a different checkout than the desktop uses. Falls
-    back to the metering env the supervisor injects for signed-in runs.
+    Matches the desktop's readCloudAuth (electron/ipc.cjs). Post-M1 the record
+    lives at ``<workspace>/state/auth/cloud-auth.json``; the pre-M1 root
+    ``<workspace>/cloud-auth.json`` is probed as a 30-day reader fallback. Both
+    packaged-app workspace equivalents are also probed so the skill finds the
+    token even when running from a different checkout. Falls back to the metering
+    env the supervisor injects for signed-in runs.
     """
     seen: set[str] = set()
+    _app_ws = Path.home() / ".sutando" / "repo" / "workspace"
     for p in (
-        ws / "cloud-auth.json",  # <workspace>/cloud-auth.json — where the desktop writes it
-        Path.home() / ".sutando" / "repo" / "workspace" / "cloud-auth.json",  # packaged-app default (per workspace contract)
+        ws / "state" / "auth" / "cloud-auth.json",  # M1 canonical (state/auth/cloud-auth.json)
+        ws / "cloud-auth.json",  # pre-M1 root fallback (30-day reader window per workspace contract)
+        _app_ws / "state" / "auth" / "cloud-auth.json",  # packaged-app M1 canonical
+        _app_ws / "cloud-auth.json",  # packaged-app pre-M1 fallback
         Path.home() / "Library" / "Application Support" / "@stando" / "ui" / "cloud-auth.json",  # legacy
     ):
         rp = str(p)
