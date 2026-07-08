@@ -30,6 +30,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # No token in env → check_auth() passes without Authorization headers.
+# Clear both the current name and the legacy name so a CI/dev env that
+# exports either doesn't put the test server into token-required mode.
+os.environ.pop("SUTANDO_API_TOKEN", None)
 os.environ.pop("AGENT_API_TOKEN", None)
 
 
