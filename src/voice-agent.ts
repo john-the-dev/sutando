@@ -18,7 +18,8 @@
  *   ANTHROPIC_API_KEY   — Optional: only needed if not using claude CLI subscription auth
  *   (workspace)         — Per-user workspace dir resolved via `resolveWorkspace()`
  *                          from src/workspace_default.ts. Post-v0.8 (#1440) default is
- *                          `<repo>/workspace/`; configurable via `sutando.config.local.json`.
+ *                          `<repo>/workspace/`; override with SUTANDO_WORKSPACE_DIR
+ *                          for a launch, or `sutando.config.local.json` for a clone.
  *                          $SUTANDO_WORKSPACE is no longer honored for resolution.
  *                          Stores tasks/, results/, state/, logs/, conversation.log.
  *   PORT                — WebSocket port (default: 9900)

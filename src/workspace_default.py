@@ -1,16 +1,16 @@
 """Canonical workspace-directory resolution for Sutando services.
 
 All runtime artifacts (tasks/, results/, state/, data/, build_log.md, ...) live
-under the workspace dir. Post-v0.8 (#1440), components MUST resolve via the M0
+under the workspace dir. Components MUST resolve via the M0
 helper (`scripts/sutando-config.sh workspace` from shell, or
-`from src.sutando_config import resolve_workspace` from Python) which reads
-`sutando.config.local.json` (per-clone, gitignored) and defaults to
-`<repo>/workspace/`.
+`from src.sutando_config import resolve_workspace` from Python), which honors
+`$SUTANDO_WORKSPACE_DIR`, then reads `sutando.config.local.json` (per-clone,
+gitignored), and defaults to `<repo>/workspace/`.
 
 `$SUTANDO_WORKSPACE` is no longer honored for workspace resolution as of v0.8;
-if set, it is still detected to fire a one-time deprecation warning and trigger
-one-time auto-migration via per-source sentinels (PR #1478), but the resolver
-ignores its value. The ad-hoc no-config-no-repo-root last-ditch fallback is
+if set without `$SUTANDO_WORKSPACE_DIR`, it is still detected to fire a one-time
+deprecation warning and trigger one-time auto-migration via per-source sentinels
+(PR #1478), but the resolver ignores its value. The ad-hoc no-config-no-repo-root last-ditch fallback is
 `~/sutando-workspace/` (was `~/.sutando/workspace/` pre-v0.8 — namespace
 retired per Mini opinion-requested 2026-06-06).
 

@@ -52,6 +52,7 @@ class TestSutandoConfigSwift(unittest.TestCase):
 
     def run_probe(self, repo: Path, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
+        env.pop("SUTANDO_WORKSPACE_DIR", None)
         env.pop("SUTANDO_TEST_MODE", None)
         env.update(extra_env or {})
         return subprocess.run(
@@ -61,6 +62,26 @@ class TestSutandoConfigSwift(unittest.TestCase):
             capture_output=True,
             check=False,
         )
+
+    def test_workspace_dir_env_overrides_config_and_legacy_env(self) -> None:
+        repo = self.tmp / "repo-explicit-env"
+        repo.mkdir()
+        (repo / "sutando.config.local.json").write_text(
+            json.dumps({"workspace": {"path": "/from/swift/config"}}),
+            encoding="utf-8",
+        )
+
+        proc = self.run_probe(
+            repo,
+            {
+                "SUTANDO_WORKSPACE_DIR": "/from/swift/explicit-env",
+                "SUTANDO_WORKSPACE": "/from/swift/legacy-env",
+            },
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "/from/swift/explicit-env")
+        self.assertEqual(proc.stderr, "")
 
     def test_env_set_returns_config_path_not_env_path(self) -> None:
         repo = self.tmp / "repo-config"

@@ -2,9 +2,9 @@
 
 **Version:** v0.3.0 (current). Predecessors: pre-M0 (env-honored, scattered defaults), M0 (in-repo default + config-driven resolver, env still legacy-honored).
 
-**Status:** **Ratified as of PR #1440 merge (2026-06-04).** The contract below describes the operational shape. M0 (in-repo default, config-driven resolver) shipped via PRs #1395 + #1397 + #1399 + #1403; M1 (workspace migration script + skill) via #1403 + #1406; M2 (`claude_sutando_config_dir`) via #1415 + #1424 + #1429; workspace-as-git-repo sync (`sync-workspace.sh`) via #1445 + #1446 + #1447 + #1458 + #1459 + #1460 + #1461 + #1463. The "no env override" strip landed in #1440: `$SUTANDO_WORKSPACE` is no longer honored by the resolver; setting it triggers a one-time stderr deprecation warning + bootstrap auto-migration in `src/startup.sh`. This file is the operational source of truth.
+**Status:** **Ratified as of PR #1440 merge (2026-06-04), amended by the `SUTANDO_WORKSPACE_DIR` override.** The contract below describes the operational shape. M0 (in-repo default, config-driven resolver) shipped via PRs #1395 + #1397 + #1399 + #1403; M1 (workspace migration script + skill) via #1403 + #1406; M2 (`claude_sutando_config_dir`) via #1415 + #1424 + #1429; workspace-as-git-repo sync (`sync-workspace.sh`) via #1445 + #1446 + #1447 + #1458 + #1459 + #1460 + #1461 + #1463. The legacy `$SUTANDO_WORKSPACE` strip landed in #1440: `$SUTANDO_WORKSPACE` is no longer honored by the resolver; setting it without `SUTANDO_WORKSPACE_DIR` triggers a one-time stderr deprecation warning + bootstrap auto-migration in `src/startup.sh`. This file is the operational source of truth.
 
-**One-sentence summary**: The workspace is `<repo>/workspace/`, period. It is gitignored, computed (no env override), and ephemeral; durability is a separate concern handled by the vault.
+**One-sentence summary**: The workspace defaults to `<repo>/workspace/`, is gitignored, can be forced for a process tree with `SUTANDO_WORKSPACE_DIR`, and is otherwise config-driven; durability is a separate concern handled by the vault.
 
 ---
 
@@ -16,15 +16,15 @@
 <repo>/workspace/    ← workspace root (gitignored)
 ```
 
-Resolved by `bash scripts/sutando-config.sh workspace` (the M0 helper). Helpers in Python (`from workspace_default import resolve_workspace`), TypeScript (`import { resolveWorkspace } from './workspace_default.js'`), and Swift (`AppDelegate.workspace`) read from `sutando.config.{json,local.json}` with `<repo>/workspace/` as the baked-in default.
+Resolved by `bash scripts/sutando-config.sh workspace` (the M0 helper). Helpers in Python (`from workspace_default import resolve_workspace`), TypeScript (`import { resolveWorkspace } from './workspace_default.js'`), and Swift (`AppDelegate.workspace`) honor `SUTANDO_WORKSPACE_DIR`, then read from `sutando.config.{json,local.json}` with `<repo>/workspace/` as the baked-in default.
 
 **Hard rules (after #1440):**
-- The workspace is **always** at `<repo>/workspace/` by default. The location is specified via the config file (`sutando.config.{json,local.json}` → `workspace.path`); the per-clone `sutando.config.local.json` (gitignored) is where users override, if they choose to.
-- **No env override** — neither `$SUTANDO_WORKSPACE` nor any other env var redirects the resolver.
+- The workspace is **always** at `<repo>/workspace/` by default. The location is specified via `SUTANDO_WORKSPACE_DIR` for a launch-time process-tree override, or via the config file (`sutando.config.{json,local.json}` → `workspace.path`) for durable per-clone overrides.
+- `$SUTANDO_WORKSPACE` remains legacy/deprecated and does not redirect the resolver.
 - The whole `/workspace/` tree is gitignored (single entry in repo `.gitignore`).
 - Workspace is computed by the helpers — never by a per-script fallback.
 
-> ⚠️ **Cost of overriding `workspace.path` outside `<repo>/workspace/`.** The in-repo default is what unlocks Claude Code's cwd-anchored features:
+> ⚠️ **Cost of overriding the workspace outside `<repo>/workspace/`.** The in-repo default is what unlocks Claude Code's cwd-anchored features:
 >
 > - **CLAUDE.md auto-load** — Claude Code reads the project's `CLAUDE.md` automatically when cwd is inside the repo. Move workspace outside and the workspace-rooted `PERSONAL_CLAUDE.md` stops being auto-loaded.
 > - **Skills auto-discovery** — workspace-rooted `skills/` is auto-discovered when workspace is under cwd. Outside the repo, sessions need an explicit `--add-dir <workspace>` to see them.
@@ -34,7 +34,7 @@ Resolved by `bash scripts/sutando-config.sh workspace` (the M0 helper). Helpers 
 >
 > Only override if you have a clear reason (shared workspace across multiple checkouts; custom storage for size / encryption / quota). Otherwise, accept the default.
 
-**Today's deprecation path:** `$SUTANDO_WORKSPACE` set in the environment fires a one-time bold-red stderr warning pointing at `scripts/sutando-migrate.sh`. After #1440 merges, the value is not honored even with the warning. Hosts with the env var set are auto-migrated by `src/startup.sh` on first run post-merge (run `sutando-migrate.sh --commit`, then compress the original folder in place + unset the env).
+**Today's deprecation path:** `$SUTANDO_WORKSPACE` set in the environment without `SUTANDO_WORKSPACE_DIR` fires a one-time bold-red stderr warning pointing at `scripts/sutando-migrate.sh`. The value is not honored even with the warning. Hosts with the legacy env var set are auto-migrated by `src/startup.sh` on first run post-merge (run `sutando-migrate.sh --commit`, then compress the original folder in place + unset the env).
 
 **Why in-repo:** the workspace inherits Claude Code's cwd privileges — CLAUDE.md auto-load, skills auto-discovery, project-slug for session transcripts, hook scope, no `--add-dir` needed. Putting it anywhere else forfeits these.
 
@@ -125,11 +125,12 @@ Path computation is centralized; do NOT reinvent the fallback per-script.
 - **Shell:** `WORKSPACE="$(bash scripts/sutando-config.sh workspace)"` then `"$WORKSPACE/..."`. The shared `src/workspace_resolve.sh` helper wraps this for scripts that source it.
 
 **Resolution order (post-#1440):**
-1. `sutando.config.local.json` → `workspace.path` (per-clone override, gitignored).
-2. `sutando.config.json` → `workspace.path` (tracked defaults at repo root).
-3. `<repo>/workspace/` baked-in default.
+1. `SUTANDO_WORKSPACE_DIR` → explicit launch-time operator override.
+2. `sutando.config.local.json` → `workspace.path` (per-clone override, gitignored).
+3. `sutando.config.json` → `workspace.path` (tracked defaults at repo root).
+4. `<repo>/workspace/` baked-in default.
 
-**Today (pre-#1440):** `$SUTANDO_WORKSPACE` env var is honored as a legacy escape hatch ahead of step 1, with a one-time deprecation warning. PR #1440 removes that step.
+`$SUTANDO_WORKSPACE` is not in the resolution order. It is only detected for deprecation/migration warnings.
 
 ## 3. Migration from earlier versions
 
@@ -155,7 +156,7 @@ The workspace is intentionally ephemeral: delete the repo and the workspace dies
 
 | # | Decision | Rationale |
 |---|---|---|
-| 1 | Workspace = `<repo>/workspace/`, **computed**, no env override (post-#1440) | Claude Code cwd-privilege capture; structural simplicity |
+| 1 | Workspace = `<repo>/workspace/` by default, **computed**, with `SUTANDO_WORKSPACE_DIR` as the explicit launch override | Claude Code cwd-privilege capture by default; one simple operator control for dev/runtime launches |
 | 2 | Whole `/workspace/` tree gitignored | Prevents tracked-pollution anti-pattern (the historic `Path(__file__).parent.parent` regression) |
 | 3 | Top-level dirs (tasks/results/state/logs/notes/data/relay/skills) + 2 .md files | Matches the decision guide; agent has a single answer for each write |
 | 4 | Confidentiality default-deny | Workspace = owner-private; bots paraphrase, never quote |
@@ -183,7 +184,13 @@ This is intentional. This doc (the workspace contract) defines location + struct
 
 **Q: Can I use a workspace dir other than `<repo>/workspace/`?**
 
-A: Yes. Override `workspace.path` in your gitignored `sutando.config.local.json`:
+A: Yes. For a one-process-tree override, set `SUTANDO_WORKSPACE_DIR` before launching Sutando:
+
+```bash
+SUTANDO_WORKSPACE_DIR=/some/other/absolute/path bash src/startup.sh
+```
+
+For a durable per-clone override, set `workspace.path` in your gitignored `sutando.config.local.json`:
 
 ```json
 {
@@ -204,7 +211,7 @@ A: It was the legacy escape hatch (pre-M0). Two problems with env-based override
 1. Two processes inheriting the env at different times read different values (cron jobs, launchd jobs, ad-hoc shells) — silent split-brain.
 2. The env var doesn't survive a fresh `git clone`. New machines / checkouts don't see your override; the default applies inconsistently.
 
-`sutando.config.local.json` solves both: it lives at a known path (gitignored), every process reads it the same way, and a new clone gets a clean state with the default.
+`sutando.config.local.json` solves the durable per-clone case. `SUTANDO_WORKSPACE_DIR` exists for the operational case where a launcher needs to force every child process onto the same workspace without editing files. `$SUTANDO_WORKSPACE` stays ignored because it is coupled to old migration behavior.
 
 **Q: How do I migrate an existing workspace from a pre-v0.8 layout?**
 

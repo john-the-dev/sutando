@@ -7,13 +7,16 @@ go through `load_config()` so that the contract is enforced in one place
 rather than re-implemented per-service.
 
 Resolution order (highest layer wins):
-  1. `sutando.config.local.json` (per-clone override, gitignored)
-  2. `sutando.config.json` (tracked defaults at repo root)
-  3. Baked-in default (`{repo_root}/workspace`)
+  1. `$SUTANDO_WORKSPACE_DIR` (explicit operator override)
+  2. `sutando.config.local.json` (per-clone override, gitignored)
+  3. `sutando.config.json` (tracked defaults at repo root)
+  4. Baked-in default (`{repo_root}/workspace`)
 
-`$SUTANDO_WORKSPACE` is no longer honored (removed in v0.8). If set, a
-one-time stderr warning fires pointing at `scripts/sutando-migrate.sh`
-for relocation of any data still living at the env-pointed path.
+`$SUTANDO_WORKSPACE_DIR` is an explicit operator override and wins over config.
+`$SUTANDO_WORKSPACE` is no longer honored (removed in v0.8). If set without
+`$SUTANDO_WORKSPACE_DIR`, a one-time stderr warning fires pointing at
+`scripts/sutando-migrate.sh` for relocation of any data still living at the
+env-pointed path.
 
 Deep-merge semantics: `.local.json` is merged over the tracked defaults.
 Dicts deep-merge; arrays REPLACE wholesale (not unioned). This matches the
@@ -290,25 +293,31 @@ _HARDCODED_WORKSPACE_DEFAULT_REL = "workspace"  # relative to repo root
 def resolve_workspace(repo_root: Optional[Path] = None) -> Path:
     """Resolve the workspace directory per the canonical contract.
 
-    Order (v0.8 — `$SUTANDO_WORKSPACE` env override removed):
-      1. `sutando.config.{json,local.json}` → `workspace.path` (deep-merged).
-      2. `{repo_root}/workspace` baked-in default.
+    Order:
+      1. `$SUTANDO_WORKSPACE_DIR` explicit operator override.
+      2. `sutando.config.{json,local.json}` → `workspace.path` (deep-merged).
+      3. `{repo_root}/workspace` baked-in default.
 
     Does NOT create the directory; the caller decides. Returns an absolute
     `Path`.
 
-    If `$SUTANDO_WORKSPACE` is set in the environment, fires a one-time
-    stderr migration-nag warning pointing at `scripts/sutando-migrate.sh`
-    but does NOT honor the env value (the legacy escape hatch was removed
-    in v0.8 per `docs/workspace-contract-v0.8.md`).
+    If `$SUTANDO_WORKSPACE` is set in the environment without
+    `$SUTANDO_WORKSPACE_DIR`, fires a one-time stderr migration-nag warning
+    pointing at `scripts/sutando-migrate.sh` but does NOT honor the env value
+    (the legacy escape hatch was removed in v0.8 per
+    `docs/workspace-contract-v0.8.md`).
     """
     global _LEGACY_ENV_WARN_PRINTED, _DOTENV_DRIFT_WARN_PRINTED
+
+    explicit_env_val = os.environ.get("SUTANDO_WORKSPACE_DIR", "").strip()
+    if explicit_env_val:
+        return Path(explicit_env_val).expanduser().resolve()
 
     env_val = os.environ.get("SUTANDO_WORKSPACE", "").strip()
 
     # Test-only escape hatch: when `SUTANDO_TEST_MODE=1` is set, honor
     # `$SUTANDO_WORKSPACE` silently. This preserves the v0.8 contract for
-    # end users (no env override; warning + ignore) while letting the test
+    # end users (no legacy env override; warning + ignore) while letting the test
     # suite redirect workspace to per-test tmp dirs without rewriting every
     # test fixture. Production code MUST NOT set `SUTANDO_TEST_MODE`.
     if env_val and os.environ.get("SUTANDO_TEST_MODE") == "1":

@@ -11,15 +11,16 @@
  * services run first (via startup.sh) and handle the one-time dir-move from
  * any legacy repo-root install. TS callers rely on that having already run.
  *
- * Resolution order (post-v0.8 / #1440, via src/sutando_config.ts):
- *   1. sutando.config.local.json -> workspace.path (per-clone override)
- *   2. sutando.config.json -> workspace.path (tracked defaults)
- *   3. ${REPO_DIR}/workspace baked-in default
+ * Resolution order (via src/sutando_config.ts):
+ *   1. SUTANDO_WORKSPACE_DIR explicit operator override
+ *   2. sutando.config.local.json -> workspace.path (per-clone override)
+ *   3. sutando.config.json -> workspace.path (tracked defaults)
+ *   4. ${REPO_DIR}/workspace baked-in default
  *
  * $SUTANDO_WORKSPACE is no longer honored for resolution (removed in v0.8);
- * if set, the loader fires a one-time deprecation warning + triggers one-time
- * auto-migration via per-source sentinels (PR #1478), but the resolver
- * ignores its value. The ad-hoc no-config-no-repo-root last-ditch fallback
+ * if set without SUTANDO_WORKSPACE_DIR, the loader fires a one-time deprecation
+ * warning + triggers one-time auto-migration via per-source sentinels (PR #1478),
+ * but the resolver ignores its value. The ad-hoc no-config-no-repo-root last-ditch fallback
  * is `~/sutando-workspace/` (was `~/.sutando/workspace/` pre-v0.8 — namespace
  * retired per Mini opinion-requested 2026-06-06).
  */
@@ -35,16 +36,17 @@ import { resolveWorkspace as _resolveWorkspaceFromConfig } from './sutando_confi
  * **Delegates to `src/sutando_config.ts::resolveWorkspace`** as of the
  * M0 cutover. The new loader implements the resolution order:
  *
- *   1. sutando.config.local.json -> workspace.path (per-clone override)
- *   2. sutando.config.json -> workspace.path (tracked defaults)
- *   3. ${REPO_DIR}/workspace baked-in default
+ *   1. SUTANDO_WORKSPACE_DIR explicit operator override
+ *   2. sutando.config.local.json -> workspace.path (per-clone override)
+ *   3. sutando.config.json -> workspace.path (tracked defaults)
+ *   4. ${REPO_DIR}/workspace baked-in default
  *
  * This wrapper is preserved so existing callers don't need code changes
  * — the export name + signature + return type are unchanged. Post-v0.8
  * (#1440), $SUTANDO_WORKSPACE is no longer honored for workspace
- * resolution; if set, the loader fires a one-time deprecation warning
- * and triggers one-time auto-migration via per-source sentinels
- * (PR #1478), but the resolver ignores its value.
+ * resolution; if set without SUTANDO_WORKSPACE_DIR, the loader fires a
+ * one-time deprecation warning and triggers one-time auto-migration via
+ * per-source sentinels (PR #1478), but the resolver ignores its value.
  *
  * Default location is ${REPO_DIR}/workspace (in-repo). .env declarations
  * of SUTANDO_WORKSPACE are also detected and warned about; they do not

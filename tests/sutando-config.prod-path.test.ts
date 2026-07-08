@@ -43,15 +43,18 @@ function captureStderr(): CapturedStderr {
 }
 
 describe('sutando_config — production path (env-set, no TEST_MODE)', () => {
+	let savedWorkspaceDir: string | undefined;
 	let savedEnv: string | undefined;
 	let savedNoColor: string | undefined;
 	let savedTestMode: string | undefined;
 	let repo: string;
 
 	beforeEach(() => {
+		savedWorkspaceDir = process.env.SUTANDO_WORKSPACE_DIR;
 		savedEnv = process.env.SUTANDO_WORKSPACE;
 		savedNoColor = process.env.NO_COLOR;
 		savedTestMode = process.env.SUTANDO_TEST_MODE;
+		delete process.env.SUTANDO_WORKSPACE_DIR;
 		delete process.env.SUTANDO_WORKSPACE;
 		delete process.env.NO_COLOR;
 		delete process.env.SUTANDO_TEST_MODE;
@@ -61,6 +64,8 @@ describe('sutando_config — production path (env-set, no TEST_MODE)', () => {
 
 	afterEach(() => {
 		resetCacheForTests();
+		if (savedWorkspaceDir === undefined) delete process.env.SUTANDO_WORKSPACE_DIR;
+		else process.env.SUTANDO_WORKSPACE_DIR = savedWorkspaceDir;
 		if (savedEnv === undefined) delete process.env.SUTANDO_WORKSPACE;
 		else process.env.SUTANDO_WORKSPACE = savedEnv;
 		if (savedNoColor === undefined) delete process.env.NO_COLOR;

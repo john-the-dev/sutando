@@ -7,14 +7,16 @@
 // resolved workspace so menubar app + bridges + voice agent all land in
 // the same directory.
 //
-// Resolution order (v0.8):
-//   1. sutando.config.local.json (per-clone override, gitignored)
-//   2. sutando.config.json (tracked defaults at repo root)
-//   3. Baked-in default ({repoRoot}/workspace)
+// Resolution order:
+//   1. SUTANDO_WORKSPACE_DIR (explicit operator override)
+//   2. sutando.config.local.json (per-clone override, gitignored)
+//   3. sutando.config.json (tracked defaults at repo root)
+//   4. Baked-in default ({repoRoot}/workspace)
 //
-// $SUTANDO_WORKSPACE is no longer honored in production. If set, a one-time
-// warning points at scripts/sutando-migrate.sh. SUTANDO_TEST_MODE=1 preserves
-// the env override only for test fixtures, matching the Python/TS twins.
+// $SUTANDO_WORKSPACE is no longer honored in production. If set without
+// SUTANDO_WORKSPACE_DIR, a one-time warning points at scripts/sutando-migrate.sh.
+// SUTANDO_TEST_MODE=1 preserves the env override only for test fixtures,
+// matching the Python/TS twins.
 //
 // Foundation-only — no extra deps. Swift 5+.
 
@@ -190,12 +192,20 @@ enum SutandoConfig {
     /// Returns an absolute path. Does NOT create the directory.
     ///
     /// Order:
-    ///   1. config workspace.path (deep-merged)
-    ///   2. {repoRoot}/workspace baked-in default
+    ///   1. SUTANDO_WORKSPACE_DIR explicit operator override
+    ///   2. config workspace.path (deep-merged)
+    ///   3. {repoRoot}/workspace baked-in default
     ///
-    /// $SUTANDO_WORKSPACE is ignored in production as of v0.8 (warn once).
+    /// $SUTANDO_WORKSPACE is ignored in production as of v0.8 (warn once when
+    /// SUTANDO_WORKSPACE_DIR is not set).
     /// SUTANDO_TEST_MODE=1 keeps the env override for tests only.
     static func resolveWorkspace(repoRoot explicitRoot: String? = nil) -> String {
+        if let explicitEnv = ProcessInfo.processInfo.environment["SUTANDO_WORKSPACE_DIR"]?
+            .trimmingCharacters(in: .whitespaces),
+           !explicitEnv.isEmpty {
+            return (explicitEnv as NSString).expandingTildeInPath
+        }
+
         let env = ProcessInfo.processInfo.environment["SUTANDO_WORKSPACE"]?
             .trimmingCharacters(in: .whitespaces)
         if let env = env, !env.isEmpty {

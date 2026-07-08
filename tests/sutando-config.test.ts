@@ -42,12 +42,15 @@ function writeConfig(repo: string, name: string, body: ConfigBody | string): str
 }
 
 describe('sutando_config loader', () => {
+	let savedWorkspaceDir: string | undefined;
 	let savedEnv: string | undefined;
 	let repo: string;
 
 	beforeEach(() => {
 		// Snapshot + clear env; reset per-process cache.
+		savedWorkspaceDir = process.env.SUTANDO_WORKSPACE_DIR;
 		savedEnv = process.env.SUTANDO_WORKSPACE;
+		delete process.env.SUTANDO_WORKSPACE_DIR;
 		delete process.env.SUTANDO_WORKSPACE;
 		resetCacheForTests();
 		repo = makeRepo();
@@ -55,14 +58,30 @@ describe('sutando_config loader', () => {
 
 	const restoreEnvAndRepo = () => {
 		resetCacheForTests();
+		delete process.env.SUTANDO_WORKSPACE_DIR;
+		if (savedWorkspaceDir !== undefined) process.env.SUTANDO_WORKSPACE_DIR = savedWorkspaceDir;
 		delete process.env.SUTANDO_WORKSPACE;
 		if (savedEnv !== undefined) process.env.SUTANDO_WORKSPACE = savedEnv;
 		if (repo) rmSync(repo, { recursive: true, force: true });
 	};
 
 	// ------------------------------------------------------------------ //
-	//  1. v0.8: env var IGNORED; .local.json wins                         //
+	//  1. explicit env override wins; legacy env remains ignored          //
 	// ------------------------------------------------------------------ //
+
+	it('SUTANDO_WORKSPACE_DIR overrides .local.json and legacy SUTANDO_WORKSPACE', () => {
+		writeConfig(repo, 'sutando.config.json', { workspace: { path: '${REPO_DIR}/workspace' } });
+		writeConfig(repo, 'sutando.config.local.json', { workspace: { path: '/from/local' } });
+		process.env.SUTANDO_WORKSPACE_DIR = '/from/explicit-env';
+		process.env.SUTANDO_WORKSPACE = '/from/legacy-env';
+		delete process.env.SUTANDO_TEST_MODE;
+		try {
+			const resolved = resolveWorkspace(repo);
+			assert.equal(resolved, resolve('/from/explicit-env'));
+		} finally {
+			restoreEnvAndRepo();
+		}
+	});
 
 	it('env var is ignored in favor of .local.json (v0.8)', () => {
 		// v0.8 contract: `$SUTANDO_WORKSPACE` is no longer honored.

@@ -60,6 +60,7 @@ class TestProdPath(unittest.TestCase):
 
     def setUp(self) -> None:
         # Snapshot + clear env; reset per-process cache for warning state.
+        self._saved_workspace_dir = os.environ.pop("SUTANDO_WORKSPACE_DIR", None)
         self._saved_env = os.environ.pop("SUTANDO_WORKSPACE", None)
         self._saved_no_color = os.environ.pop("NO_COLOR", None)
         self._saved_test_mode = os.environ.pop("SUTANDO_TEST_MODE", None)
@@ -69,6 +70,10 @@ class TestProdPath(unittest.TestCase):
 
     def tearDown(self) -> None:
         _reset_cache_for_tests()
+        if self._saved_workspace_dir is None:
+            os.environ.pop("SUTANDO_WORKSPACE_DIR", None)
+        else:
+            os.environ["SUTANDO_WORKSPACE_DIR"] = self._saved_workspace_dir
         if self._saved_env is None:
             os.environ.pop("SUTANDO_WORKSPACE", None)
         else:

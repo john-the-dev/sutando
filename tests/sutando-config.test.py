@@ -2,7 +2,7 @@
 """Tests for src/sutando_config.py — the canonical workspace + vault loader.
 
 Covers the eight invariants Mini called out in the cold review of #1395:
-  1. $SUTANDO_WORKSPACE env var precedence over .local.json
+  1. $SUTANDO_WORKSPACE_DIR precedence over .local.json
   2. .local.json deep-merge over tracked sutando.config.json
      (dicts merge, arrays REPLACE wholesale)
   3. ${REPO_DIR} expansion in string values, NOT in keys
@@ -62,6 +62,7 @@ class TestSutandoConfig(unittest.TestCase):
 
     def setUp(self):
         # Stash any env var that could leak resolution between tests.
+        self._saved_workspace_dir = os.environ.pop("SUTANDO_WORKSPACE_DIR", None)
         self._saved_env = os.environ.pop("SUTANDO_WORKSPACE", None)
         _reset_cache_for_tests()
         # Each test gets its own tmp dir simulating a Sutando checkout.
@@ -70,14 +71,28 @@ class TestSutandoConfig(unittest.TestCase):
 
     def tearDown(self):
         _reset_cache_for_tests()
+        os.environ.pop("SUTANDO_WORKSPACE_DIR", None)
+        if self._saved_workspace_dir is not None:
+            os.environ["SUTANDO_WORKSPACE_DIR"] = self._saved_workspace_dir
         os.environ.pop("SUTANDO_WORKSPACE", None)
         if self._saved_env is not None:
             os.environ["SUTANDO_WORKSPACE"] = self._saved_env
         self._tmp.cleanup()
 
     # ------------------------------------------------------------------ #
-    #  1. v0.8: env var IGNORED; .local.json wins                         #
+    #  1. explicit env override wins; legacy env remains ignored          #
     # ------------------------------------------------------------------ #
+
+    def test_workspace_dir_env_var_overrides_local_json(self):
+        _write_config(self.repo, "sutando.config.json",
+                      {"workspace": {"path": "${REPO_DIR}/workspace"}})
+        _write_config(self.repo, "sutando.config.local.json",
+                      {"workspace": {"path": "/from/local"}})
+        os.environ["SUTANDO_WORKSPACE_DIR"] = "/from/explicit-env"
+        os.environ["SUTANDO_WORKSPACE"] = "/from/legacy-env"
+        os.environ.pop("SUTANDO_TEST_MODE", None)
+        resolved = resolve_workspace(repo_root=self.repo)
+        self.assertEqual(str(resolved), str(Path("/from/explicit-env").resolve()))
 
     def test_env_var_ignored_in_favor_of_local_json(self):
         # v0.8 contract: `$SUTANDO_WORKSPACE` is no longer honored.

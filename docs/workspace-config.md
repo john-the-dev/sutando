@@ -8,15 +8,16 @@ Sutando keeps **per-user runtime state** (tasks, results, notes, state, logs, et
 <repo>/workspace/
 ```
 
-That's it for a fresh clone — no setup, no env var, no config file. The directory is gitignored except for `.gitkeep`, so user data never sneaks into commits.
+That's it for a fresh clone — no setup, no config file. The directory is gitignored except for `.gitkeep`, so user data never sneaks into commits.
 
 ## Resolution order (highest wins)
 
-1. **`sutando.config.local.json`** → `workspace.path` — per-clone override. Gitignored.
-2. **`sutando.config.json`** → `workspace.path` — tracked default. The repo ships `${REPO_DIR}/workspace`.
-3. **Baked-in fallback** — `${REPO_DIR}/workspace`, used if neither config file exists.
+1. **`SUTANDO_WORKSPACE_DIR`** — launch-time operator override. Use this for desktop/dev sessions that must force one workspace across every child process.
+2. **`sutando.config.local.json`** → `workspace.path` — per-clone override. Gitignored.
+3. **`sutando.config.json`** → `workspace.path` — tracked default. The repo ships `${REPO_DIR}/workspace`.
+4. **Baked-in fallback** — `${REPO_DIR}/workspace`, used if neither config file exists.
 
-**Note:** `$SUTANDO_WORKSPACE` is **no longer honored** by the resolver as of PR #1440 (workspace contract v0.3.0). If set, startup emits a one-time stderr deprecation warning + invokes auto-migration via `src/startup.sh`. Migrate to `sutando.config.local.json` to silence the warning.
+**Note:** `$SUTANDO_WORKSPACE` is **no longer honored** by the resolver as of PR #1440 (workspace contract v0.3.0). If set without `SUTANDO_WORKSPACE_DIR`, startup emits a one-time stderr deprecation warning + invokes auto-migration via `src/startup.sh`. Use `SUTANDO_WORKSPACE_DIR` for a process-tree override, or migrate to `sutando.config.local.json` for a durable per-clone override.
 
 `${REPO_DIR}` in any config string expands to the directory containing the config file (== git toplevel for a sane checkout).
 
@@ -49,14 +50,19 @@ Keys whose name starts with `_` (e.g. `_comment`) are stripped before validation
 
 ## Three common overrides
 
+```bash
+# 1. Force one workspace for a dev session / process tree
+SUTANDO_WORKSPACE_DIR=/Users/you/.sutando/repo/workspace bash src/startup.sh
+```
+
 ```json
-// 1. Move workspace outside the repo (e.g. shared between clones)
+// 2. Move workspace outside the repo (e.g. shared between clones)
 { "workspace": { "path": "/Users/you/.sutando/workspace" } }
 
-// 2. Enable vault sync to a private remote
+// 3. Enable vault sync to a private remote
 { "vault": { "enabled": true, "remote_url": "https://vault.example.com/you/workspace.git" } }
 
-// 3. Both
+// 4. Both
 {
   "workspace": { "path": "/Users/you/.sutando/workspace" },
   "vault": { "enabled": true, "remote_url": "https://vault.example.com/you/workspace.git" }
@@ -92,7 +98,7 @@ Escape hatch for the rare legitimate case (updating `.gitkeep` itself): `git com
 
 Older installs used `~/.sutando/workspace/` as the default. If you have one:
 
-- **Path-only override:** add `{"workspace":{"path":"/Users/you/.sutando/workspace"}}` to `sutando.config.local.json`. Done.
+- **Path-only override:** set `SUTANDO_WORKSPACE_DIR=/Users/you/.sutando/workspace` for a launch-only override, or add `{"workspace":{"path":"/Users/you/.sutando/workspace"}}` to `sutando.config.local.json` for a durable per-clone override.
 - **Move into the in-repo default:** copy your old workspace contents into `<repo>/workspace/`. The loader will emit a `.env` drift warning if your `.env` still declares `SUTANDO_WORKSPACE=` — remove that line once you've migrated.
 
 The M1 milestone will ship a dedicated recovery skill (`bash scripts/sutando-migrate.sh`) for users who want a guided audit + move.

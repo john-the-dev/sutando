@@ -88,8 +88,8 @@ def validate_twilio_signature(handler, body: str) -> bool:
 #               checkout, loading .env, etc. Stays anchored to the checkout.
 # - WORKSPACE_DIR = runtime state (resolve_workspace()) — for tasks/, results/,
 #               core-status.json, pending-questions.md, contextual-chips.json,
-#               etc. Honors SUTANDO_WORKSPACE when set so watcher + bridges
-#               stay aligned with these writes.
+#               etc. Uses the canonical resolver so watcher + bridges stay
+#               aligned with these writes.
 REPO_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
 from workspace_default import resolve_workspace, status_read_path  # noqa: E402
