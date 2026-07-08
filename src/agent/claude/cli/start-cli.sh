@@ -36,6 +36,38 @@ SESSION="sutando-core"
 export SUTANDO_CORE_SESSION=1
 CORE_ENV_ARGS=(-e SUTANDO_CORE_SESSION=1)
 
+tmux_available() {
+  command -v tmux > /dev/null 2>&1
+}
+
+tmux_session_exists() {
+  tmux_available || return 1
+  tmux -S "$TMUX_SOCKET" has-session -t "$SESSION" 2>/dev/null
+}
+
+tmux_session_command() {
+  tmux_available || return 1
+  tmux -S "$TMUX_SOCKET" display-message -p -t "$SESSION" '#{pane_current_command}' 2>/dev/null
+}
+
+tmux_core_session_running() {
+  tmux_session_exists || return 1
+  [ "$(tmux_session_command)" = "claude" ]
+}
+
+core_claude_pids() {
+  pgrep -x claude 2>/dev/null | while read -r pid; do
+    args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    case "$args" in
+      *"--name $SESSION"*|*"--name=$SESSION"*) echo "$pid" ;;
+    esac
+  done
+}
+
+core_claude_running() {
+  [ -n "$(core_claude_pids)" ]
+}
+
 # Optional working-directory override for the core `claude` process.
 #   - Unset (upstream default): no override — the core launches from $REPO (the
 #     script's cwd), exactly as before. Zero behavior change for OSS installs.
@@ -264,14 +296,17 @@ fi
 # Safe callers: Sutando.app menu, terminal one-off, future health-check
 # emit-task. Unsafe: a future agent processing a "restart core" task by
 # exec'ing this script from within sutando-core. Per Mini's #608 review.
-if [ "$1" = "--restart" ]; then
-  if tmux -S "$TMUX_SOCKET" has-session -t "$SESSION" 2>/dev/null; then
+if [ "${1:-}" = "--restart" ]; then
+  if tmux_session_exists || core_claude_running; then
     echo "Killing existing $SESSION session..."
     tmux -S "$TMUX_SOCKET" kill-session -t "$SESSION" 2>/dev/null || true
+    core_claude_pids | while read -r pid; do
+      [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    done
     # Poll for actual shutdown — robust on slow machines, faster on fast
     # ones (~1s ceiling) than a fixed sleep.
     for _ in 1 2 3 4 5; do
-      tmux -S "$TMUX_SOCKET" has-session -t "$SESSION" 2>/dev/null || break
+      tmux_session_exists || core_claude_running || break
       sleep 0.2
     done
   fi
@@ -302,9 +337,12 @@ apply_tmux_defaults() {
   tmux -S "$TMUX_SOCKET" bind -n WheelDownPane send-keys -M 2>/dev/null || true
 }
 
-# Already running — attach if interactive, else exit cleanly. This branch
-# also catches the !--restart path so re-running the script is idempotent.
-if tmux -S "$TMUX_SOCKET" has-session -t "$SESSION" 2>/dev/null; then
+# Already running — attach if interactive, else exit cleanly. A healthy managed
+# core is the tmux session itself, not a fuzzy process-name match. `pgrep -f
+# "claude.*--name.*sutando-core"` also matches orphaned `tmux new-session ...`
+# launcher processes because their argv contains the embedded claude command;
+# those stale launchers used to make startup exit while no tmux session existed.
+if tmux_core_session_running; then
   apply_tmux_defaults
   if [ -t 1 ] && command -v tmux > /dev/null 2>&1; then
     echo "Attaching to existing $SESSION (Ctrl-b d to detach)..."
@@ -313,6 +351,11 @@ if tmux -S "$TMUX_SOCKET" has-session -t "$SESSION" 2>/dev/null; then
   echo "$SESSION already running."
   echo "To attach: tmux -S $TMUX_SOCKET attach -t $SESSION"
   exit 0
+fi
+
+if tmux_session_exists; then
+  echo "  ⚠ $SESSION tmux session exists but pane is not Claude Code — restarting it" >&2
+  tmux -S "$TMUX_SOCKET" kill-session -t "$SESSION" 2>/dev/null || true
 fi
 
 # Auto-install tmux via Homebrew if missing. Sutando.app's
