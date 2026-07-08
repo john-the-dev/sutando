@@ -60,3 +60,21 @@ Wrap **sub-daily** non-`main-loop` cron `prompt` bodies (e.g. `*/N`, `*/30`, hou
 | Daily / less-frequent (`X Y * * *`) | **NO** | A skip = function is gone until next day (briefing missed, etc.). M1's no-inline-fire rule already kills the avalanche on registration — gating dailies is over-broad. |
 
 Lucy caught this on PR #1437 (2026-06-03): gating daily crons (morning-briefing 06:57, daily-insight 06:50, obsidian-dream 03:37, learned-skills-scan 07:30) means one queued task at briefing time loses the briefing for the entire day. Pinning the gate to sub-daily crons preserves the defense-in-depth where it matters without the missed-day risk.
+
+## Digest cron delivery — do NOT use notify.py for final results
+
+`notify.py` is for **progress pings only** (≤280 chars). Digest-style cron prompts that produce research summaries (1000–2000 chars) are silently dropped by notify.py's hard limit — the user sees nothing.
+
+**Correct delivery pattern for digest crons:**
+
+```
+DELIVERY: Write the complete digest to results/briefing-<name>-$(date +%s).txt
+AND write tasks/task-cron-<name>-$(date +%s).txt with content
+  'id: task-cron-<name>-<ts>\ntimestamp: <iso>\ntask: <name> cron run\nsource: cron'
+for Tasks-tab visibility.
+Do NOT use notify.py for the final result — it rejects messages over 280 chars.
+The discord-bridge dm_fallback auto-delivers results/briefing-* files to the
+owner's DM within 90s.
+```
+
+See `crons.example.json` for the `example-digest` entry that shows this pattern. Scripts (like `src/morning-briefing.py`) handle their own delivery and don't need this — only inline prompt crons that produce long output.

@@ -33,5 +33,10 @@
     "name": "learned-skills-scan",
     "cron": "30 7 * * *",
     "prompt": "Run python3 skills/learned-skills/scripts/detect-learned-skills.py to scan recent task archives for repeated workflow patterns and propose candidate learned skills. Gated on state/learned-skills-enabled.sentinel (toggled from Settings → Skills → Behavior); the script exits early when the gate is off."
+  },
+  {
+    "name": "example-digest",
+    "cron": "2 6 * * *",
+    "prompt": "Example digest cron — replace with your own research prompt. Web search for the latest <topic> developments in the past 24h. Summarize top 3-5 items as 'title — why-it-matters — link'. Keep under ~1500 chars. DELIVERY (required for digest crons): Write the full result to results/briefing-example-$(date +%s).txt AND write tasks/task-cron-example-$(date +%s).txt with content 'id: task-cron-example-<ts>\ntimestamp: <iso>\ntask: example-digest cron run\nsource: cron' for Tasks-tab visibility. Do NOT use notify.py for the final result — it hard-rejects messages over 280 chars (designed for progress pings only). The discord-bridge dm_fallback auto-delivers results/briefing-* files to the owner's DM within 90s."
   }
 ]
