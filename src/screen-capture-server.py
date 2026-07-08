@@ -130,14 +130,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path.startswith("/capture") and not self.path.startswith("/capture-video"):
             # Reject if no valid token — a browser page on loopback cannot set a
             # custom header on a no-cors fetch, so this is a same-origin CSRF guard.
-            if CAPTURE_TOKEN:
-                provided = self.headers.get("X-Sutando-Capture-Token", "")
-                if not provided or not secrets.compare_digest(provided, CAPTURE_TOKEN):
-                    self.send_response(403)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(b'{"status":"error","error":"forbidden"}')
-                    return
+            provided = self.headers.get("X-Sutando-Capture-Token", "")
+            if not CAPTURE_TOKEN or not provided or not secrets.compare_digest(provided, CAPTURE_TOKEN):
+                self.send_response(403)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"error","error":"forbidden"}')
+                return
             # Parse display number from query: /capture?display=2 or /capture?all=true
             from urllib.parse import urlparse, parse_qs
             query = parse_qs(urlparse(self.path).query)

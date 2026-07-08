@@ -130,9 +130,9 @@ ok("wrong token → 403", is_403, f"got code={code}")
 code, is_403 = _run_auth("/capture", "secret-token", "secret-token")
 ok("correct token → not 403", not is_403, f"got code={code}")
 
-# 5. No CAPTURE_TOKEN (None) → no auth check, request proceeds regardless of header
+# 5. No CAPTURE_TOKEN (None) → fail-closed, 403 (token-load failure must not open the gate)
 code, is_403 = _run_auth("/capture", None, None)
-ok("CAPTURE_TOKEN=None → no auth check", not is_403, f"got code={code}")
+ok("CAPTURE_TOKEN=None → 403 (fail-closed)", is_403, f"got code={code}")
 
 # 6. Correct token with query params → still passes
 code, is_403 = _run_auth("/capture?display=1&format=jpeg", "secret-token", "secret-token")
