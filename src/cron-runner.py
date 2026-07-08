@@ -34,9 +34,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 # --- workspace + host resolution (mirror the rest of the codebase) ----------
 # This file lives in src/, so its own directory IS the src/ dir — reach the
@@ -112,7 +114,9 @@ def cron_matches(expr: str, t: time.struct_time) -> bool:
     dom_restricted = dom != "*"
     dow_restricted = dow != "*"
     dom_ok = t.tm_mday in _parse_field(dom, 1, 31)
-    dow_ok = cron_dow in _parse_field(dow, 0, 6)
+    # Normalize 7→0 so "0 6 * * 7" (also-Sunday) matches "0 6 * * 0".
+    dow_field = re.sub(r"\b7\b", "0", dow)
+    dow_ok = cron_dow in _parse_field(dow_field, 0, 6)
     if dom_restricted and dow_restricted:
         return dom_ok or dow_ok
     return dom_ok and dow_ok
@@ -142,6 +146,17 @@ def _load_json(path: Path, default):
         return default
 
 
+def _sanitize_name(name: str) -> str:
+    """Slugify a cron name for use in a task ID and filename.
+
+    Replaces any character that is not alphanumeric, '-', or '_' with '-',
+    then collapses consecutive '-' and strips leading/trailing '-'.
+    """
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", name)
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+    return slug or "unnamed"
+
+
 def emit_task(name: str, entry: dict) -> Path:
     now_ms = int(time.time() * 1000)
     ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -151,15 +166,18 @@ def emit_task(name: str, entry: dict) -> Path:
         body_task = f"/{entry['prompt_skill']}"
     else:
         body_task = entry.get("prompt", "")
-    task_id = f"task-cron-{name}-{now_ms}"
+    safe_name = _sanitize_name(name)
+    task_id = f"task-cron-{safe_name}-{now_ms}"
+    # `task:` is last so a multi-line prompt body cannot forge the structured
+    # header fields above it (source, user_id, access_tier, priority).
     body = (
         f"id: {task_id}\n"
         f"timestamp: {ts_iso}\n"
-        f"task: {body_task}\n"
         f"source: cron\n"
         f"user_id: cron-runner\n"
         f"access_tier: owner\n"
         f"priority: low\n"
+        f"task: {body_task}\n"
     )
     TASKS_DIR.mkdir(parents=True, exist_ok=True)
     path = TASKS_DIR / f"{task_id}.txt"
@@ -167,12 +185,12 @@ def emit_task(name: str, entry: dict) -> Path:
     return path
 
 
-def run(now_epoch: int | None = None) -> list[str]:
+def run(now_epoch: Optional[int] = None) -> list:
     """One tick. Returns the list of cron names emitted this tick."""
     now_epoch = int(now_epoch if now_epoch is not None else time.time())
     crons = _load_json(CRONS_FILE, [])
     state = _load_json(STATE_FILE, {})
-    emitted: list[str] = []
+    emitted = []
 
     for entry in crons:
         if not entry.get("launchd"):
@@ -181,7 +199,10 @@ def run(now_epoch: int | None = None) -> list[str]:
         expr = entry.get("cron")
         if not name or not expr:
             continue
-        last = int(state.get(name, now_epoch - 60))  # first run: only look back 1 tick
+        # When state is absent (first run or after reinstall), look back the
+        # full catch-up window so a daily cron missed during a restart or
+        # sleep cycle is still emitted on the next tick.
+        last = int(state.get(name, now_epoch - MAX_CATCHUP_SECONDS))
         try:
             if due_since(expr, last, now_epoch):
                 emit_task(name, entry)
