@@ -23,8 +23,10 @@ Exit code: 0 on pass, 1 on fail.
 
 from __future__ import annotations
 import importlib.util
+import io
 import sys
 import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -111,10 +113,35 @@ def case_d_other_statuses_untouched() -> list[str]:
     return fails
 
 
+def case_e_main_fix_prints_bridge_names() -> list[str]:
+    """main() --fix exercises lines 2349-2354: prints '{name}: restart attempted'."""
+    fails = []
+    fake_checks = [
+        check("discord-bridge", "warn", "configured but not running"),
+        check("slack-bridge",   "warn", "configured but not running"),
+    ]
+    captured = io.StringIO()
+    with mock.patch.object(sys, "argv", ["health-check.py", "--fix"]), \
+         mock.patch.object(hc, "run_all_checks", return_value=fake_checks), \
+         mock.patch.object(hc, "fix_down_bridges", return_value=["discord-bridge", "slack-bridge"]):
+        try:
+            with redirect_stdout(captured):
+                hc.main()
+        except SystemExit:
+            pass
+    out = captured.getvalue()
+    for name in ("discord-bridge", "slack-bridge"):
+        expected = f"  {name}: restart attempted (was not running)"
+        if expected not in out:
+            fails.append(f"e) missing expected line '{expected}' in main() --fix output")
+    return fails
+
+
 def main() -> int:
     all_fails = []
     for case in (case_a_down_bridges_restarted, case_b_other_bridge_warns_untouched,
-                 case_c_non_bridge_checks_untouched, case_d_other_statuses_untouched):
+                 case_c_non_bridge_checks_untouched, case_d_other_statuses_untouched,
+                 case_e_main_fix_prints_bridge_names):
         fails = case()
         status = "PASS" if not fails else "FAIL"
         print(f"  {status} {case.__name__}")
