@@ -126,6 +126,28 @@ print(f'5h: {d[\"utilization_5h\"]:.0%} (resets in {m5}min at {r5.strftime(\"%I:
   echo "## Repo Stats"
   gh api repos/sonichi/sutando --jq '.stargazers_count, .forks_count' 2>/dev/null | tr '\n' ' ' | awk '{print $1 " stars, " $2 " forks"}' || echo "(couldn't fetch)"
 
+  # Relay notes — drain any unprocessed workspace/relay/*.md files written by
+  # the proactive-loop (step 7) or /relay skill. These carry cross-session
+  # narrative continuity that git log + build_log don't capture. Include them
+  # here so the next session reads them as part of session-state.md, then
+  # archive each one to relay/processed/ (mirrors catchup-after-startup's
+  # original drain pattern — fixes issue #1738 where #1737 removed the only
+  # consumer).
+  RELAY_DIR="$WORKSPACE_DIR/relay"
+  RELAY_PROCESSED="$RELAY_DIR/processed"
+  unprocessed_relay=$(find "$RELAY_DIR" -maxdepth 1 -name 'relay-*.md' 2>/dev/null | sort)
+  if [ -n "$unprocessed_relay" ]; then
+    mkdir -p "$RELAY_PROCESSED"
+    echo ""
+    echo "## Relay Notes (from prior sessions)"
+    while IFS= read -r relay_file; do
+      echo ""
+      echo "### $(basename "$relay_file")"
+      cat "$relay_file"
+      mv "$relay_file" "$RELAY_PROCESSED/" 2>/dev/null
+    done <<< "$unprocessed_relay"
+  fi
+
 } > "$STATE_FILE" 2>/dev/null
 
 echo "Session state saved to $STATE_FILE"
