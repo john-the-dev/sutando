@@ -120,6 +120,52 @@ task_history = {}
 voice_desired_state = "disconnected"
 
 
+def _task_display_fields(content: str) -> tuple[str, str]:
+    """Extract the user-visible task text and source from a task file."""
+    task_line = ""
+    source_line = ""
+    for line in content.splitlines():
+        if not source_line and line.startswith("source:"):
+            source_line = line[7:].strip()
+        elif not task_line and line.startswith("task:"):
+            task_line = line[5:].strip()
+        if task_line and source_line:
+            break
+    return task_line, source_line
+
+
+def _task_display_fields_for_id(task_id: str) -> tuple[str, str]:
+    task_file = local_task_protocol.find_archived_task(TASK_DIR, task_id)
+    if task_file is None:
+        return "", ""
+    try:
+        return _task_display_fields(task_file.read_text())
+    except OSError:
+        return "", ""
+
+
+def _remember_done_result_file(result_file: Path) -> None:
+    task_id = result_file.stem
+    result_content = result_file.read_text().strip()
+    task_line, source_line = _task_display_fields_for_id(task_id)
+    display_text = task_line or (result_content.split('\n')[0][:80] if result_content else task_id)
+
+    if task_id not in task_history:
+        task_history[task_id] = {
+            "status": "done",
+            "text": display_text,
+            "time": result_file.stat().st_mtime,
+            "result": result_content,
+            "source": source_line,
+        }
+    elif task_history[task_id].get("status") != "done":
+        task_history[task_id]["status"] = "done"
+        task_history[task_id]["result"] = result_content
+        if task_line and not task_history[task_id].get("text"):
+            task_history[task_id]["text"] = task_line
+        if source_line and not task_history[task_id].get("source"):
+            task_history[task_id]["source"] = source_line
+
 
 def get_status() -> dict:
     try:
@@ -398,20 +444,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for f in sorted(TASK_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]:
                 task_id = f.stem
                 content = f.read_text()
-                task_line = ""
-                source_line = ""
                 # Capture the first `source:` and first `task:` regardless of
                 # field order — voice/chat tasks put `source:` before `task:`,
                 # but discord/slack tasks put `task:` first. The `not …` guards
                 # keep the real header `source:` from being overridden by any
                 # `source:` line inside the task body (#1781 review, sonichi).
-                for line in content.splitlines():
-                    if not source_line and line.startswith("source:"):
-                        source_line = line[7:].strip()
-                    elif not task_line and line.startswith("task:"):
-                        task_line = line[5:].strip()
-                    if task_line and source_line:
-                        break
+                task_line, source_line = _task_display_fields(content)
                 result_file = RESULT_DIR / f.name
                 existing = task_history.get(task_id, {})
                 # Look for the result in three places, in priority order:
@@ -441,14 +479,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 task_history[task_id] = {"status": status, "text": task_line or existing.get("text", task_id), "time": f.stat().st_mtime, "result": result_text, "source": source_line or existing.get("source", "")}
             # Also check for result files without task files (already cleaned up)
             for f in sorted(RESULT_DIR.glob("task-*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]:
-                task_id = f.stem
-                if task_id not in task_history:
-                    result_content = f.read_text().strip()
-                    display_text = result_content.split('\n')[0][:80] if result_content else task_id
-                    task_history[task_id] = {"status": "done", "text": display_text, "time": f.stat().st_mtime, "result": result_content}
-                elif task_history[task_id].get("status") != "done":
-                    task_history[task_id]["status"] = "done"
-                    task_history[task_id]["result"] = f.read_text().strip()
+                _remember_done_result_file(f)
             # Reconcile stale entries: if task file is gone and result exists, mark done;
             # if task file is gone, no result, and older than 5 min, remove from history
             import time as _time
@@ -829,7 +860,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     task_history[tid]["status"] = "done"
                     task_history[tid]["result"] = result
                 else:
-                    task_history[tid] = {"status": "done", "text": result[:80], "time": datetime.now().timestamp(), "result": result}
+                    task_line, source_line = _task_display_fields_for_id(tid)
+                    task_history[tid] = {
+                        "status": "done",
+                        "text": task_line or result[:80],
+                        "time": datetime.now().timestamp(),
+                        "result": result,
+                        "source": source_line,
+                    }
                 self.send_json(200, {"ok": True})
             except Exception:
                 self.send_json(400, {"error": "invalid"})
