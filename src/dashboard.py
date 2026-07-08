@@ -387,14 +387,14 @@ def render_dashboard() -> str:
     cards.append(f"""<div class="card full">
 <h2>Quick Links</h2>
 <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:12px">
-<a href="http://localhost:8080" style="color:#4a8aaa;text-decoration:none">Voice UI :8080</a>
-<a href="http://localhost:7843" style="color:#4a8aaa;text-decoration:none">Task API :7843</a>
-<a href="http://localhost:7844" style="color:#4a8aaa;text-decoration:none">Dashboard :7844</a>
-<a href="http://localhost:7845" style="color:#4a8aaa;text-decoration:none">Screen Capture :7845</a>
-<a href="/notes-ui" style="color:#4a8aaa;text-decoration:none">Notes Browser</a>
-<a href="https://github.com/sonichi/sutando" style="color:#4a8aaa;text-decoration:none">GitHub</a>
-<a href="https://sutando.ai" style="color:#4a8aaa;text-decoration:none">Website</a>
-<a href="https://discord.gg/uZHWXXmrCS" style="color:#4a8aaa;text-decoration:none">Discord</a>
+<a href="http://localhost:8080" target="_blank" rel="noopener noreferrer" style="color:#4a8aaa;text-decoration:none">Voice UI :8080</a>
+<a href="http://localhost:7843" target="_blank" rel="noopener noreferrer" style="color:#4a8aaa;text-decoration:none">Task API :7843</a>
+<a href="http://localhost:7844" target="_blank" rel="noopener noreferrer" style="color:#4a8aaa;text-decoration:none">Dashboard :7844</a>
+<a href="http://localhost:7845" target="_blank" rel="noopener noreferrer" style="color:#4a8aaa;text-decoration:none">Screen Capture :7845</a>
+<a href="/notes-ui" target="_blank" rel="noopener noreferrer" style="color:#4a8aaa;text-decoration:none">Notes Browser</a>
+<a href="https://github.com/sonichi/sutando" target="_blank" rel="noopener noreferrer" style="color:#4a8aaa;text-decoration:none">GitHub</a>
+<a href="https://sutando.ai" target="_blank" rel="noopener noreferrer" style="color:#4a8aaa;text-decoration:none">Website</a>
+<a href="https://discord.gg/uZHWXXmrCS" target="_blank" rel="noopener noreferrer" style="color:#4a8aaa;text-decoration:none">Discord</a>
 </div></div>""")
 
     return HTML.replace("__CONTENT__", "\n".join(cards))
