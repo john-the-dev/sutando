@@ -127,6 +127,41 @@ def test_remember_updates_existing_non_done_entry():
         assert row["source"] == "voice"             # backfilled from archive
 
 
+def test_remember_repairs_done_fallback_on_later_poll():
+    """Race: a done row created from a result file before the task was archived
+    carries the fallback summary. Once the task file becomes readable on a later
+    poll, the row must be repaired to the real `task:` text/source rather than
+    caching the fallback until restart (#2034 review, qingyun-wu)."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        api.TASK_DIR = root / "tasks"
+        api.RESULT_DIR = root / "results"
+        api.task_history.clear()
+        api.TASK_DIR.mkdir(parents=True)
+        api.RESULT_DIR.mkdir(parents=True)
+
+        result_file = api.RESULT_DIR / "task-999.txt"
+        result_file.write_text("Done - fallback summary\n\nbody\n")
+
+        # Poll 1: task not yet archived → fallback summary used.
+        api._remember_done_result_file(result_file)
+        assert api.task_history["task-999"]["status"] == "done"
+        assert api.task_history["task-999"]["text"] == "Done - fallback summary"
+
+        # Task gets archived after the first poll.
+        archive = api.TASK_DIR / "archive"
+        archive.mkdir(parents=True)
+        (archive / "task-999.txt").write_text(
+            "source: voice\ntask: the REAL user request\n"
+        )
+
+        # Poll 2: repair even though the row is already "done".
+        api._remember_done_result_file(result_file)
+        row = api.task_history["task-999"]
+        assert row["text"] == "the REAL user request", row
+        assert row["source"] == "voice", row
+
+
 def test_http_dispatch_paths():
     """Drive the real handler so the coverage gate sees the /tasks/active disk
     scan and the /task-done unknown-tid branch. Server on the MAIN thread;
@@ -190,5 +225,6 @@ if __name__ == "__main__":
     test_result_only_history_falls_back_without_task_file()
     test_display_fields_for_id_swallows_oserror()
     test_remember_updates_existing_non_done_entry()
+    test_remember_repairs_done_fallback_on_later_poll()
     test_http_dispatch_paths()
     print("agent-api task display text tests passed.")

@@ -158,13 +158,20 @@ def _remember_done_result_file(result_file: Path) -> None:
             "result": result_content,
             "source": source_line,
         }
-    elif task_history[task_id].get("status") != "done":
-        task_history[task_id]["status"] = "done"
-        task_history[task_id]["result"] = result_content
-        if task_line and not task_history[task_id].get("text"):
-            task_history[task_id]["text"] = task_line
-        if source_line and not task_history[task_id].get("source"):
-            task_history[task_id]["source"] = source_line
+    else:
+        entry = task_history[task_id]
+        if entry.get("status") != "done":
+            entry["status"] = "done"
+            entry["result"] = result_content
+        # Repair a fallback entry once the real task text becomes readable.
+        # A "done" row created before the task was archived carries the
+        # fallback summary (result's first line); backfill the true `task:`
+        # text/source on a later poll instead of caching the fallback until
+        # restart (#2034 review, qingyun-wu).
+        if task_line and entry.get("text") != task_line:
+            entry["text"] = task_line
+        if source_line and not entry.get("source"):
+            entry["source"] = source_line
 
 
 def get_status() -> dict:
