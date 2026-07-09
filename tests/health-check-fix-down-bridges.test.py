@@ -262,6 +262,157 @@ def case_h_launch_parity_failsafe_skips() -> list[str]:
     return fails
 
 
+def case_i_bridge_interpreter_no_import_gate() -> list[str]:
+    """_bridge_interpreter (PR #1898): a bridge with no required import
+    (telegram — absent from _BRIDGE_REQUIRED_IMPORT) short-circuits to
+    sys.executable without probing any candidate. Covers the `required is None`
+    branch.
+    """
+    fails = []
+    got = hc._bridge_interpreter("telegram-bridge")
+    if got != sys.executable:
+        fails.append(f"i) no-import-gate bridge should return sys.executable, got {got!r}")
+    return fails
+
+
+def case_j_bridge_interpreter_probes_and_picks() -> list[str]:
+    """_bridge_interpreter (PR #1898): for a bridge WITH a required import,
+    walk the candidate list, skip candidates that don't exist on disk, and
+    return the first whose probe imports the module cleanly (returncode 0).
+    Covers the which/exists skip + the successful-probe return.
+    """
+    fails = []
+    # Two candidates: the first is not installed anywhere (skipped by the
+    # which/exists guard), the second exists and probes clean.
+    good = "/opt/homebrew/bin/python3-good"
+    cands = ["/nonexistent/python3-missing", good]
+
+    def fake_which(cand):
+        return good if cand == good else None
+
+    def fake_run(argv, **kwargs):
+        # Only the "good" candidate is ever probed (the missing one is skipped
+        # before any subprocess runs).
+        rc = 0 if argv[0] == good else 1
+        return subprocess.CompletedProcess(argv, rc, stdout=b"", stderr=b"")
+
+    with mock.patch.object(hc, "_BRIDGE_INTERP_CANDIDATES", cands), \
+         mock.patch.object(hc.shutil, "which", side_effect=fake_which), \
+         mock.patch.object(hc.subprocess, "run", side_effect=fake_run):
+        got = hc._bridge_interpreter("slack-bridge")
+    if got != good:
+        fails.append(f"j) expected first importing candidate {good!r}, got {got!r}")
+    return fails
+
+
+def case_k_bridge_interpreter_none_when_no_capable() -> list[str]:
+    """_bridge_interpreter (PR #1898): when no candidate can import the required
+    module — a failed probe (rc != 0) plus a probe that raises (OSError /
+    TimeoutExpired) — the function returns None so the caller skips the restart.
+    Covers the timeout/OSError `continue` and the terminal `return None`.
+    """
+    fails = []
+    cands = ["/opt/homebrew/bin/python3-a", "/opt/homebrew/bin/python3-b"]
+
+    def fake_run(argv, **kwargs):
+        if argv[0].endswith("python3-a"):
+            # Import fails cleanly (module absent) → rc != 0.
+            return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"ImportError")
+        # The other candidate blows up mid-probe → caught, continue.
+        raise subprocess.TimeoutExpired(argv, 10)
+
+    with mock.patch.object(hc, "_BRIDGE_INTERP_CANDIDATES", cands), \
+         mock.patch.object(hc.shutil, "which", side_effect=lambda c: c), \
+         mock.patch.object(hc.subprocess, "run", side_effect=fake_run):
+        got = hc._bridge_interpreter("discord-bridge")
+    if got is not None:
+        fails.append(f"k) expected None when no capable interpreter, got {got!r}")
+    return fails
+
+
+def case_l_load_channel_env_parses_file() -> list[str]:
+    """_load_channel_env (PR #1898): parse channels/<channel>/.env into a dict,
+    honoring `export ` prefixes, quote-stripping, and skipping blank/comment/
+    non-KEY=VALUE lines. Covers the file-present parse branch.
+    """
+    fails = []
+    with tempfile.TemporaryDirectory() as home_td:
+        home = Path(home_td)
+        chan = home / "channels" / "slack"
+        chan.mkdir(parents=True, exist_ok=True)
+        (chan / ".env").write_text(
+            "# a comment\n"
+            "\n"
+            "SLACK_BOT_TOKEN=\"xoxb-quoted\"\n"
+            "export SLACK_APP_TOKEN='xapp-exported'\n"
+            "MALFORMED_NO_EQUALS_SIGN\n"
+        )
+
+        def fake_home(*subpath):
+            return home.joinpath(*subpath)
+
+        with mock.patch.object(hc, "claude_home_path", side_effect=fake_home):
+            env = hc._load_channel_env("slack")
+
+    if env.get("SLACK_BOT_TOKEN") != "xoxb-quoted":
+        fails.append(f"l) SLACK_BOT_TOKEN quote-strip failed: {env!r}")
+    if env.get("SLACK_APP_TOKEN") != "xapp-exported":
+        fails.append(f"l) `export ` prefix strip failed: {env!r}")
+    if "MALFORMED_NO_EQUALS_SIGN" in env or "# a comment" in env:
+        fails.append(f"l) skipped-line leaked into env: {env!r}")
+    return fails
+
+
+def case_m_load_channel_env_absent_file() -> list[str]:
+    """_load_channel_env (PR #1898): an absent .env returns {} (the caller
+    treats missing tokens as a reason to skip the restart). Covers the
+    not-exists early return.
+    """
+    fails = []
+    with tempfile.TemporaryDirectory() as home_td:
+        home = Path(home_td)  # no channels/<channel>/.env created
+
+        def fake_home(*subpath):
+            return home.joinpath(*subpath)
+
+        with mock.patch.object(hc, "claude_home_path", side_effect=fake_home):
+            env = hc._load_channel_env("slack")
+    if env != {}:
+        fails.append(f"m) absent .env should yield {{}}, got {env!r}")
+    return fails
+
+
+def case_n_load_channel_env_unreadable_file() -> list[str]:
+    """_load_channel_env (PR #1898): a present-but-unreadable .env (read raises
+    OSError) is swallowed and yields {} — the watchdog never crashes on a
+    permission-denied env file. Covers the `except OSError` branch.
+    """
+    fails = []
+    with tempfile.TemporaryDirectory() as home_td:
+        home = Path(home_td)
+        chan = home / "channels" / "slack"
+        chan.mkdir(parents=True, exist_ok=True)
+        env_file = chan / ".env"
+        env_file.write_text("SLACK_BOT_TOKEN=xoxb-present\n")
+
+        def fake_home(*subpath):
+            return home.joinpath(*subpath)
+
+        real_read_text = Path.read_text
+
+        def boom(self, *args, **kwargs):
+            if self == env_file:
+                raise OSError("permission denied")
+            return real_read_text(self, *args, **kwargs)
+
+        with mock.patch.object(hc, "claude_home_path", side_effect=fake_home), \
+             mock.patch.object(Path, "read_text", boom):
+            env = hc._load_channel_env("slack")
+    if env != {}:
+        fails.append(f"n) unreadable .env should yield {{}}, got {env!r}")
+    return fails
+
+
 def main() -> int:
     all_fails = []
     for case in (case_a_down_bridges_restarted, case_b_other_bridge_warns_untouched,
@@ -269,7 +420,13 @@ def main() -> int:
                  case_e_main_fix_prints_bridge_names,
                  case_f_run_all_checks_emits_slack_configured_not_running,
                  case_g_launch_parity_interpreter_and_env,
-                 case_h_launch_parity_failsafe_skips):
+                 case_h_launch_parity_failsafe_skips,
+                 case_i_bridge_interpreter_no_import_gate,
+                 case_j_bridge_interpreter_probes_and_picks,
+                 case_k_bridge_interpreter_none_when_no_capable,
+                 case_l_load_channel_env_parses_file,
+                 case_m_load_channel_env_absent_file,
+                 case_n_load_channel_env_unreadable_file):
         fails = case()
         status = "PASS" if not fails else "FAIL"
         print(f"  {status} {case.__name__}")
