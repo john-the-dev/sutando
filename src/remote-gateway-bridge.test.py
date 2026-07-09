@@ -117,6 +117,27 @@ def main() -> int:
     os.environ["REMOTE_TASK_URL"] = f"http://127.0.0.1:{port}"
     os.environ["REMOTE_TASK_TOKEN"] = "testtoken"
     os.environ["REMOTE_TASK_PROVIDER"] = "remote-gateway"
+    # Default tier (REMOTE_TASK_TIER unset) is now "owner" for the personal-agent
+    # model — the gateway authenticates with the owner's own bearer and the broker
+    # owner-scopes pulls, so its tasks are the owner's own. Verify with a fresh
+    # import BEFORE we pin "team" below.
+    os.environ.pop("REMOTE_TASK_TIER", None)
+    os.environ.pop("AG2_REMOTE_TIER", None)
+    _dspec = importlib.util.spec_from_file_location("rtc_default", Path(__file__).resolve().parent / "remote-gateway-bridge.py")
+    _drtc = importlib.util.module_from_spec(_dspec)
+    _dspec.loader.exec_module(_drtc)
+    check(_drtc.LOCAL_TIER == "owner",
+          "default LOCAL_TIER=owner when REMOTE_TASK_TIER unset (personal-agent model)")
+    # An INVALID value must fail CLOSED to "team" — never silently grant owner on
+    # a typo; only an unset/explicit config grants owner.
+    os.environ["REMOTE_TASK_TIER"] = "owenr"  # typo
+    _ispec = importlib.util.spec_from_file_location("rtc_invalid", Path(__file__).resolve().parent / "remote-gateway-bridge.py")
+    _irtc = importlib.util.module_from_spec(_ispec)
+    _ispec.loader.exec_module(_irtc)
+    check(_irtc.LOCAL_TIER == "team",
+          "invalid REMOTE_TASK_TIER fails CLOSED to team (never silently owner)")
+    os.environ.pop("REMOTE_TASK_TIER", None)
+
     # Pin the tier so LOCAL_TIER is deterministic. Without this the module reads
     # the host's ambient REMOTE_TASK_TIER (e.g. "owner" on the owner's own node),
     # and the access_tier-clamp + newline-forge assertions — which expect the
@@ -441,6 +462,62 @@ def main() -> int:
     check(data.get("summary") == "hi there" and data.get("channel") == "remote-gateway",
           "LOCAL_TIER=owner → owner-activity written with stripped summary")
     rtc.LOCAL_TIER = "team"
+
+    # 8. _reconcile_abandoned — two-sighting drop of stranded in-flight ids
+    rtc.TASKS_DIR.mkdir(parents=True, exist_ok=True)
+    rtc.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    (rtc.TASKS_DIR / "task-PEND.txt").write_text("still pending")
+    (rtc.RESULTS_DIR / "task-RDY.txt").write_text("result waiting")
+    inflight = {"task-GONE", "task-PEND", "task-RDY", "not!a!tid"}
+    s1 = rtc._reconcile_abandoned(inflight, set())
+    check(s1 == {"task-GONE"} and "task-GONE" in inflight,
+          "reconcile: first sighting only suspects (no drop yet)")
+    check("task-PEND" not in s1 and "task-RDY" not in s1,
+          "reconcile: pending task file / waiting result exempt from suspicion")
+    # a task claimed by a core (multi-core rename, claim_task.py #884) is
+    # ACTIVE, not abandoned — must never be suspected while the claim exists
+    (rtc.TASKS_DIR / "task-CLAIMED.claimed-core-2.txt").write_text("being worked")
+    inflight.add("task-CLAIMED")
+    s_c = rtc._reconcile_abandoned(inflight, {"task-CLAIMED"})
+    check("task-CLAIMED" in inflight and "task-CLAIMED" not in s_c,
+          "reconcile: claimed task exempt (long-running work not dropped)")
+    (rtc.TASKS_DIR / "task-CLAIMED.claimed-core-2.txt").unlink()
+    inflight.discard("task-CLAIMED")
+    s2 = rtc._reconcile_abandoned(inflight, s1)
+    check("task-GONE" not in inflight and s2 == set(),
+          "reconcile: second sighting drops the id and clears suspects")
+    saved = set(json.loads(rtc.INFLIGHT_FILE.read_text()))
+    check("task-GONE" not in saved and "task-PEND" in saved,
+          "reconcile: ledger persisted on drop")
+    # a result landing between sightings rescues the id
+    inflight2 = {"task-LATE"}
+    s = rtc._reconcile_abandoned(inflight2, set())
+    (rtc.RESULTS_DIR / "task-LATE.txt").write_text("landed late")
+    s = rtc._reconcile_abandoned(inflight2, s)
+    check("task-LATE" in inflight2, "reconcile: late-landing result rescues the id")
+    (rtc.RESULTS_DIR / "task-LATE.txt").unlink()
+
+    # 9. main() one-iteration smoke — exercises the reconcile wiring in the
+    # poll loop (heartbeat → poll → results → reconcile → heartbeat), bounded
+    # by raising KeyboardInterrupt on the 3rd heartbeat (= start of round 2).
+    STATE["force_401"] = False
+    STATE["force_ack_404"] = False
+    STATE["force_heartbeat_404"] = False
+    real_hb = rtc._post_heartbeat
+    hb_calls = {"n": 0}
+    def _hb_bounded(inflight_arg):
+        hb_calls["n"] += 1
+        if hb_calls["n"] >= 3:
+            raise KeyboardInterrupt
+        return real_hb(inflight_arg)
+    rtc._post_heartbeat = _hb_bounded
+    try:
+        rtc.main()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        rtc._post_heartbeat = real_hb
+    check(hb_calls["n"] == 3, "main: one full loop iteration ran (reconcile wired)")
 
     srv.shutdown()
     if FAILS:
