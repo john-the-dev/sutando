@@ -39,19 +39,21 @@ def _redact(text: str) -> str:
         return text
     # Authorization: Bearer <tok>  /  "Bearer abc123"
     text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+", "Bearer <redacted>", text)
-    # token=... / api_key: "..." / secret=... / password=... / authorization=...
+    # token=... / api_key: "..." / key=... / secret=... / password=... / authorization=...
     text = re.sub(
-        r"(?i)\b(token|api[_-]?key|secret|password|passwd|authorization)\b"
-        r"(\s*[:=]\s*)(\"?)([^\s\"',;]+)",
+        r"(?i)\b(token|api[_-]?key|key|secret|password|passwd|authorization)\b"
+        r"(\s*[:=]\s*)(\"?)([^\s\"',;&]+)",
         r"\1\2\3<redacted>",
         text,
     )
-    # Common provider token formats (sk-..., xox*-..., xapp-..., ghp_..., github_pat_...)
+    # Common provider token formats (sk-..., xox*-..., xapp-..., ghp_..., github_pat_..., AIza...)
     text = re.sub(
         r"\b(sk|xox[a-z]|xapp|ghp|gho|ghs|github_pat)[_-][A-Za-z0-9_\-]{6,}",
         "<redacted-token>",
         text,
     )
+    # Google API keys used in Gemini transport URLs: AIza + 35 URL-safe chars.
+    text = re.sub(r"\bAIza[0-9A-Za-z_\-]{35}\b", "<redacted-token>", text)
     # AWS access keys: AKIA + 16 uppercase alphanumeric (no separator — AKIAIOSFODNN7EXAMPLE)
     text = re.sub(r"\bAKIA[A-Z0-9]{16}\b", "<redacted-token>", text)
     # Home dir → /Users/<user> so the OS username doesn't leak

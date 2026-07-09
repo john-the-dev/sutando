@@ -42,6 +42,19 @@ class TestReportFeedbackRedaction(unittest.TestCase):
         self.assertNotIn(token, redacted)
         self.assertIn("<redacted-token>", redacted)
 
+    def test_redacts_google_api_key(self):
+        key = "AIza" + "Sy" + "A" * 33
+        redacted = report_feedback._redact(f"google api key {key}")
+
+        self.assertNotIn(key, redacted)
+        self.assertIn("<redacted-token>", redacted)
+
+    def test_redacts_bare_query_key_without_consuming_next_param(self):
+        redacted = report_feedback._redact("GET /v1beta/models?key=future-secret&alt=sse")
+
+        self.assertIn("key=<redacted>&alt=sse", redacted)
+        self.assertNotIn("future-secret", redacted)
+
 
 class TestReportFeedbackCloudAuth(unittest.TestCase):
     def test_reads_migrated_workspace_auth_before_legacy_root(self):
