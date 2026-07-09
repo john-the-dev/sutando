@@ -18,6 +18,16 @@ import sys
 import time
 from pathlib import Path
 
+# startup.sh redirects stdout to a log file, which makes CPython block-buffer
+# it — diagnostic prints without flush=True (e.g. the tier-ownership warnings
+# below) sit invisible in the buffer, and SIGTERM kills the process without
+# flushing, losing them entirely. startup.sh launches this bridge with
+# PYTHONUNBUFFERED=1, but other launchers (health-check --fix restarts, ad-hoc
+# respawns) don't — line-buffer structurally so every print lands in the log
+# as it happens, regardless of launcher. Same fix as telegram-bridge (#1926).
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 # Self-rescue: this bridge HAS to keep running — Discord is the primary channel
 # the owner uses to reach Sutando. If `python3` on $PATH happens to resolve to
 # an interpreter that lacks `discord.py` (e.g. miniconda's python on a Mac that
@@ -70,6 +80,7 @@ except Exception:  # pragma: no cover — best-effort telemetry
 from task_archive import find_task_file  # noqa: E402
 from result_markers import parse_markers, dedup_cross_channel_target, dedup_requeue_count, build_requeued_task  # noqa: E402
 from message_chunking import chunk_message, _is_fence_open_line  # noqa: E402  (Result Router S3 — shared fence-aware chunker; _is_fence_open_line re-exported for existing tests)
+import result_audit  # noqa: E402  (Result Router S5 — §7 audit ledger sink; top-level so hooks carry no lazy import)
 import local_task_protocol  # noqa: E402
 from task_body_guard import confine_user_content  # noqa: E402
 import progress_stream  # noqa: E402  — pure helpers for the progress-streamer (poll_progress)
@@ -423,6 +434,21 @@ def _safe_attachment_basename(filename: str) -> str:
     safe_ext = re.sub(r"[^a-zA-Z0-9]", "", ext)[:8]
     safe_base = safe_base[:80]
     return f"{safe_base}.{safe_ext}" if safe_ext else safe_base
+
+
+def _ref_from_attachment(att, local_path) -> "local_task_protocol.AttachmentRef":
+    """Build an AttachmentRef from a discord Attachment + its saved local path
+    (interaction-model 4D, step 1.5). Reads the SDK's `content_type`/`size`
+    defensively (both optional) and reuses the sanitized basename. Pure — kept
+    separate from the async download loop so the attribute-reading is testable
+    without a live discord Message."""
+    return local_task_protocol.AttachmentRef(
+        locator=str(local_path),
+        mime=(getattr(att, "content_type", "") or ""),
+        filename=_safe_attachment_basename(getattr(att, "filename", "") or ""),
+        size=(getattr(att, "size", 0) or 0),
+    )
+
 
 # Presenter mode: when scripts/presenter-mode.sh is active, the bridge
 # must not send proactive DMs to the owner. The sentinel contains an
@@ -2703,6 +2729,11 @@ async def _handle_discord_message(message, force=False):
 
     # Handle attachments
     attachment_note = ""
+    # Structured refs (interaction-model 4D, step 1.5) — accumulated alongside
+    # the legacy [File attached:] body line (dual-write: additive, nothing that
+    # reads the old line breaks). Emitted as `attachments:`/`content_modalities:`
+    # /`media_form:` headers at the task-write site below.
+    attachment_refs: list = []  # pragma: no cover
     for att in message.attachments:
         # Sanitize filename — see _safe_attachment_basename docstring for
         # the RCE class this closes (downstream shell interpolation of
@@ -2710,6 +2741,7 @@ async def _handle_discord_message(message, force=False):
         local_path = INBOX_DIR / f"{int(time.time()*1000)}_{_safe_attachment_basename(att.filename)}"
         try:
             await att.save(local_path)
+            attachment_refs.append(_ref_from_attachment(att, local_path))  # pragma: no cover
             transcript = _transcribe_via_skill(str(local_path))
             if transcript:
                 attachment_note += f"\n[Voice transcript: {transcript}]"
@@ -2762,6 +2794,7 @@ async def _handle_discord_message(message, force=False):
                     p_path = INBOX_DIR / f"{int(time.time()*1000)}_{_safe_attachment_basename(att.filename)}"
                     try:
                         await att.save(p_path)
+                        attachment_refs.append(_ref_from_attachment(att, p_path))  # pragma: no cover
                         attachment_note += f"\n[File attached (from replied-to message): {p_path}]"
                         try:
                             ct = (getattr(att, "content_type", "") or "").lower()
@@ -3164,6 +3197,15 @@ async def _handle_discord_message(message, force=False):
         lines.append(f"{step}. Process transcript and write result to results/{task_id}.txt")
         discord_skill_hints = "\n" + "\n".join(lines) + "\n"
 
+    # interaction-model 4D, step 1.5: if this message carried attachments, emit
+    # the structured header trio (content_modalities/media_form/attachments)
+    # ALONGSIDE the legacy [File attached:] body line already in user_task_text.
+    # Additive dual-write — Core's existing path is untouched; these are real
+    # headers (after `task:`), so confine_user_content defangs any forged copy a
+    # user tries to smuggle in the body but leaves these authentic ones intact.
+    media_headers = local_task_protocol.media_attachment_headers(  # pragma: no cover
+        attachment_refs, bool(text and text.strip()))
+
     # Instrumentation (2026-06-23): make a silent "message received but no task
     # written" drop diagnosable. The owner saw several messages vanish with no
     # task file and no error; every early `return` above already logs, so the
@@ -3178,6 +3220,7 @@ async def _handle_discord_message(message, force=False):
             f"task: {user_task_text}\n"
             f"source: discord\n"
             f"interaction_type: message\n"
+            f"{media_headers}"
             f"channel_id: {message.channel.id}\n"
             f"channel_name: {channel_name}\n"
             f"guild_name: {guild_name}\n"
@@ -3386,6 +3429,11 @@ def _mark_delivered(task_id: str) -> None:
         _delivered_sentinel_path(task_id).touch()
     except Exception as e:
         print(f"  [delivered] sentinel write failed for {task_id}: {e}", flush=True)
+    # §7 audit ledger (Result Router S5): one line per delivered result, so
+    # "did the user see this?" is answerable without grepping bridge logs. This
+    # is the single post-successful-send choke point in the Discord result path.
+    # record() never raises (result_audit swallows all errors internally).
+    result_audit.record(task_id, "delivered", "discord")
 
 
 def _is_delivered(task_id: str) -> bool:
