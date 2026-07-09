@@ -48,7 +48,7 @@ use the Privacy toggle in Settings.
 - Run with `SUTANDO_DEBUG_TELEMETRY=1` to print every event to stderr **before**
   it is sent, so you can see exactly what would leave the machine.
 - Events are a best-effort background POST to PostHog
-  (`POSTHOG_HOST`, default EU cloud `https://eu.i.posthog.com`) over the Python
+  (`POSTHOG_HOST`, default US cloud `https://us.i.posthog.com`) over the Python
   standard library — no third-party dependency, never blocking, errors swallowed.
 - The PostHog project key (`POSTHOG_API_KEY` / embedded `phc_...`) is **public
   and write-only**; it cannot read data back.

@@ -35,7 +35,7 @@ Config
 * ``POSTHOG_API_KEY`` — the PostHog *project* key. ``phc_...`` keys are public
   and write-only, so one may be embedded in ``_EMBEDDED_KEY`` below for
   distribution. Absent a key, telemetry is a no-op.
-* ``POSTHOG_HOST``    — defaults to the EU cloud (``https://eu.i.posthog.com``).
+* ``POSTHOG_HOST``    — defaults to the US cloud (``https://us.i.posthog.com``).
 * ``SUTANDO_DEBUG_TELEMETRY=1`` — print every event to stderr before sending.
 """
 from __future__ import annotations
@@ -54,7 +54,7 @@ from pathlib import Path
 _EMBEDDED_KEY = "phc_kt7Syd7YpYJxL2i3467C3D2Q4TAQLxJre9aUuxht7wBj"  # pragma: allowlist secret — public write-only PostHog project key
 
 _KEY = (os.environ.get("POSTHOG_API_KEY") or _EMBEDDED_KEY).strip()
-_HOST = (os.environ.get("POSTHOG_HOST") or "https://eu.i.posthog.com").rstrip("/")
+_HOST = (os.environ.get("POSTHOG_HOST") or "https://us.i.posthog.com").rstrip("/")
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
