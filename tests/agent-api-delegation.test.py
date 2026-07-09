@@ -200,6 +200,8 @@ check("direct read rejects malformed id (has space)",
       api.delegation_read_result("task-a b.txt")[0] == 400)
 check("direct read rejects path-separator id",
       api.delegation_read_result("task-a/b.txt")[0] == 400)
+check("direct read rejects path-traversal id",
+      api.delegation_read_result("task-../x.txt")[0] == 400)
 code, data = api.delegation_archive_result({"name": "task-direct-1.txt", "task_id": "task-direct-1"})
 check("direct archive", code == 200 and list((api.RESULT_DIR / "archive").glob("*/task-direct-1.txt")))
 check("direct archive already-gone", api.delegation_archive_result(
