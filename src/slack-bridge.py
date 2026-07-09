@@ -556,9 +556,15 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
         hints_lines = ["===SKILL INSTRUCTIONS (follow before any other action)==="]
         step = 1
         if _notify_py.exists():
+            # Thread the progress ping under the original message for channel
+            # @mentions (thread_ts set); DMs reply top-level (thread_ts None).
+            # Without --thread-ts the first reply (the progress ping) lands in
+            # the channel root, while the result — which threads via
+            # pending_replies[thread_ts] — replies in-thread, splitting the two.
+            _thread_arg = f" --thread-ts {thread_ts}" if thread_ts else ""
             notify_cmd = (
                 f"python3 {_notify_py}"
-                f" --source slack --channel-id {channel}"
+                f" --source slack --channel-id {channel}{_thread_arg}"
                 f' --message "On it — back in a moment."'
             )
             hints_lines.append(f"{step}. NOTIFY FIRST: {notify_cmd}")
@@ -584,6 +590,10 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
     # third bridge; discord/telegram fold onto it in a follow-up dedup).
     media_headers = local_task_protocol.media_attachment_headers(  # pragma: no cover
         attachment_refs, bool(text and text.strip()))
+    # Carry thread_ts so follow-up checkpoint pings can also stay in-thread
+    # (`notify.py --thread-ts <reply_thread_ts>`); only emitted for channel
+    # @mentions, omitted for DMs where thread_ts is None (reply top-level).
+    thread_header = f"reply_thread_ts: {thread_ts}\n" if thread_ts else ""
     task_file.write_text(
         f"id: {task_id}\n"
         f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
@@ -592,6 +602,7 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
         f"interaction_type: message\n"
         f"{media_headers}"
         f"channel_id: {channel}\n"
+        f"{thread_header}"
         f"user_id: {user_id}\n"
         f"access_tier: {access_tier}\n"
         f"priority: {priority}\n"
