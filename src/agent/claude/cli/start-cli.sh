@@ -50,9 +50,15 @@ tmux_session_command() {
   tmux -S "$TMUX_SOCKET" display-message -p -t "$SESSION" '#{pane_current_command}' 2>/dev/null
 }
 
+# A managed core is alive when the tmux session EXISTS and a `claude --name
+# sutando-core` process is running under it. Do NOT gate on the pane's current
+# foreground command: a healthy core that is mid-tool shows the pane cmd as
+# bash/python3/node/etc, so a pane-command match would falsely report it dead
+# and (on --restart) tear down a live core mid-task. Existence + the core claude
+# process is the correct liveness signal.
 tmux_core_session_running() {
   tmux_session_exists || return 1
-  [ "$(tmux_session_command)" = "claude" ]
+  core_claude_running
 }
 
 core_claude_pids() {
@@ -337,11 +343,10 @@ apply_tmux_defaults() {
   tmux -S "$TMUX_SOCKET" bind -n WheelDownPane send-keys -M 2>/dev/null || true
 }
 
-# Already running — attach if interactive, else exit cleanly. A healthy managed
-# core is the tmux session itself, not a fuzzy process-name match. `pgrep -f
-# "claude.*--name.*sutando-core"` also matches orphaned `tmux new-session ...`
-# launcher processes because their argv contains the embedded claude command;
-# those stale launchers used to make startup exit while no tmux session existed.
+# Already running — attach if interactive, else exit cleanly. A managed core is
+# live when the tmux session exists AND a `claude --name sutando-core` process
+# runs under it (tmux_core_session_running). Re-running the script is idempotent:
+# we attach/no-op instead of spawning a second core (→ duplicate task consumers).
 if tmux_core_session_running; then
   apply_tmux_defaults
   if [ -t 1 ] && command -v tmux > /dev/null 2>&1; then
@@ -353,8 +358,19 @@ if tmux_core_session_running; then
   exit 0
 fi
 
+# Orphaned core process, no tmux session — a `claude --name sutando-core` is
+# running detached from any managed session (e.g. its tmux server died but the
+# child claude survived). Adopt it: do NOT start a second core, which would
+# double the task-consumer count. On a non-restart start we reuse the existing
+# process; the operator can `--restart` to cleanly recycle it.
+if core_claude_running; then
+  echo "$SESSION claude process already running (no tmux session) — reusing it." >&2
+  echo "To recycle it cleanly: bash $0 --restart"
+  exit 0
+fi
+
 if tmux_session_exists; then
-  echo "  ⚠ $SESSION tmux session exists but pane is not Claude Code — restarting it" >&2
+  echo "  ⚠ $SESSION tmux session exists but no core Claude process — restarting it" >&2
   tmux -S "$TMUX_SOCKET" kill-session -t "$SESSION" 2>/dev/null || true
 fi
 
