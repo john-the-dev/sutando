@@ -18,6 +18,7 @@ import http.server
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 from datetime import datetime
@@ -272,6 +273,98 @@ def get_use_case_matrix() -> str:
     return '<table style="width:100%;font-size:11px;border-collapse:collapse"><tr style="color:#555;text-align:left"><th></th><th>Use Case</th><th>Details</th></tr>' + ''.join(rows) + '</table>'
 
 
+def _cron_field_match(spec: str, value: int) -> bool:
+    """Match one cron field value against a spec supporting *, */N, A-B, A,B, N."""
+    for token in spec.split(","):
+        if token == "*":
+            return True
+        if token.startswith("*/"):
+            try:
+                step = int(token[2:])
+            except ValueError:
+                continue
+            if step and value % step == 0:
+                return True
+        elif "-" in token:
+            try:
+                a, b = (int(x) for x in token.split("-", 1))
+            except ValueError:
+                continue
+            if a <= value <= b:
+                return True
+        elif token.isdigit() and int(token) == value:
+            return True
+    return False
+
+
+def _cron_next_run(expr: str, now: datetime, horizon_days: int = 8):
+    """Next datetime matching a 5-field cron expr (minute hour dom month dow),
+    scanning minute-by-minute up to horizon_days. Returns datetime or None.
+
+    dom/dow are AND-combined (sufficient for our crons, which restrict only one
+    of them); the rare cron OR-semantics edge case is not modeled.
+    """
+    from datetime import timedelta
+    parts = expr.split()
+    if len(parts) != 5:
+        return None
+    mnt, hr, dom, mon, dow = parts
+    t = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    end = now + timedelta(days=horizon_days)
+    while t <= end:
+        cron_dow = (t.weekday() + 1) % 7  # python Mon=0..Sun=6 -> cron Sun=0..Sat=6
+        if (_cron_field_match(mnt, t.minute) and _cron_field_match(hr, t.hour)
+                and _cron_field_match(dom, t.day) and _cron_field_match(mon, t.month)
+                and _cron_field_match(dow, cron_dow)):
+            return t
+        t += timedelta(minutes=1)
+    return None
+
+
+def get_schedules() -> list[dict]:
+    """This host's cron schedules + computed next-run time.
+
+    Source: <workspace>/hosts/<hostname>/crons.json (see skills/schedule-crons).
+    Status is 'active' + next run; last-run history isn't tracked on disk.
+    """
+    host = socket.gethostname().split(".")[0]
+    cfg = WORKSPACE_DIR / "hosts" / host / "crons.json"
+    if not cfg.exists():
+        return []
+    try:
+        jobs = json.loads(cfg.read_text())
+    except (OSError, ValueError):
+        return []
+    now = datetime.now()
+    out = []
+    for job in jobs:
+        expr = job.get("cron", "")
+        kind = f'skill:{job["prompt_skill"]}' if job.get("prompt_skill") else "prompt"
+        nxt = _cron_next_run(expr, now) if expr else None
+        if nxt:
+            mins = int((nxt - now).total_seconds() // 60)
+            if mins < 60:
+                rel = f"in {mins}m"
+            elif mins < 1440:
+                rel = f"in {mins // 60}h{mins % 60:02d}m"
+            else:
+                rel = f"in {mins // 1440}d{(mins % 1440) // 60}h"
+            next_str = f'{nxt.strftime("%a %H:%M")} ({rel})'
+        else:
+            next_str = ">7d" if expr else "invalid"
+        if job.get("description"):
+            desc = job["description"]
+        elif job.get("prompt_skill"):
+            desc = f'Runs the /{job["prompt_skill"]} skill'
+        else:
+            _p = re.sub(r"^Run:?\s*", "", (job.get("prompt") or "").strip())
+            desc = (_p[:100] + "…") if len(_p) > 100 else _p
+        desc = desc.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        out.append({"name": job.get("name", "?"), "cron": expr, "kind": kind,
+                    "next": next_str, "desc": desc})
+    return out
+
+
 def render_dashboard() -> str:
     health = get_health()
     activity = get_activity(5)
@@ -358,15 +451,56 @@ def render_dashboard() -> str:
     # distributed .app (`/Applications/Sutando.app/Contents/MacOS/Sutando`).
     sutando_running = subprocess.run(["/usr/bin/pgrep", "-f", "(Sutando|MacOS)/Sutando"], capture_output=True).returncode == 0
     shortcut_status = '<span class="ok">✓</span> Sutando app running' if sutando_running else '<span class="bad">✗</span> Sutando app not running'
+    # Shortcuts come from <workspace>/state/hotkeys.json (published by the
+    # Sutando app from its resolved config — single source of truth). Only the
+    # human descriptions are local UI copy, keyed by the stable action name.
+    _hk_desc = {
+        "drop_context": "Context drop (text/image/file)",
+        "drop_screenshot": "Drop screenshot",
+        "drop_video_clip": "Drop video clip",
+        "toggle_voice": "Toggle voice",
+        "toggle_mute": "Toggle mute",
+    }
+    try:
+        _hk = json.loads((WORKSPACE_DIR / "state" / "hotkeys.json").read_text())
+    except (OSError, ValueError):
+        _hk = []  # app hasn't published yet — show the header only
+    _hk_rows = "".join(
+        f'<div style="margin:4px 0"><kbd style="background:#222;color:#aaa;padding:2px 6px;border-radius:3px;font-family:monospace">{e.get("label","")}</kbd> {_hk_desc.get(e.get("action"), e.get("action",""))}</div>'
+        for e in _hk
+    )
     cards.append(f"""<div class="card">
 <h2>Keyboard Shortcuts</h2>
 <div class="check">{shortcut_status}</div>
 <div style="margin-top:8px;font-size:12px;color:#555">
-<div style="margin:4px 0"><kbd style="background:#222;color:#aaa;padding:2px 6px;border-radius:3px;font-family:monospace">⌃C</kbd> Context drop (text/image/file)</div>
-<div style="margin:4px 0"><kbd style="background:#222;color:#aaa;padding:2px 6px;border-radius:3px;font-family:monospace">⌃S</kbd> Drop screenshot</div>
-<div style="margin:4px 0"><kbd style="background:#222;color:#aaa;padding:2px 6px;border-radius:3px;font-family:monospace">⌃V</kbd> Toggle voice</div>
-<div style="margin:4px 0"><kbd style="background:#222;color:#aaa;padding:2px 6px;border-radius:3px;font-family:monospace">⌃M</kbd> Toggle mute</div>
+{_hk_rows}
 </div></div>""")
+
+    # Schedules (cron jobs from this host's crons.json)
+    schedules = get_schedules()
+    if schedules:
+        sched_rows = ""
+        for s in schedules:
+            sched_rows += (
+                f'<tr>'
+                f'<td style="color:#8ab">{s["name"]}'
+                f'<div style="font-size:9px;color:#555">{s.get("desc","")}</div></td>'
+                f'<td style="color:#666;font-family:monospace;font-size:10px">{s["cron"]}</td>'
+                f'<td style="color:#555;font-size:10px">{s["kind"]}</td>'
+                f'<td style="color:#4a8aaa">{s["next"]}</td>'
+                f'</tr>\n'
+            )
+        cards.append(
+            '<div class="card full"><h2>Schedules</h2>'
+            '<table style="width:100%;font-size:11px;border-collapse:collapse">'
+            '<tr style="color:#555;text-align:left"><th>Name</th><th>Cron</th>'
+            '<th>Type</th><th>Next run</th></tr>'
+            + sched_rows +
+            '</table>'
+            '<div style="font-size:9px;color:#444;margin-top:4px">'
+            f'{len(schedules)} active. Next-run computed from cron expression '
+            '(local time); last-run history not tracked.</div></div>'
+        )
 
     # Quick links
     cards.append(f"""<div class="card full">
