@@ -605,8 +605,10 @@ def main():  # pragma: no cover
     # TOFU enrollment code: generated when access.json doesn't exist so
     # the first DM must present it before being auto-enrolled as owner.
     # Prevents an attacker who can DM the bot from grabbing ownership before
-    # the legitimate owner does. Cleared (set to None) after first successful
-    # enrollment or on restart when access.json already exists.
+    # the legitimate owner does. Stays valid for the whole process lifetime
+    # (never cleared after enrollment) so the gate remains armed if access.json
+    # is deleted externally later (#899); only a restart with access.json
+    # present leaves it None (TOFU branch is then unreachable anyway).
     if not ACCESS_FILE.exists():
         _TOFU_ENROLLMENT_CODE = secrets.token_hex(3)  # 6-char hex, 16M combinations
         print("", flush=True)
@@ -687,7 +689,12 @@ def main():  # pragma: no cover
                         print(f"  TOFU: rejected enrollment from @{username} — code not presented", flush=True)
                         continue
                     allowed = tofu_onboard(sender_id, username)
-                    _TOFU_ENROLLMENT_CODE = None  # consume after successful enrollment
+                    # Do NOT clear _TOFU_ENROLLMENT_CODE after enrollment. If
+                    # access.json is later deleted while the bridge keeps running
+                    # (#899), load_allowed() returns None again; keeping the code
+                    # valid for the process lifetime keeps the gate armed so the
+                    # next DM must still present it, instead of falling through to
+                    # an unguarded tofu_onboard(). Single secret, single owner.
                 if sender_id not in allowed:
                     print(f"  Dropped message from non-allowed @{username}")
                     continue

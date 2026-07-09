@@ -10,11 +10,16 @@ requires that code to be present in the first DM before auto-enrolling.
 Test contract:
   (a) Code required but NOT in message text → _write_task returns None,
       sends a rejection chat message, does not consume the code.
-  (b) Code IS in message text → TOFU enrollment proceeds, code consumed
-      (set to None), tofu_onboard called once.
-  (c) _TOFU_ENROLLMENT_CODE is None (post-enrollment or pre-enrollment on
-      a restart where access.json exists) → enrollment proceeds without
+  (b) Code IS in message text → TOFU enrollment proceeds, tofu_onboard called
+      once, and the code is RETAINED (not cleared) so the gate stays armed if
+      access.json is later deleted externally (#899 / security finding #3).
+  (c) _TOFU_ENROLLMENT_CODE is None (restart where access.json exists, so the
+      TOFU branch is unreachable in practice) → enrollment proceeds without
       the code check (backward compat; existing behavior preserved).
+  (d) Channel @mention while in TOFU state → never onboards, even with the
+      code present; enrollment is DM-only (channel_type == "im").
+  (e) Regression: enroll → delete access.json → next DM without the code is
+      rejected (the retained code keeps the gate armed across #899 deletion).
 
 Run: python3 tests/slack-bridge-tofu-enroll.test.py
 Exit: 0 on pass, 1 on fail.
@@ -143,7 +148,7 @@ def test_enrollment_code_gate_blocks_without_code():
 
 
 def test_enrollment_code_gate_allows_with_correct_code():
-    """(b) Code IS in text → enrollment proceeds; code consumed."""
+    """(b) Code IS in text → enrollment proceeds; code RETAINED (not cleared)."""
     with _TempBridgeState():
         assert not BRIDGE.ACCESS_FILE.exists()
         BRIDGE._TOFU_ENROLLMENT_CODE = "x9y8z7"
@@ -168,9 +173,84 @@ def test_enrollment_code_gate_allows_with_correct_code():
         # tofu_onboard must have been called exactly once with the right uid.
         assert len(onboard_calls) == 1, f"tofu_onboard should be called once, got {onboard_calls}"
         assert onboard_calls[0][0] == "U_OWNER"
-        # Enrollment code must be cleared after successful enrollment.
-        assert BRIDGE._TOFU_ENROLLMENT_CODE is None, (
-            "enrollment code must be consumed after successful enrollment"
+        # Enrollment code must be RETAINED after successful enrollment so the
+        # gate stays armed against a later external access.json deletion (#899).
+        assert BRIDGE._TOFU_ENROLLMENT_CODE == "x9y8z7", (
+            "enrollment code must be retained (not cleared) after successful enrollment"
+        )
+
+
+def test_channel_mention_never_onboards():
+    """(d) Channel @mention in TOFU state must NOT onboard, even with the code."""
+    with _TempBridgeState():
+        assert not BRIDGE.ACCESS_FILE.exists()
+        BRIDGE._TOFU_ENROLLMENT_CODE = "chan42"
+
+        onboard_calls: list[tuple] = []
+        orig_onboard = BRIDGE.tofu_onboard
+        BRIDGE.tofu_onboard = lambda uid, uname: onboard_calls.append((uid, uname)) or {uid}
+
+        # app_mention events do NOT carry channel_type=="im" — model a channel
+        # mention that even includes the leaked code in its text.
+        mention_event = {
+            "user": "U_CHAN_ATTACKER",
+            "channel": "C_PUBLIC",
+            "text": "hey <@BOT> chan42",
+            "ts": "1700000000.000009",
+        }
+        try:
+            result = BRIDGE._write_task(mention_event, "Slack mention", "hey <@BOT> chan42", "attacker")
+        finally:
+            BRIDGE.tofu_onboard = orig_onboard
+
+        assert result is None, "channel mention in TOFU state must return None"
+        assert onboard_calls == [], (
+            f"channel mention must NOT onboard even with the code, got {onboard_calls}"
+        )
+        assert BRIDGE._TOFU_ENROLLMENT_CODE == "chan42", "code must survive an ignored mention"
+
+
+def test_code_survives_enrollment_and_regates_after_deletion():
+    """(e) Regression: enroll → delete access.json → next DM w/o code is rejected.
+
+    The enrollment code is not consumed on success, so re-entering TOFU state
+    after an external #899 deletion stays gated instead of auto-onboarding the
+    next sender."""
+    with _TempBridgeState():
+        # Reset the module access cache so step 1 is a genuine first-time TOFU.
+        with BRIDGE._access_cache_lock:
+            BRIDGE._access_cache = None
+        BRIDGE._TOFU_ENROLLMENT_CODE = "keep42"
+
+        def _mock_onboard(uid, uname):
+            BRIDGE.ACCESS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            BRIDGE.ACCESS_FILE.write_text(json.dumps({"allowFrom": [uid], "tofuOwner": uid}))
+            return {uid}
+
+        orig_onboard = BRIDGE.tofu_onboard
+        BRIDGE.app.client.chat_postMessage = lambda **kw: None
+        BRIDGE.tofu_onboard = _mock_onboard
+        try:
+            # 1. Owner enrolls with the code.
+            BRIDGE._write_task(_make_dm_event("U_OWNER", "code keep42"),
+                               "Slack DM", "code keep42", "owner")
+            assert BRIDGE.ACCESS_FILE.exists(), "owner enrollment should create access.json"
+            assert BRIDGE._TOFU_ENROLLMENT_CODE == "keep42", "code must survive enrollment"
+
+            # 2. access.json deleted externally (#899) → re-enter TOFU state.
+            BRIDGE.ACCESS_FILE.unlink()
+
+            # 3. Attacker DM WITHOUT the code → rejected, not onboarded.
+            onboard_calls: list[tuple] = []
+            BRIDGE.tofu_onboard = lambda uid, uname: onboard_calls.append(uid) or {uid}
+            result = BRIDGE._write_task(_make_dm_event("U_ATTACKER", "let me in"),
+                                        "Slack DM", "let me in", "attacker")
+        finally:
+            BRIDGE.tofu_onboard = orig_onboard
+
+        assert result is None, "post-deletion DM without code must be rejected"
+        assert onboard_calls == [], (
+            f"attacker must NOT be onboarded post-deletion, got {onboard_calls}"
         )
 
 
@@ -249,6 +329,8 @@ def main() -> int:
         ("a-code-blocks-without-code", test_enrollment_code_gate_blocks_without_code),
         ("b-code-allows-with-correct-code", test_enrollment_code_gate_allows_with_correct_code),
         ("c-no-code-skips-gate", test_no_enrollment_code_skips_gate),
+        ("d-channel-mention-never-onboards", test_channel_mention_never_onboards),
+        ("e-code-survives-enrollment-regates-after-deletion", test_code_survives_enrollment_and_regates_after_deletion),
         ("a-extra-reply-channel", test_rejection_reply_uses_event_channel),
         ("a-fault-api-failure-swallowed", test_rejection_api_failure_is_swallowed),
     ]

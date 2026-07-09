@@ -12,7 +12,10 @@ This test verifies:
   (b) The module exposes _TOFU_ENROLLMENT_CODE so main() can set it.
   (c) Structural check: enrollment code generation is wired into main().
   (d) Structural check: the gate condition is present in the poll loop.
-  (e) Structural check: code is consumed (set to None) after tofu_onboard.
+  (e) Structural check: code is RETAINED (not cleared) after tofu_onboard, so
+      a later external access.json deletion (#899) re-enters TOFU state still
+      gated. Functional proof of the enroll→delete→reject sequence lives in
+      tests/slack-bridge-tofu-enroll.test.py (identical gate logic).
   (f) Structural check: startup banner prints are wired (operator-visible log).
 
 Run: python3 tests/telegram-bridge-tofu-enroll.test.py
@@ -118,17 +121,22 @@ def test_poll_loop_contains_gate_condition():
 
 
 # ---------------------------------------------------------------------------
-# (e) Structural: code consumed after successful enrollment
+# (e) Structural: code RETAINED (not cleared) after successful enrollment
 # ---------------------------------------------------------------------------
 
-def test_enrollment_code_cleared_after_onboard():
-    """(e) _TOFU_ENROLLMENT_CODE is set to None after tofu_onboard (consumes the code)."""
-    assert re.search(
+def test_enrollment_code_retained_after_onboard():
+    """(e) _TOFU_ENROLLMENT_CODE must NOT be cleared after tofu_onboard.
+
+    Security finding #3 follow-up: clearing the code left the gate inert if
+    access.json was later deleted externally (#899) — the next DM re-entered
+    tofu_onboard() with no code check. Keeping the code valid for the process
+    lifetime keeps the gate armed on that re-TOFU path."""
+    assert not re.search(
         r"tofu_onboard\([^)]*\)\s*\n\s*_TOFU_ENROLLMENT_CODE\s*=\s*None",
         SRC,
     ), (
-        "_TOFU_ENROLLMENT_CODE must be set to None immediately after tofu_onboard() "
-        "(one-time use: code is consumed on first successful enrollment)"
+        "_TOFU_ENROLLMENT_CODE must NOT be cleared immediately after tofu_onboard() — "
+        "keeping it valid keeps the post-deletion (#899) re-TOFU path gated"
     )
 
 
@@ -154,7 +162,7 @@ def main() -> int:
         ("b-settable", test_tofu_enrollment_code_is_settable),
         ("c-code-gen-in-main", test_main_generates_enrollment_code),
         ("d-gate-in-poll-loop", test_poll_loop_contains_gate_condition),
-        ("e-code-consumed-after-onboard", test_enrollment_code_cleared_after_onboard),
+        ("e-code-retained-after-onboard", test_enrollment_code_retained_after_onboard),
         ("f-banner-printed", test_startup_banner_present),
     ]
     failures = 0
