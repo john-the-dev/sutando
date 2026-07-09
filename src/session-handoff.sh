@@ -133,21 +133,37 @@ print(f'5h: {d[\"utilization_5h\"]:.0%} (resets in {m5}min at {r5.strftime(\"%I:
   # archive each one to relay/processed/ (mirrors catchup-after-startup's
   # original drain pattern — fixes issue #1738 where #1737 removed the only
   # consumer).
+  # Capture (don't move yet). Retire the notes to processed/ only AFTER the
+  # write to $STATE_FILE is confirmed below — otherwise an interrupt between
+  # the mv and a durable write would retire a note that was never captured,
+  # losing that context for the next session (issue #1738 reviewer note).
   RELAY_DIR="$WORKSPACE_DIR/relay"
   RELAY_PROCESSED="$RELAY_DIR/processed"
   unprocessed_relay=$(find "$RELAY_DIR" -maxdepth 1 -name 'relay-*.md' 2>/dev/null | sort)
   if [ -n "$unprocessed_relay" ]; then
-    mkdir -p "$RELAY_PROCESSED"
     echo ""
     echo "## Relay Notes (from prior sessions)"
     while IFS= read -r relay_file; do
       echo ""
       echo "### $(basename "$relay_file")"
       cat "$relay_file"
-      mv "$relay_file" "$RELAY_PROCESSED/" 2>/dev/null
     done <<< "$unprocessed_relay"
   fi
 
 } > "$STATE_FILE" 2>/dev/null
 
 echo "Session state saved to $STATE_FILE"
+
+# Retire relay notes to processed/ only now that session-state.md has been
+# written. Confirm each note's content actually landed in $STATE_FILE (its
+# header line is present) before moving it — if the capture failed or was
+# interrupted, leave the note in place for the next run to retry.
+if [ -n "$unprocessed_relay" ] && [ -s "$STATE_FILE" ]; then
+  mkdir -p "$RELAY_PROCESSED"
+  while IFS= read -r relay_file; do
+    [ -n "$relay_file" ] || continue
+    if grep -qF "### $(basename "$relay_file")" "$STATE_FILE" 2>/dev/null; then
+      mv "$relay_file" "$RELAY_PROCESSED/" 2>/dev/null
+    fi
+  done <<< "$unprocessed_relay"
+fi
