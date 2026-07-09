@@ -7,7 +7,9 @@
 
 # REPO resolves to: (1) $SUTANDO_REPO_DIR if set AND valid, (2) auto-detect
 # from the script's own resolved location (symlink-safe), (3) common layout
-# probes, (4) ~/Desktop/sutando as last-resort default. SUTANDO_WORKSPACE
+# probes — each validated by _repo_ok. If nothing validates, the script exits
+# loudly rather than trusting an unvalidated default (a bad REPO produces empty
+# REPO-rooted output, the exact failure this guards against). SUTANDO_WORKSPACE
 # intentionally NOT in the fallback (CLAUDE.md reserves it for the workspace
 # dir; using it as a REPO alias would silently pick the wrong path).
 #
@@ -30,7 +32,13 @@ else
             REPO="$_cand"; break
         fi
     done
-    REPO="${REPO:-$HOME/Desktop/sutando}"
+    # No validated candidate found. Do NOT fall back to an unvalidated default
+    # (that just reintroduces the empty-REPO failure mode this script guards
+    # against). Fail loud so the caller sees why the handoff was skipped.
+    if [ -z "$REPO" ]; then
+        echo "✗ session-handoff: could not locate a valid Sutando checkout (no candidate passed _repo_ok). Set SUTANDO_REPO_DIR to a valid checkout." >&2
+        exit 1
+    fi
 fi
 export PATH="/opt/homebrew/bin:$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"
 STATE_FILE="$REPO/session-state.md"
