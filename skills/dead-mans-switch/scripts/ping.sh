@@ -28,6 +28,31 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 
+# Per-host label — lockstep with `_host_label()` in src/util_paths.py (the
+# derivation the heartbeat writer uses for state/cores/<host>.alive). MUST match
+# it or the switch pings /fail forever on a host with a label override even
+# while the core is healthy. Precedence:
+#   1. $SUTANDO_HOST_LABEL (or legacy $SUTANDO_HOST_OVERRIDE)
+#   2. macOS `scutil --get LocalHostName` (stable Bonjour name; guards the
+#      DHCP-hostname-drift split, 2026-06-22 incident)
+#   3. short `hostname`
+_host_label() {
+    local env="${SUTANDO_HOST_LABEL:-${SUTANDO_HOST_OVERRIDE:-}}"
+    if [ -n "$env" ]; then
+        printf '%s\n' "$env"
+        return
+    fi
+    local lhn=""
+    if command -v scutil >/dev/null 2>&1; then
+        lhn="$(scutil --get LocalHostName 2>/dev/null)"
+    fi
+    if [ -n "$lhn" ]; then
+        printf '%s\n' "$lhn"
+    else
+        hostname | sed 's/\..*//'
+    fi
+}
+
 URL="${HEALTHCHECKS_PING_URL:-}"
 if [ -z "$URL" ]; then
     URL="$(command -v python3 >/dev/null 2>&1 && python3 "$REPO/skills/secret-vault/secret-vault.py" get HEALTHCHECKS_PING_URL 2>/dev/null || true)"
@@ -44,7 +69,7 @@ if [ -z "$ALIVE" ]; then
         echo "deadman-ping: workspace resolution failed — reporting core-down (/fail)" >&2
         WORKSPACE=""
     fi
-    HOST="$(hostname | sed 's/\..*//')"
+    HOST="$(_host_label)"
     ALIVE="$WORKSPACE/state/cores/$HOST.alive"
 fi
 
