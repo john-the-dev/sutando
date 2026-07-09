@@ -1043,7 +1043,20 @@ def _should_skip_bridge(channel_name: str, env_path: Path) -> bool:
     health-check (no warn) and --fix (no restart) honor it.
     """
     var = f"SKIP_{channel_name.upper()}"
-    return (env_path.exists() and f"{var}=1" in env_path.read_text()) or os.environ.get(var) == "1"
+    if os.environ.get(var) == "1":
+        return True
+    if env_path.exists():
+        try:
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                key, sep, val = line.partition("=")
+                if sep and key.strip() == var and val.strip().strip('"').strip("'") == "1":
+                    return True
+        except Exception:
+            pass
+    return False
 
 
 def run_all_checks() -> list[dict]:
