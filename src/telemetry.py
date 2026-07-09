@@ -148,13 +148,12 @@ def capture(event: str, properties: dict | None = None) -> None:
         "api_key": _KEY,
         "event": event,
         "distinct_id": _distinct_id(),
-        # $process_person_profile=False keeps these anonymous (no person
-        # profiles). $ip="" + $geoip_disable stop PostHog from storing or
-        # geolocating the request IP — the network-level source IP is inherent
-        # to any HTTPS request, but the vendor is instructed not to attribute
-        # or retain it.
+        # A PostHog person is created/updated for the random per-install UUID so
+        # installs show up as active users — the "person" carries no PII, it is
+        # just the anonymous install id. $ip="" + $geoip_disable still stop
+        # PostHog from storing or geolocating the request IP (that address is
+        # inherent to any HTTPS request; the vendor is told not to keep it).
         "properties": {
-            "$process_person_profile": False,
             "$ip": "",
             "$geoip_disable": True,
             **(properties or {}),

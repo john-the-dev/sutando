@@ -28,7 +28,9 @@ Only bucketed / categorical **product events**:
 
 Identity is a **random per-install UUID** stored at
 `<workspace>/state/telemetry-id` — not a device fingerprint, not tied to any
-account. Events are sent anonymously (`$process_person_profile: false`).
+account. PostHog creates a "person" for this UUID so installs can be counted as
+active users, but that person carries **no PII** — it is just the anonymous
+install id.
 
 **On IP addresses:** every event sets `$ip=""` and `$geoip_disable`, so PostHog
 does not store or geolocate your IP. Note the network-level source IP is

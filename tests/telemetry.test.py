@@ -103,7 +103,8 @@ def run():
         assert p["event"] == "feature_used"
         assert p["api_key"] == "phc_live"
         assert p["properties"]["feature"] == "morning-briefing"
-        assert p["properties"]["$process_person_profile"] is False, "must be anonymous"
+        assert "$process_person_profile" not in p["properties"], \
+            "person processing on so installs appear as active users"
         assert p["properties"]["$ip"] == "", "must suppress IP storage"
         assert p["properties"]["$geoip_disable"] is True, "must disable GeoIP"
         did = p["distinct_id"]
