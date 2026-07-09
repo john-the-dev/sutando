@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
         from telemetry import capture  # sibling module (src/ already on sys.path)
 
         capture("core_started", {"interval_s": args.interval})
-    except Exception:  # telemetry must never break the core
+    except Exception:  # pragma: no cover — telemetry must never break the core
         pass
     return run_forever(interval=args.interval, status=args.status)
 

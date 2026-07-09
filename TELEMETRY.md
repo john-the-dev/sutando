@@ -1,8 +1,8 @@
 # Telemetry
 
 Sutando collects **anonymous, opt-out product telemetry** so the maintainers can
-see how many people run it and which features get used. It is designed to be
-impossible to trace back to you and easy to turn off.
+see how many people run it and which features get used. It is designed so events
+can't be attributed to you, and it's easy to turn off.
 
 ## What is collected
 
@@ -23,12 +23,17 @@ Only bucketed / categorical **product events**:
 
 - Task content, message text, prompts, or model output
 - Logs, file paths, hostnames, or environment
-- Email, name, IP-linked identity, or any PII
+- Email, name, or any PII
 - No autocapture, no session replay, no screen contents
 
 Identity is a **random per-install UUID** stored at
 `<workspace>/state/telemetry-id` — not a device fingerprint, not tied to any
 account. Events are sent anonymously (`$process_person_profile: false`).
+
+**On IP addresses:** every event sets `$ip=""` and `$geoip_disable`, so PostHog
+does not store or geolocate your IP. Note the network-level source IP is
+inherent to any HTTPS request (the same as visiting any website); we simply
+instruct the vendor not to record or attribute it.
 
 ## How to opt out
 

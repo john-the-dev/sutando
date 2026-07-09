@@ -28,7 +28,10 @@ Set ANY of the following and all telemetry becomes a silent no-op:
 Identity
 --------
 A random per-install UUID persisted at ``<workspace>/state/telemetry-id``. It
-is not a device fingerprint and is not tied to any account, email, or IP.
+is not a device fingerprint and is not tied to any account or email. Events set
+``$ip=""`` and ``$geoip_disable`` so PostHog does not store or geolocate the
+request IP; the network-level source IP is inherent to any HTTPS request (as
+with any website the machine contacts) and is not used for attribution.
 
 Config
 ------
@@ -146,7 +149,15 @@ def capture(event: str, properties: dict | None = None) -> None:
         "event": event,
         "distinct_id": _distinct_id(),
         # $process_person_profile=False keeps these anonymous (no person
-        # profiles) — cheaper and privacy-preserving for OSS install counts.
-        "properties": {"$process_person_profile": False, **(properties or {})},
+        # profiles). $ip="" + $geoip_disable stop PostHog from storing or
+        # geolocating the request IP — the network-level source IP is inherent
+        # to any HTTPS request, but the vendor is instructed not to attribute
+        # or retain it.
+        "properties": {
+            "$process_person_profile": False,
+            "$ip": "",
+            "$geoip_disable": True,
+            **(properties or {}),
+        },
     }
     threading.Thread(target=_post, args=(payload,), daemon=True).start()

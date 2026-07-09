@@ -104,6 +104,8 @@ def run():
         assert p["api_key"] == "phc_live"
         assert p["properties"]["feature"] == "morning-briefing"
         assert p["properties"]["$process_person_profile"] is False, "must be anonymous"
+        assert p["properties"]["$ip"] == "", "must suppress IP storage"
+        assert p["properties"]["$geoip_disable"] is True, "must disable GeoIP"
         did = p["distinct_id"]
         assert did and did != "anonymous" and len(did) == 32, f"distinct_id looks wrong: {did!r}"
         passed += 1
