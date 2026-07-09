@@ -801,6 +801,21 @@ One entry per input message. Preserve msg_id strings exactly as given.
 """
 
 
+def _escape_judge_delimiters(text: str) -> str:
+    """Neutralize delimiter-tag breakout for user content interpolated between
+    the <message_content> / <reply_content> tags in the moderation-judge prompt.
+
+    Wrapping content in tags is not enough on its own: a crafted message
+    containing a literal ``</message_content>`` (or ``</reply_content>``) would
+    close the delimiter early and inject fresh text into instruction space —
+    the exact prompt-injection path the G3 guardrail + delimiters are meant to
+    close (security audit finding #5). HTML-escaping the angle brackets means no
+    tag — of any name, case, or spacing — can be formed inside the delimited
+    region, while the content stays semantically legible to the judge model.
+    """
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _format_judge_prompt(messages, rules_context=""):
     """Build the codex judge prompt for a batch of messages.
 
@@ -819,12 +834,15 @@ def _format_judge_prompt(messages, rules_context=""):
         msg_id = m.get("msg_id", "?")
         ch = m.get("channel_name", "?")
         author = m.get("author_name", "?")
-        content = (m.get("content") or "").replace("\n", " ").strip()[:500]
+        # Escape AFTER truncation so the raw-length bound is unaffected, but
+        # BEFORE interpolation so a literal closing tag in user content can't
+        # break out of the delimiter (finding #5 reviewer follow-up).
+        content = _escape_judge_delimiters((m.get("content") or "").replace("\n", " ").strip()[:500])
         is_reply = bool(m.get("is_reply"))
         parent = m.get("parent_content", "") if is_reply else ""
         prefix = f"  msg_id={msg_id} #{ch} @{author}"
         if is_reply and parent:
-            parent_short = parent.replace("\n", " ").strip()[:120]
+            parent_short = _escape_judge_delimiters(parent.replace("\n", " ").strip()[:120])
             prefix += f" [reply to: <reply_content>{parent_short}</reply_content>]"
         lines.append(f"{prefix}:")
         lines.append(f"  <message_content>{content}</message_content>")
