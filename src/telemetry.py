@@ -51,7 +51,7 @@ from pathlib import Path
 # ``phc_...`` PostHog project keys are PUBLIC and write-only — safe to embed in
 # open-source source/binaries. Paste the project key here to enable telemetry
 # for distributed builds; forks/self-hosters override via POSTHOG_API_KEY.
-_EMBEDDED_KEY = ""
+_EMBEDDED_KEY = "phc_kt7Syd7YpYJxL2i3467C3D2Q4TAQLxJre9aUuxht7wBj"  # pragma: allowlist secret — public write-only PostHog project key
 
 _KEY = (os.environ.get("POSTHOG_API_KEY") or _EMBEDDED_KEY).strip()
 _HOST = (os.environ.get("POSTHOG_HOST") or "https://eu.i.posthog.com").rstrip("/")
