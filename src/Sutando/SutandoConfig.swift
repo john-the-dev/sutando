@@ -199,11 +199,26 @@ enum SutandoConfig {
     /// $SUTANDO_WORKSPACE is ignored in production as of v0.8 (warn once when
     /// SUTANDO_WORKSPACE_DIR is not set).
     /// SUTANDO_TEST_MODE=1 keeps the env override for tests only.
+    /// Expand a leading `~` and normalize to an absolute, standardized path.
+    /// Mirrors the Python (`Path(...).expanduser().resolve()`) and TS
+    /// (`path.resolve(value.replace(/^~/, homedir()))`) twins so a relative
+    /// override like `SUTANDO_WORKSPACE_DIR=tmp/ws` resolves against the current
+    /// working directory instead of staying relative — otherwise Sutando.app
+    /// would split onto a different workspace than the Python/TS services.
+    private static func absolutize(_ path: String) -> String {
+        let expanded = (path as NSString).expandingTildeInPath
+        let absolute = (expanded as NSString).isAbsolutePath
+            ? expanded
+            : (FileManager.default.currentDirectoryPath as NSString)
+                .appendingPathComponent(expanded)
+        return (absolute as NSString).standardizingPath
+    }
+
     static func resolveWorkspace(repoRoot explicitRoot: String? = nil) -> String {
         if let explicitEnv = ProcessInfo.processInfo.environment["SUTANDO_WORKSPACE_DIR"]?
             .trimmingCharacters(in: .whitespaces),
            !explicitEnv.isEmpty {
-            return (explicitEnv as NSString).expandingTildeInPath
+            return absolutize(explicitEnv)
         }
 
         let env = ProcessInfo.processInfo.environment["SUTANDO_WORKSPACE"]?

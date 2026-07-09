@@ -313,7 +313,12 @@ export function resolveWorkspace(repoRoot?: string): string {
 	if (typeof ws === 'string' && ws) {
 		resolved = resolve(ws.replace(/^~/, homedir()));
 	} else if (root === undefined) {
-		resolved = resolve(join(homedir(), '.sutando', 'workspace'));
+		// Last-ditch fallback for ad-hoc invocations outside a checkout.
+		// Post-v0.8 (#1440) the legacy `.sutando/workspace/` namespace is gone;
+		// use the unhidden `~/sutando-workspace/` default so the deprecated
+		// `.sutando/` alias doesn't live on. Mirrors the Python + Swift twins'
+		// no-config-no-repo-root branch.
+		resolved = resolve(join(homedir(), 'sutando-workspace'));
 	} else {
 		resolved = resolve(join(root, HARDCODED_WORKSPACE_DEFAULT_REL));
 	}
