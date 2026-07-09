@@ -27,7 +27,9 @@ ok()   { echo "  ok  $1"; pass=$((pass+1)); }
 fail() { echo "FAIL: $1" >&2; fail=$((fail+1)); }
 
 # ── 1. Hint script outputs valid JSON with expected structure ──────────────────
-out="$(bash "$HINT")"
+# The hint gates on SUTANDO_CORE_SESSION=1 (only the core bootstraps), so set it
+# for the "fires" assertions below.
+out="$(SUTANDO_CORE_SESSION=1 bash "$HINT")"
 # Must be valid JSON
 echo "$out" | python3 -c "import json,sys; json.load(sys.stdin)" 2>/dev/null \
   && ok "hint script outputs valid JSON" \
@@ -43,18 +45,26 @@ print(d['hookSpecificOutput']['additionalContext'])
   && ok "hint script additionalContext is non-empty" \
   || fail "hint script missing hookSpecificOutput.additionalContext"
 
-# Must mention /schedule-crons
+# Must mention /startup (the canonical bootstrap: orphan-recovery THEN crons)
 case "$ctx" in
-  */schedule-crons*) ok "hint script mentions /schedule-crons" ;;
-  *) fail "hint script additionalContext does not mention /schedule-crons: $ctx" ;;
+  */startup*) ok "hint script mentions /startup" ;;
+  *) fail "hint script additionalContext does not mention /startup: $ctx" ;;
 esac
 
+# Scope gate: WITHOUT the core marker the hint must stay silent (no context) so
+# ad-hoc sessions in the checkout don't trigger a redundant cron bootstrap.
+out_nogate="$(env -u SUTANDO_CORE_SESSION bash "$HINT")"
+[ -z "$out_nogate" ] \
+  && ok "hint script is silent without SUTANDO_CORE_SESSION marker" \
+  || fail "hint script emitted output without the core marker: $out_nogate"
+
 # ── 2. Installer creates settings.json from scratch ───────────────────────────
+# NOTE: do NOT invoke the real installer here — it hardcodes REPO and would
+# mutate this checkout's live .claude/settings.json, dirtying the worktree.
+# We replay the installer's Python merge logic against a temp settings.json
+# instead (the installer's own logic is unit-tested in the .test.py sibling).
 T="$TMPDIR_BASE/fresh"
 mkdir -p "$T/.claude"
-# Override REPO inside the installer by pointing HINT to our HINT
-bash "$INSTALLER" 2>&1 | grep -q "installed\|already" \
-  || { :; }  # installer prints to stdout; we verify the file below
 
 # Install on a temp settings.json by calling the Python block directly
 python3 - "$T/.claude/settings.json" "bash \"$HINT\"" <<'PYEOF'
