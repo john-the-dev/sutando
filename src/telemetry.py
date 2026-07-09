@@ -60,16 +60,17 @@ _TRUTHY = {"1", "true", "yes", "on"}
 
 
 def _state_dir() -> Path:
-    """`<workspace>/state`, resolved via the M0 helper when importable."""
-    try:
+    """`<workspace>/state`. An explicit ``SUTANDO_STATE_DIR`` wins; otherwise
+    resolved via the M0 helper, with a last-resort default."""
+    override = os.environ.get("SUTANDO_STATE_DIR")
+    if override:
+        return Path(override)
+    try:  # pragma: no cover — resolver glue, exercised in integration not unit
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from workspace_default import resolve_workspace  # noqa: E402
 
         return Path(resolve_workspace()) / "state"
-    except Exception:
-        base = os.environ.get("SUTANDO_STATE_DIR")
-        if base:
-            return Path(base)
+    except Exception:  # pragma: no cover
         return Path.home() / ".sutando" / "repo" / "workspace" / "state"
 
 
@@ -87,7 +88,7 @@ def opted_out() -> bool:
     try:
         if (_state_dir() / "telemetry-disabled").exists():
             return True
-    except Exception:
+    except Exception:  # pragma: no cover — defensive; never let a FS error force opt-in
         pass
     return False
 
@@ -105,7 +106,7 @@ def _distinct_id() -> str:
         new = uuid.uuid4().hex
         f.write_text(new)
         return new
-    except Exception:
+    except Exception:  # pragma: no cover — best-effort id; fall back to constant
         return "anonymous"
 
 
@@ -114,7 +115,7 @@ def enabled() -> bool:
     return bool(_KEY) and not opted_out()
 
 
-def _post(payload: dict) -> None:
+def _post(payload: dict) -> None:  # pragma: no cover — real network I/O; mocked in tests
     try:
         req = urllib.request.Request(
             f"{_HOST}/capture/",

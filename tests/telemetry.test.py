@@ -36,8 +36,9 @@ def _load(state_dir: Path, key: str = "", env: dict | None = None):
     spec = importlib.util.spec_from_file_location("telemetry_under_test", SRC / "telemetry.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    # Pin the state dir to the temp dir regardless of workspace resolution.
-    mod._state_dir = lambda: state_dir  # type: ignore
+    # No monkeypatch needed: _state_dir honors SUTANDO_STATE_DIR (set above),
+    # so the real resolver code runs against the temp dir.
+    assert mod._state_dir() == state_dir, "SUTANDO_STATE_DIR override should win"
     return mod
 
 
@@ -104,6 +105,23 @@ def run():
         assert did and did != "anonymous" and len(did) == 32, f"distinct_id looks wrong: {did!r}"
         passed += 1
         print("ok   enabled — sends once, anonymous, well-formed payload")
+
+    # 3b) Debug mode prints to stderr before send; still no send when opted out.
+    with tempfile.TemporaryDirectory() as td:
+        sd = Path(td)
+        mod = _load(sd, key="phc_live", env={"SUTANDO_DEBUG_TELEMETRY": "1", "DO_NOT_TRACK": "1"})
+        calls = []
+        mod._post = lambda payload: calls.append(payload)  # type: ignore
+        import io
+        import contextlib
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            _capture_sync(mod, "core_started", {"interval_s": 30})
+        assert "[telemetry] core_started" in buf.getvalue(), "debug should print the event"
+        assert calls == [], "debug + opted-out MUST still send nothing"
+        passed += 1
+        print("ok   debug mode prints but opt-out still sends nothing")
 
     # 4) distinct_id persists across calls (stable per install).
     with tempfile.TemporaryDirectory() as td:
