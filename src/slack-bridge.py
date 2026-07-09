@@ -421,16 +421,11 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
     global _TOFU_ENROLLMENT_CODE
     allowed = load_allowed()
     if allowed is None:
-        # TOFU state — require enrollment code before auto-onboarding as owner.
-        # This prevents an attacker who can DM the bot from claiming ownership
-        # before the legitimate owner does.
-        #
-        # Enrollment is DM-only. The access-control contract is "the first DM to
-        # the bot auto-enrolls the sender as owner" — a channel @mention (which
-        # also routes through _write_task via handle_mention) must NEVER onboard,
-        # or a leaked code could be claimed from a shared channel. Drop any
-        # non-DM event while in TOFU state. (app_mention events carry no
-        # channel_type=="im", so this correctly excludes channel mentions.)
+        # TOFU state — require enrollment code before auto-onboarding as owner,
+        # so an attacker who can DM the bot can't claim ownership first.
+        # Enrollment is DM-only: channel @mentions also route here but carry no
+        # channel_type=="im", so drop them — a leaked code must not be claimable
+        # from a shared channel.
         if event.get("channel_type") != "im":
             print(f"  TOFU: ignored non-DM event from {user_id} — enrollment is DM-only", flush=True)
             return None
@@ -449,13 +444,9 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
             print(f"  TOFU: rejected enrollment from {user_id} — code not presented", flush=True)
             return None
         allowed = tofu_onboard(user_id, username)
-        # Do NOT clear _TOFU_ENROLLMENT_CODE after enrollment. Keeping it valid
-        # for the process lifetime keeps the gate armed if access.json is later
-        # deleted externally (#899): re-entering TOFU state still requires the
-        # code rather than falling through to an unguarded tofu_onboard(). Single
-        # secret, single owner — no downside to it staying valid. tofu_onboard()
-        # additionally restores from the in-memory cache on that path, so the
-        # code + cache-restore are defense-in-depth for the same window.
+        # Keep _TOFU_ENROLLMENT_CODE valid for the process lifetime (do NOT clear
+        # it) so the gate stays armed if access.json is deleted externally later
+        # (#899), instead of falling through to an unguarded tofu_onboard().
     if user_id not in allowed:
         print(f"  Dropped message from non-allowed user {user_id}", flush=True)
         return None
