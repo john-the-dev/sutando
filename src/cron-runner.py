@@ -56,8 +56,21 @@ except Exception:  # pragma: no cover — only fires outside a checkout (can't i
 
 
 def host_slug() -> str:
-    import socket
-    return socket.gethostname().split(".")[0]
+    """Per-host label for the ``hosts/<host>/crons.json`` path. Delegates to
+    ``util_paths._host_label()`` — the single source of truth (honors
+    ``$SUTANDO_HOST_LABEL``/``$SUTANDO_HOST_OVERRIDE``, then scutil
+    LocalHostName, then short hostname) — so the launchd runner resolves the
+    SAME per-host dir as the rest of the stack. A raw
+    ``gethostname().split(".")[0]`` here would misresolve on hosts with a label
+    override or a drifting DHCP hostname, reading a phantom
+    ``hosts/<wrong-label>/crons.json``. ``util_paths`` is importable because
+    ``SRC_DIR`` is already on ``sys.path`` above."""
+    try:
+        from util_paths import _host_label  # type: ignore
+        return _host_label()
+    except Exception:  # pragma: no cover — only outside a checkout
+        import socket
+        return socket.gethostname().split(".")[0]
 
 
 CRONS_FILE = WORKSPACE / "hosts" / host_slug() / "crons.json"
