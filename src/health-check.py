@@ -63,7 +63,11 @@ def _default_memory_dir() -> str:
     claude_home_path() honors CLAUDE_CONFIG_DIR, falling back to ~/.claude
     only when it is unset (preserving the old path for ad-hoc launches).
     """
-    repo = Path(__file__).parent.parent.resolve()
+    # Resolve __file__'s symlink BEFORE walking up (same as REPO_DIR above) —
+    # a symlinked-bundle launch otherwise walks up from the symlink location
+    # and computes the wrong project slug. .resolve() on the final path is not
+    # enough: parent.parent already climbed out of the real tree.
+    repo = Path(os.path.realpath(__file__)).parent.parent
     slug = str(repo).replace("/", "-")
     return str(Path(claude_home_path()) / "projects" / slug / "memory")
 
