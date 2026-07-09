@@ -22,6 +22,7 @@ Checks:
 import hashlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -363,6 +364,19 @@ def fix_down_bridges(checks: list) -> list:
     different handling than a plain start.
 
     Returns the list of bridge names restarted.
+
+    Launch parity with startup.sh (per PR #1898 review): a naive
+    `sys.executable src/<bridge>.py` skips the bootstrapping startup.sh does and
+    crash-loops for two bridges:
+      - discord-bridge needs an interpreter that can `import discord`;
+        sys.executable (whatever launched health-check) frequently can't.
+      - slack-bridge needs SLACK_BOT_TOKEN/SLACK_APP_TOKEN, which startup.sh
+        sources from channels/slack/.env before launch — without them the
+        bridge exits immediately.
+    So mirror startup.sh: probe the same interpreter candidates for the
+    bridge's import, and inject the slack channel .env into the child's env.
+    Fail-safe: if no capable interpreter is found (or the required env is
+    missing), skip that bridge rather than spawn a guaranteed crash-loop.
     """
     restarted = []
     for c in checks:
@@ -371,16 +385,96 @@ def fix_down_bridges(checks: list) -> list:
             and c["status"] == "warn"
             and c.get("detail") == "configured but not running"
         ):
-            log_path = WORKSPACE_DIR / "logs" / f"{c['name']}.log"
+            name = c["name"]
+            interp = _bridge_interpreter(name)
+            if interp is None:
+                # No interpreter that can import the bridge's dependency —
+                # spawning would just crash-loop (startup.sh skips it too).
+                continue
+            child_env = os.environ.copy()
+            if name == "slack-bridge":
+                # startup.sh sources channels/slack/.env so SLACK_BOT_TOKEN /
+                # SLACK_APP_TOKEN reach the child. Mirror that here; skip the
+                # restart if the env file / tokens are missing (fail-safe).
+                slack_env = _load_channel_env("slack")
+                if "SLACK_BOT_TOKEN" not in {**os.environ, **slack_env}:
+                    continue
+                child_env.update(slack_env)
+            log_path = WORKSPACE_DIR / "logs" / f"{name}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
             # `with` closes the parent's handle after Popen; the child holds
             # its own dup of the fd, so the log stays writable.
             with open(str(log_path), "a") as log_f:
-                subprocess.Popen([sys.executable, str(REPO_DIR / "src" / f"{c['name']}.py")],
+                subprocess.Popen([interp, str(REPO_DIR / "src" / f"{name}.py")],
                                  stdout=log_f, stderr=subprocess.STDOUT,
-                                 start_new_session=True)
-            restarted.append(c["name"])
+                                 env=child_env, start_new_session=True)
+            restarted.append(name)
     return restarted
+
+
+# Interpreter candidates, in the same priority order startup.sh probes. First
+# candidate that can import the bridge's required module wins. Keep this list in
+# sync with src/startup.sh's discord/slack blocks.
+_BRIDGE_INTERP_CANDIDATES = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "python3"]
+
+# Import each bridge needs to boot. telegram-bridge has no special hard import
+# probe here (its startup.sh block probes TLS, not a module) — sys.executable is
+# a safe default for it, matching the pre-#1898 behavior.
+_BRIDGE_REQUIRED_IMPORT = {"discord-bridge": "discord", "slack-bridge": "slack_bolt"}
+
+
+def _bridge_interpreter(name: str) -> "str | None":
+    """Pick an interpreter that can launch `name`, mirroring startup.sh.
+
+    For discord/slack, probe the candidate list for the bridge's required
+    import (discord / slack_bolt) — the interpreter that launched health-check
+    (sys.executable) often lacks these, so launching with it crash-loops. For
+    bridges with no hard import gate (telegram), return sys.executable.
+    Returns None when no candidate can import the required module (caller then
+    skips the restart, matching startup.sh's labeled-skip behavior).
+    """
+    required = _BRIDGE_REQUIRED_IMPORT.get(name)
+    if required is None:
+        return sys.executable
+    for cand in _BRIDGE_INTERP_CANDIDATES:
+        try:
+            if shutil.which(cand) is None and not Path(cand).exists():
+                continue
+            probe = subprocess.run([cand, "-c", f"import {required}"],
+                                   capture_output=True, timeout=10)
+            if probe.returncode == 0:
+                return cand
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+    return None
+
+
+def _load_channel_env(channel: str) -> dict:
+    """Parse channels/<channel>/.env into a dict (KEY=VALUE lines).
+
+    Mirrors startup.sh's `set -a; . "$_SL_ENV"; set +a` so the bridge child
+    gets SLACK_BOT_TOKEN / SLACK_APP_TOKEN. Returns {} if the file is absent or
+    unreadable — the caller treats missing tokens as a reason to skip.
+    """
+    env: dict = {}
+    try:
+        env_file = Path(claude_home_path("channels", channel, ".env"))
+        if not env_file.exists():
+            return env
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            if key.startswith("export "):
+                key = key[len("export "):].strip()
+            val = val.strip().strip('"').strip("'")
+            if key:
+                env[key] = val
+    except OSError:
+        pass
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -1203,7 +1297,7 @@ def run_all_checks() -> list[dict]:
     # Messaging bridges (optional — only check if configured and not skipped)
     skip_telegram = (env_path.exists() and "SKIP_TELEGRAM=1" in env_path.read_text()) or os.environ.get("SKIP_TELEGRAM") == "1"
     channels_dir = claude_home_path("channels")
-    for name, proc_name in [("telegram-bridge", "telegram-bridge"), ("discord-bridge", "discord-bridge")]:
+    for name, proc_name in [("telegram-bridge", "telegram-bridge"), ("discord-bridge", "discord-bridge"), ("slack-bridge", "slack-bridge")]:
         channel_name = name.replace("-bridge", "")
         if channel_name == "telegram" and skip_telegram:
             continue
