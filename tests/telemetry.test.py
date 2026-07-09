@@ -36,6 +36,9 @@ def _load(state_dir: Path, key: str = "", env: dict | None = None):
     spec = importlib.util.spec_from_file_location("telemetry_under_test", SRC / "telemetry.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    # Pin the effective key deterministically so tests don't depend on whether a
+    # public key is embedded in _EMBEDDED_KEY for distribution.
+    mod._KEY = key
     # No monkeypatch needed: _state_dir honors SUTANDO_STATE_DIR (set above),
     # so the real resolver code runs against the temp dir.
     assert mod._state_dir() == state_dir, "SUTANDO_STATE_DIR override should win"
