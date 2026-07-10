@@ -963,11 +963,36 @@ if _RELAY_ENV="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path channel
   # multi-user gateway sets REMOTE_TASK_TIER=team explicitly.
   REMOTE_TASK_TIER="${REMOTE_TASK_TIER:-${AG2_REMOTE_TIER:-owner}}"
   export REMOTE_TASK_TOKEN REMOTE_TASK_TIER
-  if ! pgrep -f "remote-gateway-bridge" > /dev/null 2>&1; then
-    python3 "$REPO/src/remote-gateway-bridge.py" > "$LOGS_DIR/remote-gateway-bridge.log" 2>&1 &
-    echo "  ✓ gateway bridge"
-  else
-    echo "  ✓ gateway bridge (already running)"
+  # Prefer the launchd-supervised job (RunAtLoad + KeepAlive) so the bridge
+  # AUTO-RESTARTS on crash/kill instead of dying silently. This closes the
+  # 2026-07-10 incident where it was dead for 3 days and nothing brought it back
+  # (mobile messages stranded in the cloud). The wrapper evicts any stale bare
+  # instance before exec, so it composes with the bare-& fallback. Falls back to
+  # the bare launch on older checkouts lacking the template or if install fails.
+  _gw_supervised=0
+  _GW_LABEL="com.sutando.gateway-bridge"
+  _GW_INSTALLER="$REPO/src/install-gateway-bridge-launchd.sh"
+  if [ -f "$_GW_INSTALLER" ] && [ -f "$REPO/src/launchd/$_GW_LABEL.plist" ]; then
+    if launchctl print "gui/$(id -u)/$_GW_LABEL" > /dev/null 2>&1; then
+      echo "  ✓ gateway bridge (launchd-supervised, already loaded)"
+      _gw_supervised=1
+    else
+      echo "  Installing launchd-supervised gateway bridge..."
+      if bash "$_GW_INSTALLER" install > /dev/null 2>&1; then
+        echo "  ✓ gateway bridge (launchd-supervised) — auto-restarts on death"
+        _gw_supervised=1
+      else
+        echo "  ⚠ gateway-bridge launchd install failed — falling back to bare launch"
+      fi
+    fi
+  fi
+  if [ "$_gw_supervised" = "0" ]; then
+    if ! pgrep -f "remote-gateway-bridge\\.py$" > /dev/null 2>&1; then
+      python3 "$REPO/src/remote-gateway-bridge.py" > "$LOGS_DIR/remote-gateway-bridge.log" 2>&1 &
+      echo "  ✓ gateway bridge (bare)"
+    else
+      echo "  ✓ gateway bridge (already running)"
+    fi
   fi
 fi
 
