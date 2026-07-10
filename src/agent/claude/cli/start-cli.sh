@@ -22,6 +22,17 @@ cd "$REPO"
 TMUX_SOCKET="/tmp/sutando-tmux.sock"
 SESSION="sutando-core"
 
+# Marker identifying THIS process as the long-lived sutando-core session (as
+# opposed to an ad-hoc `claude` in the same checkout — PR review, codex, etc.).
+# The SessionStart hook (src/schedule-crons-session-hint.sh) gates its
+# /startup bootstrap reminder on this so only the core triggers cron
+# registration, never every session in the checkout. Exported so the no-tmux
+# `exec claude` fallback inherits it directly; injected into the tmux launch
+# branches via `new-session -e` (below) since tmux runs the command under the
+# server's environment, not necessarily this shell's.
+export SUTANDO_CORE_SESSION=1
+CORE_ENV_ARGS=(-e SUTANDO_CORE_SESSION=1)
+
 # Optional working-directory override for the core `claude` process.
 #   - Unset (upstream default): no override — the core launches from $REPO (the
 #     script's cwd), exactly as before. Zero behavior change for OSS installs.
@@ -342,12 +353,12 @@ apply_tmux_defaults
 # start-directory is silently dropped — so re-anchoring a running core to a new
 # working dir must go through `--restart` (kill-then-create), not a bare rerun.
 if [ -t 1 ]; then
-  exec tmux -S "$TMUX_SOCKET" new-session -A -s "$SESSION" ${CWD_ARGS[@]+"${CWD_ARGS[@]}"} \
+  exec tmux -S "$TMUX_SOCKET" new-session -A -s "$SESSION" ${CORE_ENV_ARGS[@]+"${CORE_ENV_ARGS[@]}"} ${CWD_ARGS[@]+"${CWD_ARGS[@]}"} \
     claude --name "$SESSION" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} --remote-control "Sutando" --dangerously-skip-permissions --add-dir "$HOME" \
     ${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"} \
     -- "/schedule-crons"
 else
-  tmux -S "$TMUX_SOCKET" new-session -d -s "$SESSION" ${CWD_ARGS[@]+"${CWD_ARGS[@]}"} \
+  tmux -S "$TMUX_SOCKET" new-session -d -s "$SESSION" ${CORE_ENV_ARGS[@]+"${CORE_ENV_ARGS[@]}"} ${CWD_ARGS[@]+"${CWD_ARGS[@]}"} \
     claude --name "$SESSION" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} --remote-control "Sutando" --dangerously-skip-permissions --add-dir "$HOME" \
     ${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"} \
     -- "/schedule-crons"
