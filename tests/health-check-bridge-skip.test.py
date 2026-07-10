@@ -79,6 +79,22 @@ try:
 finally:
     _env_file2.unlink()
 
+# .env parsing skips blank lines and comments before finding the flag
+with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+    f.write("# per-host bridge overrides\n\n  # indented comment\nSKIP_SLACK=1\n")
+    _env_file3 = Path(f.name)
+
+try:
+    check(".env with comments/blank lines before flag → skip slack",
+          hc._should_skip_bridge("slack", _env_file3))
+finally:
+    _env_file3.unlink()
+
+# unreadable env_path (exists but read_text raises) → fail-open, no skip
+with tempfile.TemporaryDirectory() as _d:
+    check("env_path exists but unreadable (directory) → returns False",
+          not hc._should_skip_bridge("telegram", Path(_d)))
+
 # ── env var value must be exactly "1" ────────────────────────────────────────
 
 with patch.dict(os.environ, {"SKIP_DISCORD": "0"}, clear=False):
