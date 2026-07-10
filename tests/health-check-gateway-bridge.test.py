@@ -52,17 +52,20 @@ def _pgrep(returncode, stdout):
     return _side_effect
 
 
-def _run(*, env=None, gw_env_path=None, pgrep_rc=1, pgrep_out=""):
+def _run(*, env=None, gw_env_path=None, pgrep_rc=1, pgrep_out="", pgrep_raises=False):
     """Call check_gateway_bridge() with env, the channel-.env path, and the
-    pgrep result all controlled. env=None means the token vars are cleared."""
+    pgrep result all controlled. env=None means the token vars are cleared.
+    pgrep_raises=True makes subprocess.run raise (the except-branch path)."""
     env = env or {}
     # Clear both token vars, then apply the requested env.
     base = {k: v for k, v in hc.os.environ.items()
             if k not in ("REMOTE_TASK_TOKEN", "AG2_REMOTE_TOKEN")}
     base.update(env)
+    run_mock = (unittest.mock.Mock(side_effect=OSError("pgrep exploded"))
+                if pgrep_raises else unittest.mock.Mock(side_effect=_pgrep(pgrep_rc, pgrep_out)))
     with unittest.mock.patch.dict(hc.os.environ, base, clear=True), \
          unittest.mock.patch.object(hc, "claude_home_path", return_value=gw_env_path), \
-         unittest.mock.patch.object(hc.subprocess, "run", side_effect=_pgrep(pgrep_rc, pgrep_out)):
+         unittest.mock.patch.object(hc.subprocess, "run", run_mock):
         return hc.check_gateway_bridge()
 
 
@@ -96,6 +99,20 @@ def main() -> int:
         check("configured via .env file → ok", r is not None and r["status"] == "ok", f"got {r!r}")
     finally:
         env_file.unlink(missing_ok=True)
+
+    # 6) configured, but pgrep itself raises → treated as not-running (warn),
+    #    covering the except branch.
+    r = _run(env={"REMOTE_TASK_TOKEN": "tok"}, gw_env_path=missing, pgrep_raises=True)
+    check("pgrep raises → warn (down)", r is not None and r["status"] == "warn", f"got {r!r}")
+
+    # 7) configured, but reading the channel .env raises OSError → treated as
+    #    not-configured (None), covering the config-read except branch. Use a
+    #    mock Path whose exists() is True but read_text() raises.
+    bad_env = unittest.mock.MagicMock()
+    bad_env.exists.return_value = True
+    bad_env.read_text.side_effect = OSError("cannot read .env")
+    r = _run(env={}, gw_env_path=bad_env)
+    check("config read raises → None", r is None, f"got {r!r}")
 
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s)")

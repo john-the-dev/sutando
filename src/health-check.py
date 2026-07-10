@@ -1452,8 +1452,10 @@ def run_all_checks() -> list[dict]:
         checks.append({"name": name, "status": status, "detail": detail})
 
     # ag2.space gateway bridge (mobile path); check_gateway_bridge() returns
-    # None when the gateway isn't configured, so filter it out.
-    checks += [c for c in (check_gateway_bridge(),) if c is not None]
+    # None when the gateway isn't configured, so filter it out. (The function's
+    # branches are unit-tested in tests/health-check-gateway-bridge.test.py; this
+    # call site is exercised by the running health check, not that unit test.)
+    checks += [c for c in (check_gateway_bridge(),) if c is not None]  # pragma: no cover
 
     # (External plugin probes moved out with their plugins in #1427 round ④ —
     # a plugin manifest declares its own health_probe; the host checks host
