@@ -4,7 +4,16 @@
 // and categorizes the rendered state.
 //
 // Disabled by setting `SUTANDO_TMUX_SCRAPE=0`. Tmux session name override via
-// `SUTANDO_TMUX_SESSION` (default `sutando-core`).
+// `SUTANDO_TMUX_SESSION` (default `sutando-core`), socket override via
+// `SUTANDO_TMUX_SOCK` (default `/tmp/sutando-tmux.sock`).
+//
+// The socket flag is load-bearing: Sutando.app / start-cli.sh run their tmux
+// server on the custom socket `/tmp/sutando-tmux.sock` (via `tmux -S`), NOT the
+// default socket. A bare `tmux capture-pane` therefore talks to the default
+// server, never finds the `sutando-core` session, throws, and this scraper
+// falls back to `idle` on EVERY call — so the status widget reads "idle" even
+// while the core is actively working. The Swift path (main.swift) and the
+// watcher (watch-tasks-stream.sh) both already pass `-S`; this scraper must too.
 //
 // All failure modes (tmux missing, timeout, parse error) return `idle` — this
 // is a best-effort hint, never ground-truth, never throws.
@@ -20,6 +29,9 @@ export type TmuxParseResult = {
 };
 
 const DEFAULT_SESSION = 'sutando-core';
+// Must match start-cli.sh (TMUX_SOCKET), main.swift (sutandoTmuxSocket), and
+// watch-tasks-stream.sh (SUTANDO_TMUX_SOCK default). Single canonical socket.
+const DEFAULT_SOCKET = '/tmp/sutando-tmux.sock';
 const CACHE_TTL_MS = 3_000;
 const CAPTURE_TIMEOUT_MS = 500;
 const LINES_BACK = 30;
@@ -35,14 +47,28 @@ function logOnce(msg: string): void {
 	console.error(`[tmux-status] ${msg}`);
 }
 
+/**
+ * Build the `tmux` argv for capturing the core pane. Exported for testing.
+ *
+ * The `-S <socket>` server flag MUST precede the `capture-pane` command — tmux
+ * parses server options before the command word. Sutando.app / start-cli.sh run
+ * the tmux server on this custom socket, so omitting `-S` targets the default
+ * server (where `sutando-core` does not exist), the capture throws, and the
+ * scraper silently reports `idle` forever. See the header note.
+ */
+export function buildCaptureArgs(socket: string, session: string): string[] {
+	return ['-S', socket, 'capture-pane', '-t', session, '-pS', `-${LINES_BACK}`];
+}
+
 async function _refreshCache(): Promise<void> {
 	if (_refreshInFlight) return;
 	_refreshInFlight = true;
 	const session = process.env.SUTANDO_TMUX_SESSION || DEFAULT_SESSION;
+	const socket = process.env.SUTANDO_TMUX_SOCK || DEFAULT_SOCKET;
 	try {
 		const { stdout } = await execFileAsync(
 			'tmux',
-			['capture-pane', '-t', session, '-pS', `-${LINES_BACK}`],
+			buildCaptureArgs(socket, session),
 			{ encoding: 'utf-8', timeout: CAPTURE_TIMEOUT_MS },
 		);
 		_cache = { ts: Date.now(), result: parseTmuxPane(stdout) };

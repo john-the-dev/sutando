@@ -1,6 +1,6 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTmuxPane, readTmuxStatus, _resetTmuxCacheForTests } from '../src/tmux-status.js';
+import { parseTmuxPane, readTmuxStatus, buildCaptureArgs, _resetTmuxCacheForTests } from '../src/tmux-status.js';
 
 /**
  * Tests for `parseTmuxPane` — the pane-capture parser used as a fallback
@@ -162,6 +162,31 @@ describe('parseTmuxPane', () => {
 		const r = parseTmuxPane(42);
 		assert.equal(r.state, 'idle');
 		assert.equal(r.label, '');
+	});
+});
+
+describe('buildCaptureArgs', () => {
+	// Regression guard: Sutando.app / start-cli.sh run tmux on a custom socket
+	// (`tmux -S /tmp/sutando-tmux.sock`). A bare `tmux capture-pane` hits the
+	// DEFAULT server, never finds `sutando-core`, throws, and the scraper falls
+	// back to `idle` on every call — so the status widget reads "idle" even
+	// while the core is working. The `-S <socket>` server flag must be present
+	// AND precede the `capture-pane` command word.
+
+	it('includes -S <socket> and it precedes capture-pane', () => {
+		const args = buildCaptureArgs('/tmp/sutando-tmux.sock', 'sutando-core');
+		const sIdx = args.indexOf('-S');
+		const capIdx = args.indexOf('capture-pane');
+		assert.notEqual(sIdx, -1, '-S socket flag must be present');
+		assert.equal(args[sIdx + 1], '/tmp/sutando-tmux.sock', '-S must be followed by the socket path');
+		assert.ok(sIdx < capIdx, '-S (server flag) must come before the capture-pane command');
+	});
+
+	it('targets the given session with -t', () => {
+		const args = buildCaptureArgs('/sock', 'my-session');
+		const tIdx = args.indexOf('-t');
+		assert.notEqual(tIdx, -1);
+		assert.equal(args[tIdx + 1], 'my-session');
 	});
 });
 
