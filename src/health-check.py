@@ -150,9 +150,33 @@ def check_directory(path: Path, name: str) -> dict:
     return {"name": name, "status": "ok", "detail": f"{count} .md files"}
 
 
+def _vault_sync_disabled() -> bool:
+    """True when cross-machine sync is deliberately turned OFF in config
+    (vault.enabled=false via sutando.config). Best-effort — false on any error so
+    a config-helper hiccup never masks a real stale-sync warning."""
+    try:
+        out = subprocess.run(
+            ["bash", str(REPO_DIR / "scripts" / "sutando-config.sh"), "vault-enabled"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        return out == "false"
+    except Exception:
+        return False
+
+
 def check_memory_sync() -> dict:
-    """Verify memory sync is configured and has run recently."""
+    """Verify memory sync is configured and has run recently.
+
+    Cross-machine sync is OPT-IN. When it's deliberately disabled (vault.enabled=
+    false) or simply not configured, that's a valid single-machine choice — report
+    it as informational (ok), NOT a recurring warn. Otherwise the health check
+    nags "not configured" on every tick forever even though the operator opted out
+    on purpose (owner ask 2026-07-10 — the confusing memory-var warning). A
+    configured-but-stale sync still warns; that's a real problem."""
     name = "memory-sync"
+    # Deliberate config opt-out → informational, never a nag.
+    if _vault_sync_disabled():
+        return {"name": name, "status": "ok", "detail": "cross-machine sync disabled (config opt-out)"}
     env_path = REPO_DIR / ".env"
     repo_url = ""
     if env_path.exists():
@@ -161,7 +185,7 @@ def check_memory_sync() -> dict:
                 repo_url = line.split("=", 1)[1].strip().strip('"').strip("'")
                 break
     if not repo_url:
-        return {"name": name, "status": "warn", "detail": "SUTANDO_MEMORY_REPO not set — cross-machine sync disabled"}
+        return {"name": name, "status": "ok", "detail": "cross-machine sync not configured (single-machine mode)"}
     # Current model (sync-workspace.sh): the workspace ITSELF is a git repo with
     # the vault as a remote — sync = git fetch/merge/push on the workspace, no
     # separate clone dir. So the freshness signal is the workspace's own
