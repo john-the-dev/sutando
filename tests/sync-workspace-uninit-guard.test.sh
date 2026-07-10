@@ -117,6 +117,30 @@ if [ "$?" != "0" ]; then
     echo "  FAIL: T11 — SUTANDO_SYNC_SKIP_INIT_GUARD=1 did NOT bypass guard"; fail=1
 fi
 
+# ── Disabled-sync skip (tests 12-14) — the DEFAULT (cron) path must skip
+# cleanly when no vault URL is configured, instead of falling into
+# _pull_only_impl → die "…is not a git repo; run --init first" and painting a
+# red error on every 30-min tick. Reported by an external tester whose cron
+# logged a loud failure every fire because sync is intentionally disabled.
+DEFAULT_BLOCK="$(awk '/^cmd_default_bidirectional\(\) \{/,/^}$/' "$SYNC")"
+
+# Test 12: structural — the default path guards on an empty VAULT_URL
+echo "$DEFAULT_BLOCK" | grep -q '\[ -z "\$VAULT_URL" \]' \
+    || { echo "  FAIL: T12 — cmd_default_bidirectional missing empty-VAULT_URL guard"; fail=1; }
+
+# Test 13: structural — the guard skips cleanly (return 0), not an error exit
+echo "$DEFAULT_BLOCK" | grep -q 'return 0' \
+    || { echo "  FAIL: T13 — cmd_default_bidirectional guard does not return 0 (clean skip)"; fail=1; }
+
+# Test 14: structural — the guard runs BEFORE acquire_lock / pull / push, so a
+# disabled sync never locks or touches git.
+guard_line=$(echo "$DEFAULT_BLOCK" | grep -n '\-z "\$VAULT_URL"' | head -1 | cut -d: -f1)
+lock_line=$(echo "$DEFAULT_BLOCK" | grep -n 'acquire_lock' | head -1 | cut -d: -f1)
+if [ -z "$guard_line" ] || [ -z "$lock_line" ] || [ "$guard_line" -ge "$lock_line" ]; then
+    echo "  FAIL: T14 — empty-VAULT_URL guard must precede acquire_lock in cmd_default_bidirectional"
+    fail=1
+fi
+
 # Cleanup
 rm -rf "$TMP_E2E"
 
