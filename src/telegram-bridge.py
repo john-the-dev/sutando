@@ -100,8 +100,14 @@ except ImportError:
 # session silently override the freshly-rotated value, same bug class as
 # skills/x-twitter/x-post.py (see PR #416 commit message for full context).
 channels_env = claude_home_path("channels", "telegram", ".env")
-if channels_env.exists():
-    os.chmod(channels_env, 0o600)  # token file — enforce owner-only, mirrors access.json treatment  # pragma: no cover
+if channels_env.exists():  # pragma: no cover — telegram import path not driven by the perms test
+    try:
+        os.chmod(channels_env, 0o600)  # token file — enforce owner-only, mirrors access.json treatment
+    except OSError as e:
+        # Best-effort hardening: a read-only volume, wrong ownership after a
+        # restore/sync, or an ACL-restricted file must NOT crash the bridge at
+        # startup — the file may still be perfectly readable. Warn and continue.
+        print(f"  [startup] warning: could not chmod 0600 {channels_env}: {e}", flush=True)
     for line in channels_env.read_text().splitlines():
         if "=" in line and not line.startswith("#"):
             k, v = line.split("=", 1)

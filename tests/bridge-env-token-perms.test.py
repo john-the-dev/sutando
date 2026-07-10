@@ -138,12 +138,20 @@ def _run_case(
     env_tokens: dict,
     token_setup,
     assert_tokens,
+    chmod_should_fail: bool = False,
 ) -> list[str]:
     """Set up a hermetic env, import the bridge, and check the .env perms.
 
     `token_setup` receives the os.environ dict pre-import (to set/unset the
     bridge's token env vars). `assert_tokens(mod)` returns a list of failure
-    strings for the parsed-token expectations."""
+    strings for the parsed-token expectations.
+
+    When `chmod_should_fail` is True, `os.chmod` is patched to raise OSError for
+    the channel `.env` (simulating a read-only volume / wrong-ownership /
+    ACL-restricted file). The import MUST still succeed (the bridge warns and
+    continues) and the tokens MUST still parse — the fix's whole point is that a
+    non-chmod-able but readable token file no longer crashes the bridge at
+    startup. In that mode the file stays 0644 (chmod never applied)."""
     fails: list[str] = []
     saved_env = dict(os.environ)
     saved_modules = {
@@ -174,15 +182,39 @@ def _run_case(
         os.environ["SUTANDO_WORKSPACE"] = str(ws_dir)
         token_setup(os.environ)
 
-        if channel == "discord":
-            _stub_discord()
-            mod = _load_bridge("discord_bridge_perms_ut", filename)
-        else:
-            _stub_slack_bolt()
-            mod = _load_bridge("slack_bridge_perms_ut", filename)
+        # Optionally simulate a chmod-hostile filesystem: os.chmod raises for
+        # the channel .env only (other chmods — access.json, workspace setup —
+        # pass through untouched).
+        _real_chmod = os.chmod
+        if chmod_should_fail:
+            def _chmod_shim(path, mode, *a, **k):
+                if str(path) == str(env_file):
+                    raise OSError(30, "Read-only file system (simulated)")
+                return _real_chmod(path, mode, *a, **k)
+            os.chmod = _chmod_shim
+
+        try:
+            if channel == "discord":
+                _stub_discord()
+                mod = _load_bridge("discord_bridge_perms_ut", filename)
+            else:
+                _stub_slack_bolt()
+                mod = _load_bridge("slack_bridge_perms_ut", filename)
+        except Exception as e:  # noqa: BLE001 — the whole point is import must NOT raise
+            os.chmod = _real_chmod
+            fails.append(f"{label}: bridge import crashed ({type(e).__name__}: {e}) — chmod failure must be non-fatal")
+            return fails
+        finally:
+            os.chmod = _real_chmod
 
         after = _mode(env_file)
-        if after != 0o600:
+        if chmod_should_fail:
+            # chmod raised → perms unchanged; the win is that import survived.
+            if after != 0o644:
+                fails.append(f"{label}: expected .env to stay 0644 when chmod fails, got {oct(after)}")
+            else:
+                print(f"  OK [{label}]: chmod failure survived — import continued, .env still 0644")
+        elif after != 0o600:
             fails.append(f"{label}: .env perms should be 0600 after import, got {oct(after)}")
         else:
             print(f"  OK [{label}]: .env tightened 0644 -> 0600")
@@ -289,6 +321,30 @@ def main() -> int:
         env_tokens={},
         token_setup=_slack_env_present,
         assert_tokens=_slack_assert_env,
+    )
+
+    # ---- discord: chmod FAILS (read-only fs) -> import survives + tokens parse ----
+    fails += _run_case(
+        label="discord/chmod-fails",
+        channel="discord",
+        filename="discord-bridge.py",
+        env_contents="DISCORD_BOT_TOKEN=discord-token-from-file\n",
+        env_tokens={},
+        token_setup=_discord_no_env,
+        assert_tokens=_discord_assert,
+        chmod_should_fail=True,
+    )
+
+    # ---- slack: chmod FAILS (read-only fs) -> import survives + tokens parse ----
+    fails += _run_case(
+        label="slack/chmod-fails",
+        channel="slack",
+        filename="slack-bridge.py",
+        env_contents='SLACK_BOT_TOKEN="xoxb-from-file"\nSLACK_APP_TOKEN="xapp-from-file"\n',
+        env_tokens={},
+        token_setup=_slack_no_env,
+        assert_tokens=_slack_assert,
+        chmod_should_fail=True,
     )
 
     if fails:
