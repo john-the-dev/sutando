@@ -1401,6 +1401,48 @@ def run_all_checks() -> list[dict]:
 
         checks.append({"name": name, "status": status, "detail": detail})
 
+    # ag2.space gateway bridge (remote-gateway-bridge.py) — carries MOBILE-app
+    # messages from the cloud gateway down to the local core (and results back
+    # up). It does NOT fit the name→channel convention above (its config lives in
+    # channels/ag2space/.env, not channels/remote-gateway/), so it's checked
+    # separately. Only surfaced when configured — a Sutando-only user without the
+    # mobile gateway never sees it. Added after a 3-day SILENT outage (2026-07-10):
+    # the bridge died on Jul 7 and nothing reported it, so mobile messages
+    # stranded in the cloud invisibly — exactly the gap this check closes.
+    try:
+        _gw_env = claude_home_path("channels", "ag2space", ".env")
+        _gw_configured = bool(os.environ.get("REMOTE_TASK_TOKEN") or os.environ.get("AG2_REMOTE_TOKEN"))
+        if not _gw_configured and _gw_env.exists():
+            _gw_configured = any(
+                ln.startswith(("REMOTE_TASK_TOKEN=", "AG2_REMOTE_TOKEN="))
+                for ln in _gw_env.read_text(errors="replace").splitlines()
+            )
+    except OSError:
+        _gw_configured = False
+    if _gw_configured:
+        try:
+            _gw = subprocess.run(
+                ["/usr/bin/pgrep", "-f", r"remote-gateway-bridge\.py$"],
+                capture_output=True, text=True,
+            )
+            _gw_pids = [p for p in _gw.stdout.strip().split("\n") if p] if _gw.returncode == 0 else []
+        except Exception:
+            _gw_pids = []
+        if not _gw_pids:
+            checks.append({
+                "name": "gateway-bridge",
+                "status": "warn",
+                "detail": "configured but NOT running — ag2.space mobile messages will not be delivered",
+            })
+        elif len(_gw_pids) > 1:
+            checks.append({
+                "name": "gateway-bridge",
+                "status": "warn",
+                "detail": f"multiple processes ({len(_gw_pids)} PIDs: {','.join(_gw_pids)})",
+            })
+        else:
+            checks.append({"name": "gateway-bridge", "status": "ok", "detail": "running"})
+
     # (External plugin probes moved out with their plugins in #1427 round ④ —
     # a plugin manifest declares its own health_probe; the host checks host
     # services only.)
