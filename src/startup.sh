@@ -562,6 +562,37 @@ else
   export ANTHROPIC_BASE_URL=http://localhost:7846
 fi
 
+# 0a. Sutando.app OS-level supervisor (com.sutando.menubar launchd job).
+# The template (src/launchd/com.sutando.menubar.plist) sets RunAtLoad=true +
+# KeepAlive{Crashed, !SuccessfulExit}, so once loaded launchd relaunches the app
+# at login/boot AND restarts it on crash. The gap this closes: nothing installed
+# it on boot — startup.sh installed the credential-proxy job above but not this
+# one, so a fresh install / migration left the app with no OS-level watchdog. An
+# OS-update-forced reboot then left Sutando.app dead (macOS "reopen at login"
+# doesn't reliably fire after an update restart). #1294 shipped the supervisor
+# but not the auto-install; this wires it in.
+#
+# SKIP-IF-LOADED is load-bearing, not just an optimization: the installer does
+# `bootout` + `kickstart`, and when startup.sh runs as a child of the already-
+# supervised app, booting the service out would kill the running app (and this
+# very process). So we ONLY install when the service is absent — exactly the
+# fresh-install / post-migration case we need to cover. The normal already-loaded
+# path is a no-op.
+_APP_LABEL="com.sutando.menubar"
+_APP_INSTALLER="$REPO/src/install-sutando-app-launchd.sh"
+if [ -f "$_APP_INSTALLER" ] && [ -f "$REPO/src/launchd/$_APP_LABEL.plist" ]; then
+  if launchctl print "gui/$(id -u)/$_APP_LABEL" > /dev/null 2>&1; then
+    echo "  ✓ app supervisor (launchd-supervised, already loaded)"
+  else
+    echo "  Installing launchd-supervised app supervisor..."
+    if bash "$_APP_INSTALLER" install > /dev/null 2>&1; then
+      echo "  ✓ app supervisor (launchd-supervised) — survives reboot via RunAtLoad"
+    else
+      echo "  ⚠ app-supervisor launchd install failed — app will NOT auto-relaunch after reboot (see $WORKSPACE/logs/sutando-app-stderr.log)"
+    fi
+  fi
+fi
+
 # 0b. Obs collector (OPTIONAL — opt-in via SUTANDO_OBS_COLLECTOR=1).
 # The single, source-agnostic local collector: it receives Claude Code hooks
 # (and, later, voice / filewatcher / bridge events) on /ingest/<source>,
