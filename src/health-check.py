@@ -1975,6 +1975,35 @@ def _core_started_within(seconds: float, workspace: Optional[Path] = None, now: 
     return (now - youngest_start) < seconds
 
 
+def _resolve_launch_env() -> dict:
+    """Environment for out-of-process core restarts (start-cli.sh --restart).
+
+    launchd's minimal PATH (``/usr/bin:/bin:/usr/sbin:/sbin``) cannot find the
+    tools start-cli.sh needs — homebrew ``tmux``, ``claude`` in ``~/.local/bin``,
+    or the Sutando.app-bundled ``node`` runtime — so the restart exits rc=127
+    (``node unavailable`` / ``exec: claude: not found``) and silently falls
+    through to the legacy fallback. Prepend all of them.
+
+    Extends the existing tmux-only PATH fix to node + claude. Incident
+    2026-07-10: the watchdog restart path was broken under launchd for ~70 min
+    (queue backlog) because every canonical restart hit rc=127. Same PATH-
+    narrowing class as _resolve_tmux_bin (2026-06-09), applied here.
+    """
+    env = dict(os.environ)
+    extra = [
+        "/opt/homebrew/bin",                        # homebrew (Apple Silicon) — tmux
+        "/usr/local/bin",                           # homebrew (Intel) / misc
+        str(Path.home() / ".local" / "bin"),        # `claude` install location
+    ]
+    # Sutando.app-bundled node runtime: sibling of the repo inside the app bundle
+    # (Contents/Resources/{repo,runtime}). Absent in a plain dev checkout → skipped.
+    bundled_bin = REPO_DIR.parent / "runtime" / "bin"
+    if bundled_bin.is_dir():  # pragma: no cover — only present inside the app bundle
+        extra.append(str(bundled_bin))
+    env["PATH"] = ":".join(extra) + ":" + env.get("PATH", "/usr/bin:/bin")
+    return env
+
+
 def _default_core_restart(standard_context: bool) -> bool:
     """Run src/agent/claude/cli/start-cli.sh --restart out-of-process. When
     standard_context is True, pin SUTANDO_CORE_MODEL=opus so the restarted core
@@ -1983,9 +2012,7 @@ def _default_core_restart(standard_context: bool) -> bool:
     script = REPO_DIR / "src" / "agent" / "claude" / "cli" / "start-cli.sh"
     if not script.exists():
         return False
-    env = dict(os.environ)
-    # launchd's minimal PATH won't find homebrew tmux; start-cli.sh needs it.
-    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "/usr/bin:/bin")
+    env = _resolve_launch_env()  # pragma: no cover — real-subprocess restart path (integration, not unit)
     if standard_context:
         env["SUTANDO_CORE_MODEL"] = "opus"
     try:
