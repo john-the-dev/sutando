@@ -11,7 +11,7 @@
  *
  * Ingestion is additive — call recordContact() whenever a message is sent
  * or received. Idempotent on repeated calls for the same exchange (keyed on
- * address + message_id; if no message_id is available, the caller omits it
+ * (source, message_id); if no message_id is available, the caller omits it
  * and a new row is always inserted).
  *
  * Best-effort throughout: sqlite errors never propagate, never block the caller.
@@ -70,7 +70,7 @@ function getDb(): InstanceType<typeof DatabaseSync> | null {
 			CREATE INDEX IF NOT EXISTS idx_sh_address     ON sender_history(address);
 			CREATE INDEX IF NOT EXISTS idx_sh_address_ts  ON sender_history(address, ts_unix DESC);
 			CREATE INDEX IF NOT EXISTS idx_sh_ts          ON sender_history(ts_unix DESC);
-			CREATE UNIQUE INDEX IF NOT EXISTS idx_sh_msgid ON sender_history(message_id)
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_sh_msgid ON sender_history(source, message_id)
 				WHERE message_id IS NOT NULL;
 		`);
 		_db = db;
