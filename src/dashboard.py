@@ -210,7 +210,16 @@ h2{font-size:12px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margi
 .pending-badge.done{background:#1a2a1a;color:#5a9a6a}
 .refresh{font-size:10px;color:#333;text-align:center;margin-top:12px}
 .intro{max-width:900px;margin:12px auto 0;color:#7b7b90;font-size:12px;line-height:1.45}
-</style></head><body>
+.quick-links{display:flex;gap:12px;flex-wrap:wrap;font-size:12px}
+.quick-links a{color:#4a8aaa;text-decoration:none}
+</style>
+<script>
+function openQuickLink(event, link){
+  event.preventDefault();
+  window.open(link.href,'_blank','noopener,noreferrer');
+}
+</script>
+</head><body>
 <div style="max-width:900px;margin:0 auto">
 <div style="display:flex;align-items:center;gap:14px">
 <img id="stand-avatar" src="/avatar" style="width:56px;height:56px;border-radius:50%;border:2px solid #4ecca3;display:none;object-fit:cover">
@@ -505,15 +514,15 @@ def render_dashboard() -> str:
     # Quick links
     cards.append(f"""<div class="card full">
 <h2>Quick Links</h2>
-<div style="display:flex;gap:12px;flex-wrap:wrap;font-size:12px">
-<a href="http://localhost:8080" style="color:#4a8aaa;text-decoration:none">Voice UI :8080</a>
-<a href="http://localhost:7843" style="color:#4a8aaa;text-decoration:none">Task API :7843</a>
-<a href="http://localhost:7844" style="color:#4a8aaa;text-decoration:none">Dashboard :7844</a>
-<a href="http://localhost:7845" style="color:#4a8aaa;text-decoration:none">Screen Capture :7845</a>
-<a href="/notes-ui" style="color:#4a8aaa;text-decoration:none">Notes Browser</a>
-<a href="https://github.com/sonichi/sutando" style="color:#4a8aaa;text-decoration:none">GitHub</a>
-<a href="https://sutando.ai" style="color:#4a8aaa;text-decoration:none">Website</a>
-<a href="https://discord.gg/uZHWXXmrCS" style="color:#4a8aaa;text-decoration:none">Discord</a>
+<div class="quick-links">
+<a href="http://localhost:8080" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">Voice UI :8080</a>
+<a href="http://localhost:7843" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">Task API :7843</a>
+<a href="http://localhost:7844" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">Dashboard :7844</a>
+<a href="http://localhost:7845" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">Screen Capture :7845</a>
+<a href="/notes-ui" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">Notes Browser</a>
+<a href="https://github.com/sonichi/sutando" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">GitHub</a>
+<a href="https://sutando.ai" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">Website</a>
+<a href="https://discord.gg/uZHWXXmrCS" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">Discord</a>
 </div></div>""")
 
     return HTML.replace("__CONTENT__", "\n".join(cards))
