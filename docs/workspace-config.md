@@ -13,6 +13,15 @@ That's it for a fresh clone — no setup, no config file. The directory is gitig
 ## Resolution order (highest wins)
 
 1. **`SUTANDO_WORKSPACE_DIR`** — launch-time operator override. Use this for desktop/dev sessions that must force one workspace across every child process.
+
+   > **Not the same variable as the deprecated `SUTANDO_WORKSPACE`.** The two differ by more than the `_DIR` suffix:
+   >
+   > | Variable | Status | Effect |
+   > |---|---|---|
+   > | `SUTANDO_WORKSPACE_DIR` | **current** | highest-precedence launch-time override; honored by all three resolver twins (py/ts/swift) |
+   > | `SUTANDO_WORKSPACE` | **deprecated (#1440)** | value **ignored** by the resolver; presence only triggers a one-time warning + auto-migration |
+   >
+   > If both are set, `SUTANDO_WORKSPACE_DIR` wins and the deprecated variable is still ignored. New scripts and docs must reference only `SUTANDO_WORKSPACE_DIR`.
 2. **`sutando.config.local.json`** → `workspace.path` — per-clone override. Gitignored.
 3. **`sutando.config.json`** → `workspace.path` — tracked default. The repo ships `${REPO_DIR}/workspace`.
 4. **Baked-in fallback** — `${REPO_DIR}/workspace`, used if neither config file exists.
@@ -52,19 +61,19 @@ Keys whose name starts with `_` (e.g. `_comment`) are stripped before validation
 
 ```bash
 # 1. Force one workspace for a dev session / process tree
-SUTANDO_WORKSPACE_DIR=/Users/you/.sutando/repo/workspace bash src/startup.sh
+SUTANDO_WORKSPACE_DIR="<absolute-path-to-workspace>" bash src/startup.sh
 ```
 
 ```json
 // 2. Move workspace outside the repo (e.g. shared between clones)
-{ "workspace": { "path": "/Users/you/.sutando/workspace" } }
+{ "workspace": { "path": "<absolute-path-to-workspace>" } }
 
 // 3. Enable vault sync to a private remote
 { "vault": { "enabled": true, "remote_url": "https://vault.example.com/you/workspace.git" } }
 
 // 4. Both
 {
-  "workspace": { "path": "/Users/you/.sutando/workspace" },
+  "workspace": { "path": "<absolute-path-to-workspace>" },
   "vault": { "enabled": true, "remote_url": "https://vault.example.com/you/workspace.git" }
 }
 ```
@@ -98,7 +107,7 @@ Escape hatch for the rare legitimate case (updating `.gitkeep` itself): `git com
 
 Older installs used `~/.sutando/workspace/` as the default. If you have one:
 
-- **Path-only override:** set `SUTANDO_WORKSPACE_DIR=/Users/you/.sutando/workspace` for a launch-only override, or add `{"workspace":{"path":"/Users/you/.sutando/workspace"}}` to `sutando.config.local.json` for a durable per-clone override.
+- **Path-only override:** set `SUTANDO_WORKSPACE_DIR=<absolute-path-to-workspace>` for a launch-only override, or add `{"workspace":{"path":"<absolute-path-to-workspace>"}}` to `sutando.config.local.json` for a durable per-clone override.
 - **Move into the in-repo default:** copy your old workspace contents into `<repo>/workspace/`. The loader will emit a `.env` drift warning if your `.env` still declares `SUTANDO_WORKSPACE=` — remove that line once you've migrated.
 
 The M1 milestone will ship a dedicated recovery skill (`bash scripts/sutando-migrate.sh`) for users who want a guided audit + move.
