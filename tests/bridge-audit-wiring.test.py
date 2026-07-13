@@ -101,6 +101,68 @@ skip_lines = [l for l in AUDIT.read_text().splitlines() if l.strip()]
 check("discord: skip audit lines have correct structure (4 tab-sep fields)",
       all(len(l.split("\t")) == 4 for l in skip_lines), str(skip_lines))
 
+# ── poll_results integration: exercise the ACTUAL async call site ────────────
+# The skip branch lives inside the poll_results() while-True coroutine. Run the
+# real coroutine on an event loop for one iteration (it sleeps 1s per pass),
+# with a fake gateway client, a pending [no-send] result, and a pending
+# [deduped: …] result — then assert the audit lines were written BY THE LOOP
+# and both files were archived. This covers the call site itself, so it needs
+# no "tested via helper" pragma.
+import asyncio
+
+
+class _FakeClient:
+    def is_ready(self):
+        return False  # heartbeat gate closed — no file writes
+
+    async def fetch_channel(self, cid):  # recovery path — unused (empty map)
+        raise RuntimeError("not used")
+
+
+class _FakeChannel:
+    id = 1234567890
+
+    async def send(self, *a, **k):  # dedup-notify path — not taken here
+        return None
+
+
+db.client = _FakeClient()
+AUDIT.write_text("")  # fresh slate for the loop-path checks
+
+for _tid, _marker in (("task-loop-nosend", "[no-send]\n"),
+                      ("task-loop-dedup", "[deduped: task-holder-x]\n")):
+    (db.TASKS_DIR).mkdir(parents=True, exist_ok=True)
+    (db.RESULTS_DIR).mkdir(parents=True, exist_ok=True)
+    (db.TASKS_DIR / f"{_tid}.txt").write_text(f"id: {_tid}\ntask: t\n")
+    (db.RESULTS_DIR / f"{_tid}.txt").write_text(_marker)
+    db.pending_replies[_tid] = _FakeChannel()
+
+
+async def _run_one_iteration():
+    t = asyncio.ensure_future(db.poll_results())
+    await asyncio.sleep(0.7)  # one pass completes well before the 1s sleep ends
+    t.cancel()
+    try:
+        await t
+    except asyncio.CancelledError:
+        pass
+
+
+asyncio.run(_run_one_iteration())
+
+_audit_now = AUDIT.read_text()
+check("discord loop: [no-send] audited no_send via the poll_results call site",
+      "\ttask-loop-nosend\tno_send\tdiscord" in _audit_now, _audit_now)
+check("discord loop: [deduped:] audited deduped via the poll_results call site",
+      "\ttask-loop-dedup\tdeduped\tdiscord" in _audit_now, _audit_now)
+check("discord loop: [no-send] result archived (not re-polled forever)",
+      not (db.RESULTS_DIR / "task-loop-nosend.txt").exists())
+check("discord loop: [no-send] task file archived",
+      not (db.TASKS_DIR / "task-loop-nosend.txt").exists())
+check("discord loop: pending_replies drained for both skip tasks",
+      "task-loop-nosend" not in db.pending_replies
+      and "task-loop-dedup" not in db.pending_replies)
+
 if failures:
     print(f"\nFAIL — {len(failures)} check(s) failed: {failures}")
     raise SystemExit(1)
