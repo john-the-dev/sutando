@@ -113,13 +113,37 @@ def _stub_port(port, name, **kwargs):
     return {"name": name, "status": "down", "detail": "mocked"}
 
 with patch.object(hc, "check_port", side_effect=_stub_port), \
-     patch.dict(os.environ, {"SKIP_TELEGRAM": "1", "SKIP_DISCORD": "1"}, clear=False):
+     patch.dict(os.environ, {"SKIP_TELEGRAM": "1", "SKIP_DISCORD": "1", "SKIP_SLACK": "1"}, clear=False):
     _checks = hc.run_all_checks()
     _names = {c["name"] for c in _checks}
     check("run_all_checks: SKIP_TELEGRAM=1 → telegram-bridge absent",
           "telegram-bridge" not in _names)
     check("run_all_checks: SKIP_DISCORD=1 → discord-bridge absent",
           "discord-bridge" not in _names)
+    check("run_all_checks: SKIP_SLACK=1 → slack-bridge absent",
+          "slack-bridge" not in _names)
+
+# slack-bridge is actually IN the bridge loop (the whole point of SKIP_SLACK):
+# with no skip vars and a configured slack channel dir, the loop must emit a
+# slack-bridge check. Point claude_home_path at a temp channels tree so the
+# "configured" gate (channels/slack/.env exists) passes hermetically.
+with tempfile.TemporaryDirectory() as _home:
+    _ch = Path(_home) / "channels" / "slack"
+    _ch.mkdir(parents=True)
+    (_ch / ".env").write_text("SLACK_BOT_TOKEN=xoxb-test\n")
+    _orig_chp = hc.claude_home_path
+
+    def _fake_chp(sub):
+        return Path(_home) / sub if sub == "channels" else _orig_chp(sub)
+
+    with patch.object(hc, "check_port", side_effect=_stub_port), \
+         patch.object(hc, "claude_home_path", side_effect=_fake_chp), \
+         patch.dict(os.environ, {"SKIP_TELEGRAM": "1", "SKIP_DISCORD": "1"}, clear=False):
+        os.environ.pop("SKIP_SLACK", None)
+        _checks2 = hc.run_all_checks()
+        _names2 = {c["name"] for c in _checks2}
+        check("run_all_checks: slack configured + no SKIP_SLACK → slack-bridge check emitted",
+              "slack-bridge" in _names2, str(sorted(_names2)))
 
 if failures:
     sys.exit(1)

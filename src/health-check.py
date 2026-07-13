@@ -1280,7 +1280,8 @@ def run_all_checks() -> list[dict]:
 
     # Messaging bridges (optional — only check if configured and not skipped)
     channels_dir = claude_home_path("channels")
-    for name, proc_name in [("telegram-bridge", "telegram-bridge"), ("discord-bridge", "discord-bridge")]:
+    for name, proc_name in [("telegram-bridge", "telegram-bridge"), ("discord-bridge", "discord-bridge"),
+                            ("slack-bridge", "slack-bridge")]:
         channel_name = name.replace("-bridge", "")
         if _should_skip_bridge(channel_name, env_path):
             continue
@@ -2302,7 +2303,7 @@ def main():
                 if c["name"].startswith("com.sutando."):
                     result = fix_launchd(c["name"])
                     print(f"  {c['name']}: {result}")
-                elif c["name"] in ("telegram-bridge", "discord-bridge"):
+                elif c["name"] in ("telegram-bridge", "discord-bridge", "slack-bridge"):
                     # LoginFailure means the token is bad — restarting won't help
                     # and would create a duplicate alongside the launchd-managed one.
                     if "LoginFailure" in c.get("detail", "") or "token invalid" in c.get("detail", ""):
