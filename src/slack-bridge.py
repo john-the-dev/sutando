@@ -198,9 +198,11 @@ def presenter_mode_active() -> bool:
 ACCESS_FILE = channel_access_path("slack")
 
 # TOFU enrollment code — set at startup when access.json doesn't exist.
-# The first DM must include this code to become owner. Cleared after use.
-# None when access.json already exists (bridge already enrolled) or after
-# successful enrollment. See telegram-bridge.py for the same mechanism.
+# The first DM must include this code to become owner. RETAINED for the whole
+# process lifetime (never cleared) so the gate stays armed if access.json is
+# deleted externally later (#899). None only when access.json already existed
+# at startup (bridge already enrolled). See telegram-bridge.py for the same
+# mechanism.
 _TOFU_ENROLLMENT_CODE: str | None = None
 
 # In-memory mirror of access.json. Updated on every successful read.
