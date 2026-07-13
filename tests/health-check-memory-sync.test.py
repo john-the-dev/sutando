@@ -108,6 +108,23 @@ def main() -> int:
     check("config-file configured + never fetched → 'never fetched' state (not 'not configured')",
           "never fetched" in r["detail"] and "not configured" not in r["detail"], f"got {r!r}")
 
+    # Legacy .env fallback path (covers the env-read loop, lines ~199-204):
+    # config has NO vault URL but REPO_DIR/.env carries the deprecated
+    # SUTANDO_MEMORY_REPO alias → repo_url resolves from .env, and (with a
+    # never-fetched workspace git repo) we get the initialized state, NOT the
+    # 'not configured' false-ok.
+    legacy_repo = Path(tempfile.mkdtemp(prefix="sutando-hc-legacy-"))
+    (legacy_repo / ".env").write_text('SUTANDO_MEMORY_REPO="https://vault.example/legacy.git"\n')
+    ws2 = Path(tempfile.mkdtemp(prefix="sutando-hc-ws2-"))
+    (ws2 / ".git").mkdir()
+    with unittest.mock.patch.object(hc, "_vault_sync_disabled", return_value=False), \
+         unittest.mock.patch.object(hc, "_vault_remote_url", return_value=""), \
+         unittest.mock.patch.object(hc, "REPO_DIR", legacy_repo), \
+         unittest.mock.patch.object(hc, "WORKSPACE_DIR", ws2):
+        r = hc.check_memory_sync()
+    check("legacy .env SUTANDO_MEMORY_REPO → configured (not 'not configured')",
+          "not configured" not in r["detail"], f"got {r!r}")
+
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s)")
         return 1
