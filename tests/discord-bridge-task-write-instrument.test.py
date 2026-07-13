@@ -138,6 +138,40 @@ class TestWriteTaskFile(unittest.TestCase):
             except Exception as exc:
                 self.fail(f"_write_task_file propagated an exception: {exc}")
 
+    # ── Builder-callable path (CR #1851): the f-string CONSTRUCTION runs inside
+    # the helper's try, so a build failure is logged, not silently lost. ────────
+
+    def test_builder_success_writes_built_content(self):
+        p = Path(_tmp) / "tasks" / "task-test-builder-ok.txt"
+        ok, out = self._capture(
+            bridge._write_task_file, p, lambda: "built: hello", "frank", "chan6", "owner", 205
+        )
+        self.assertTrue(ok)
+        self.assertEqual(p.read_text(), "built: hello")
+        self.assertIn("[task-write] wrote", out)
+
+    def test_builder_failure_returns_false_and_logs(self):
+        """A raising builder (f-string build failure) must be caught + logged FAILED."""
+        p = Path(_tmp) / "tasks" / "task-test-builder-fail.txt"
+
+        def _bad_builder():
+            raise AttributeError("'NoneType' object has no attribute 'id'")
+
+        ok, out = self._capture(
+            bridge._write_task_file, p, _bad_builder, "grace", "chan7", "owner", 206
+        )
+        self.assertFalse(ok)
+        self.assertIn("[task-write] FAILED", out)
+        self.assertIn("AttributeError", out)
+        self.assertFalse(p.exists(), "no partial file on build failure")
+
+    def test_builder_failure_does_not_raise(self):
+        p = Path(_tmp) / "tasks" / "task-test-builder-no-raise.txt"
+        try:
+            bridge._write_task_file(p, lambda: 1 / 0, "heidi", "chan8", "other", 207)
+        except Exception as exc:
+            self.fail(f"builder exception propagated: {exc}")
+
 
 class _FakeTypingCtx:
     async def __aenter__(self): pass
