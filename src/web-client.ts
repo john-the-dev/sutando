@@ -1120,7 +1120,18 @@ function snapshotTranscript() {
       const clone = el.cloneNode(true);
       clone.querySelectorAll('.copy-btn').forEach(b => b.remove());
       return { cls: el.className, html: clone.innerHTML };
-    }).filter(e => e.html && e.html.length < TRANSCRIPT_MAX_ENTRY_LEN);
+    }).map(e => {
+      if (!e.html) return null;
+      // Oversized entries (data-URL images) can't fit in localStorage — but a
+      // silent drop would make the restored transcript lie by omission.
+      // Persist a small static placeholder instead, so the bubble survives
+      // the reload and says why the image didn't. (Static markup only, no
+      // user content.)
+      if (e.html.length >= TRANSCRIPT_MAX_ENTRY_LEN) {
+        return { cls: e.cls, html: '<em class="t-not-persisted">[image/attachment not kept across reloads — too large for local storage]</em>' };
+      }
+      return e;
+    }).filter(Boolean);
     try {
       localStorage.setItem(PERSIST_KEY_TRANSCRIPT, JSON.stringify(entries));
     } catch {
