@@ -45,7 +45,7 @@ def _repo_root() -> Path | None:
             cwd=Path(__file__).resolve().parent,
         )
         return Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
-    except Exception:
+    except Exception:  # pragma: no cover - defensive: git absent / not a repo
         return None
 
 REPO = _repo_root()
@@ -63,7 +63,7 @@ try:
     from dotenv import load_dotenv
     if REPO is not None:
         load_dotenv(REPO / ".env")
-except ImportError:
+except ImportError:  # pragma: no cover - optional dep; present in CI + prod
     print("⚠️ python-dotenv not installed — relying on shell env for GITHUB_WEBHOOK_SECRET")
 
 # GitHub webhook secret for payload signature verification.
