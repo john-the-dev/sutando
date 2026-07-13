@@ -61,8 +61,8 @@ PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 
 # file. The .env lives in the checkout, not the runtime workspace.
 try:
     from dotenv import load_dotenv
-    if REPO is not None:
-        load_dotenv(REPO / ".env")
+    if REPO is not None:  # pragma: no cover - startup .env load; REPO-None + dotenv-absent paths are env-dependent
+        load_dotenv(REPO / ".env")  # pragma: no cover
 except ImportError:  # pragma: no cover - optional dep; present in CI + prod
     print("⚠️ python-dotenv not installed — relying on shell env for GITHUB_WEBHOOK_SECRET")
 
