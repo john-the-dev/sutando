@@ -63,16 +63,12 @@ check(
     "slack: SKILL INSTRUCTIONS sentinel present",
     "===SKILL INSTRUCTIONS" in slack_src,
 )
-check(
-    "slack: CONTEXT-FIRST step injected for owner tasks",
-    "CONTEXT-FIRST" in slack_src,
-)
-check(
-    "slack: non-owner tasks do not get skill hints",
-    # guard: access_tier == "owner" (ungated from optional-skill presence — mirrors
-    # discord-bridge PR #1782 + telegram-bridge; CONTEXT-FIRST fires for all owner tasks)
-    re.search(r'if access_tier == .owner.:', slack_src) is not None,
-)
+# NOTE: CONTEXT-FIRST injection + the owner-only gate (access_tier == "owner")
+# are covered BEHAVIORALLY in tests/slack-bridge-write-task.test.py — it calls
+# _write_task for an owner and a non-owner and asserts CONTEXT-FIRST / the whole
+# SKILL INSTRUCTIONS block is present for the owner and absent for the other tier.
+# The prior source-grep substring/regex checks here were redundant with that and
+# were removed per CR #1839 (source_grep_tests).
 
 # ---------------------------------------------------------------------------
 # Discord bridge

@@ -145,6 +145,12 @@ if other_path and other_path.exists():
     check("other-tier task: access_tier: other", "access_tier: other" in other_body)
     check("other-tier task: no CONTEXT-FIRST (hints block is owner-only)",
           "CONTEXT-FIRST" not in other_body)
+    # The whole owner-gated hints block (===SKILL INSTRUCTIONS, incl. CONTEXT-FIRST)
+    # must be absent for a non-owner tier — this is the behavioral equivalent of
+    # the `if access_tier == "owner":` source guard (PR #1839 replaced that
+    # source-grep with this assertion).
+    check("other-tier task: no SKILL INSTRUCTIONS block (owner-gated)",
+          "===SKILL INSTRUCTIONS" not in other_body)
 
 # ── Empty event user_id → graceful None ───────────────────────────────────────
 
