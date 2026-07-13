@@ -50,6 +50,40 @@ const DEFAULT_KEYCHAIN_SERVICE = 'Claude Code-credentials';
 // 5 min of slack avoids racing the expiry on a long-running upstream request.
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 
+// Failure backoff. Once the stored token is at/near expiry, `needsRefresh` stays
+// true on EVERY subsequent request — so if the refresh itself keeps failing
+// (e.g. the stored refresh token was revoked/rotated out-of-band → HTTP 400),
+// the naive code re-attempts on each request and hammers the OAuth endpoint in
+// a tight loop. After a failure we hold off re-attempting until a backoff window
+// elapses, growing exponentially from BASE to MAX and resetting on the next
+// success. Overridable via env for tests / tuning.
+const REFRESH_FAIL_BACKOFF_BASE_MS =
+	Number(process.env.SUTANDO_PROXY_REFRESH_BACKOFF_BASE_MS) || 30 * 1000; // 30s
+const REFRESH_FAIL_BACKOFF_MAX_MS =
+	Number(process.env.SUTANDO_PROXY_REFRESH_BACKOFF_MAX_MS) || 15 * 60 * 1000; // 15 min
+
+// Pure: how long to wait before the next refresh attempt after `failCount`
+// consecutive failures. 0 failures → 0 (attempt immediately). Exponential
+// (BASE·2^(n-1)) capped at MAX.
+export function nextRefreshBackoffMs(failCount: number): number {
+	if (failCount <= 0) return 0;
+	return Math.min(
+		REFRESH_FAIL_BACKOFF_BASE_MS * 2 ** (failCount - 1),
+		REFRESH_FAIL_BACKOFF_MAX_MS,
+	);
+}
+
+// Pure: should we attempt a refresh right now? Only when the token needs it AND
+// we're past any active failure-backoff window. This is the guard that turns the
+// per-request retry storm into at most one attempt per backoff window.
+export function shouldAttemptRefresh(
+	needsRefresh: boolean,
+	now: number,
+	nextAllowedAt: number,
+): boolean {
+	return needsRefresh && now >= nextAllowedAt;
+}
+
 interface ClaudeOAuth {
 	accessToken: string;
 	refreshToken?: string;
@@ -204,6 +238,12 @@ function refreshAccessToken(oauth: ClaudeOAuth): Promise<ClaudeOAuth | null> {
 // never race to consume/rotate the refresh token twice.
 let refreshInFlight: Promise<void> | null = null;
 
+// Failure-backoff state (see nextRefreshBackoffMs / shouldAttemptRefresh).
+// `nextRefreshAllowedAt` is an epoch-ms gate: while now < it, we skip the
+// refresh and fall through to the existing (stale) token instead of hammering.
+let refreshFailCount = 0;
+let nextRefreshAllowedAt = 0;
+
 // Return a usable accessToken, refreshing first if the stored one is at/near
 // expiry. Fail-safe at every step: any problem → return the existing token.
 async function getFreshOAuthToken(): Promise<string | null> {
@@ -214,14 +254,19 @@ async function getFreshOAuthToken(): Promise<string | null> {
 		typeof cred.expiresAt === 'number' &&
 		cred.expiresAt - Date.now() <= REFRESH_SKEW_MS &&
 		!!cred.refreshToken;
-	if (needsRefresh) {
+	if (shouldAttemptRefresh(needsRefresh, Date.now(), nextRefreshAllowedAt)) {
 		if (!refreshInFlight) {
 			refreshInFlight = (async () => {
 				const fresh = await refreshAccessToken(cred);
 				if (fresh && writeCred(service, fresh)) {
+					refreshFailCount = 0;
+					nextRefreshAllowedAt = 0;
 					console.log(`${ts()} [Proxy] OAuth token refreshed (new expiry ${new Date(fresh.expiresAt ?? 0).toISOString()})`);
 				} else {
-					console.error(`${ts()} [Proxy] refresh did not persist — keeping existing token`);
+					refreshFailCount += 1;
+					const backoff = nextRefreshBackoffMs(refreshFailCount);
+					nextRefreshAllowedAt = Date.now() + backoff;
+					console.error(`${ts()} [Proxy] refresh did not persist — keeping existing token (failure ${refreshFailCount}, backing off ${Math.round(backoff / 1000)}s)`);
 				}
 			})().finally(() => { refreshInFlight = null; });
 		}
