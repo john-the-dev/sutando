@@ -164,6 +164,19 @@ def _vault_sync_disabled() -> bool:
         return False
 
 
+def _vault_remote_url() -> str:
+    """The canonical vault remote (sutando.config.{local.,}json → vault.remote_url)
+    via the same config-helper contract as _vault_sync_disabled. Empty string when
+    unset or on any error (callers then try the legacy .env alias)."""
+    try:
+        return subprocess.run(
+            ["bash", str(REPO_DIR / "scripts" / "sutando-config.sh"), "vault-url"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+    except Exception:
+        return ""
+
+
 def check_memory_sync() -> dict:
     """Verify memory sync is configured and has run recently.
 
@@ -177,13 +190,18 @@ def check_memory_sync() -> dict:
     # Deliberate config opt-out → informational, never a nag.
     if _vault_sync_disabled():
         return {"name": name, "status": "ok", "detail": "cross-machine sync disabled (config opt-out)"}
-    env_path = REPO_DIR / ".env"
-    repo_url = ""
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if line.startswith("SUTANDO_MEMORY_REPO="):
-                repo_url = line.split("=", 1)[1].strip().strip('"').strip("'")
-                break
+    # "Configured?" must consult the CANONICAL config first (vault.remote_url
+    # via sutando-config.sh — the documented setup path), not just the legacy
+    # .env alias; otherwise a config-file host with sync enabled+stale would
+    # false-"ok" as single-machine mode and stop alerting entirely (qingyun P1).
+    repo_url = _vault_remote_url()
+    if not repo_url:
+        env_path = REPO_DIR / ".env"
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                if line.startswith("SUTANDO_MEMORY_REPO="):
+                    repo_url = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
     if not repo_url:
         return {"name": name, "status": "ok", "detail": "cross-machine sync not configured (single-machine mode)"}
     # Current model (sync-workspace.sh): the workspace ITSELF is a git repo with

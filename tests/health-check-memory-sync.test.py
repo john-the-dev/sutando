@@ -68,6 +68,46 @@ def main() -> int:
     check("not configured → ok (not warn)", r["status"] == "ok", f"got {r!r}")
     check("not-configured detail is non-scary", "not configured" in r["detail"], f"got {r!r}")
 
+    # ── qingyun P1 regression (config-file hosts) ────────────────────────────
+    # A host with vault.remote_url set in sutando.config (the CANONICAL setup)
+    # and NO legacy .env alias must NOT be reported as "not configured" — that
+    # false "ok" silences real stale-sync alerts. _vault_remote_url() is the
+    # config-loader contract; stub it to the configured URL.
+
+    # _vault_remote_url unit behavior
+    with unittest.mock.patch.object(hc.subprocess, "run", return_value=_run_mock("https://vault.example/repo.git\n")):
+        check("_vault_remote_url: returns stripped URL",
+              hc._vault_remote_url() == "https://vault.example/repo.git")
+    with unittest.mock.patch.object(hc.subprocess, "run", side_effect=OSError("boom")):
+        check("_vault_remote_url: error → '' (falls to legacy alias)", hc._vault_remote_url() == "")
+
+    import os, time as _time
+    # config-configured + workspace git repo + STALE fetch → warn (NOT the false ok)
+    ws = Path(tempfile.mkdtemp(prefix="sutando-hc-ws-"))
+    (ws / ".git").mkdir()
+    fetch = ws / ".git" / "FETCH_HEAD"
+    fetch.write_text("x")
+    os.utime(fetch, (_time.time() - 96 * 3600, _time.time() - 96 * 3600))  # 96h old
+    empty_repo2 = Path(tempfile.mkdtemp(prefix="sutando-hc-noenv-"))  # no .env
+    with unittest.mock.patch.object(hc, "_vault_sync_disabled", return_value=False), \
+         unittest.mock.patch.object(hc, "_vault_remote_url", return_value="https://vault.example/repo.git"), \
+         unittest.mock.patch.object(hc, "REPO_DIR", empty_repo2), \
+         unittest.mock.patch.object(hc, "WORKSPACE_DIR", ws):
+        r = hc.check_memory_sync()
+    check("config-file configured + stale fetch → warn (qingyun P1)",
+          r["status"] == "warn" and "stale" in r["detail"], f"got {r!r}")
+
+    # config-configured + workspace git repo + never fetched → ok 'never fetched',
+    # NOT the 'not configured (single-machine mode)' false-positive.
+    fetch.unlink()
+    with unittest.mock.patch.object(hc, "_vault_sync_disabled", return_value=False), \
+         unittest.mock.patch.object(hc, "_vault_remote_url", return_value="https://vault.example/repo.git"), \
+         unittest.mock.patch.object(hc, "REPO_DIR", empty_repo2), \
+         unittest.mock.patch.object(hc, "WORKSPACE_DIR", ws):
+        r = hc.check_memory_sync()
+    check("config-file configured + never fetched → 'never fetched' state (not 'not configured')",
+          "never fetched" in r["detail"] and "not configured" not in r["detail"], f"got {r!r}")
+
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s)")
         return 1
