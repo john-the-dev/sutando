@@ -669,6 +669,15 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
             "is_thread": bool(thread_ts),
         },
     )
+    # Anonymous, opt-out product telemetry: one bucketed event per accepted
+    # task, tagged only with the inbound surface. No-op when opted out / no key;
+    # never task content or ids. See src/telemetry.py + TELEMETRY.md.
+    try:  # pragma: no cover — fire-and-forget glue; logic tested in tests/telemetry.test.py
+        from telemetry import task_processed  # sibling module (src/ on sys.path)
+
+        task_processed("slack")
+    except Exception:  # pragma: no cover — telemetry must never break the bridge
+        pass
     return task_id
 
 

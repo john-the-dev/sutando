@@ -3385,6 +3385,15 @@ async def _handle_discord_message(message, force=False):
         access_tier=access_tier,
         data={"task_id": task_id, "is_dm": is_dm},
     )
+    # Anonymous, opt-out product telemetry: one bucketed event per accepted
+    # task, tagged only with the inbound surface. No-op when opted out / no key;
+    # never task content or ids. See src/telemetry.py + TELEMETRY.md.
+    try:  # pragma: no cover — fire-and-forget glue; logic tested in tests/telemetry.test.py
+        from telemetry import task_processed  # sibling module (src/ on sys.path)
+
+        task_processed("discord")
+    except Exception:  # pragma: no cover — telemetry must never break the bridge
+        pass
     # Track source-message-id so the result-sender can auto-attach reply_to
     # (visually thread the reply to the triggering message). Skipped when
     # the channel is already a Discord thread — thread context is enough.
