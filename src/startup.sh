@@ -326,6 +326,12 @@ fi
 # still there as a fallback (mentioned in README).
 bash "$REPO/scripts/install-git-hooks.sh" >/dev/null 2>&1 || true
 
+# Wire the SessionStart hook that reminds the core agent to run /schedule-crons
+# on every session start (including post-compaction). Idempotent — safe to run
+# on every start. Crons are session-only, so without this, recurring jobs go
+# dark whenever a session restarts without an explicit /schedule-crons invocation.
+bash "$REPO/scripts/install-session-start-hook.sh" 2>&1 || true
+
 # Auto-bootstrap: create-if-missing files and dirs that the agent + skills
 # expect to exist (logs, state, tasks, results, notes, contextual-chips.json,
 # pending-questions.md, build_log.md, crons.json, …). Idempotent — safe to
