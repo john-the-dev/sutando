@@ -61,7 +61,13 @@ PATTERN_DOC_ENV_PATH='\$SUTANDO_WORKSPACE/'
 # branch when the wrapper script isn't reachable (e.g. non-checkout
 # installs). The fallback path is documented in each script's comments;
 # new contributors should still go through the wrapper.
-ALLOWED='^(src/sutando_config\.(py|ts)|src/workspace_default\.(py|ts)|src/util_paths\.py|src/startup\.sh|src/migration_safety_helpers\.sh|scripts/lint-workspace-resolution\.sh|scripts/install-git-hooks\.sh|scripts/sutando-config\.sh|scripts/sync-memory\.sh|scripts/sutando-migrate\.sh|scripts/sweep-stranded-claims\.sh|tests/[^/]+\.(test\.)?(py|ts|sh)|skills/[^/]+/scripts/[^/]+\.(py|ts|sh))$'
+# The two explicitly-listed skill scripts are audited non-helper cases:
+# image-generation/generate.py parent-walks ONLY to load the checkout-root
+# .env (code-adjacent, not workspace state); voice-agent-test-harness/
+# baseline.py writes results under its own skill dir. Every other skill
+# script gets NO blanket entry here — see the conditional helper-import
+# exemption in the scan loop below.
+ALLOWED='^(src/sutando_config\.(py|ts)|src/workspace_default\.(py|ts)|src/util_paths\.py|src/startup\.sh|src/migration_safety_helpers\.sh|scripts/lint-workspace-resolution\.sh|scripts/install-git-hooks\.sh|scripts/sutando-config\.sh|scripts/sync-memory\.sh|scripts/sutando-migrate\.sh|scripts/sweep-stranded-claims\.sh|tests/[^/]+\.(test\.)?(py|ts|sh)|skills/image-generation/scripts/generate\.py|skills/voice-agent-test-harness/scripts/baseline\.py)$'
 
 # Allowed .md files — legitimate uses of `$SUTANDO_WORKSPACE/path` in
 # prose, e.g. the workspace contract docs that DESCRIBE the legacy form
@@ -115,16 +121,26 @@ for f in $files; do
   [[ "$f" =~ \.(py|ts|tsx|sh|bash)$ ]] || continue
   if grep -E -q "$ALLOWED" <<< "$f"; then continue; fi
 
+  # Skill scripts that import the canonical helper: the parent-walk to repo
+  # root is the import bootstrap itself (skills live three levels deep and
+  # must find src/ to import workspace_default) — so PATTERN_REPO_WALK is
+  # waived for them, while $SUTANDO_WORKSPACE / hardcoded-home use stays
+  # flagged. Skill scripts WITHOUT the helper import get no exemption.
+  scan_patterns="$PATTERN_ENV|$PATTERN_HARDCODED_HOME|$PATTERN_REPO_WALK"
+  if [[ "$f" =~ ^skills/[^/]+/scripts/[^/]+\.(py|ts|sh)$ ]] && grep -E -q 'workspace_default' "$f"; then
+    scan_patterns="$PATTERN_ENV|$PATTERN_HARDCODED_HOME"
+  fi
+
   if [[ "$mode" == "--diff" ]]; then
     # Only flag lines ADDED in the diff (begin with `+` but not `+++`).
     added="$(git diff "$base"...HEAD -- "$f" | grep -E '^\+[^+]' || true)"
-    if grep -E -q "$PATTERN_ENV|$PATTERN_HARDCODED_HOME|$PATTERN_REPO_WALK" <<< "$added"; then
-      hits="$(grep -E -n "$PATTERN_ENV|$PATTERN_HARDCODED_HOME|$PATTERN_REPO_WALK" <<< "$added" | head -3 || true)"
+    if grep -E -q "$scan_patterns" <<< "$added"; then
+      hits="$(grep -E -n "$scan_patterns" <<< "$added" | head -3 || true)"
       offenders+="  • $f"$'\n'"$hits"$'\n'
     fi
   else
-    if grep -E -l "$PATTERN_ENV|$PATTERN_HARDCODED_HOME|$PATTERN_REPO_WALK" "$f" >/dev/null 2>&1; then
-      hits="$(grep -E -n "$PATTERN_ENV|$PATTERN_HARDCODED_HOME|$PATTERN_REPO_WALK" "$f" | head -3 || true)"
+    if grep -E -l "$scan_patterns" "$f" >/dev/null 2>&1; then
+      hits="$(grep -E -n "$scan_patterns" "$f" | head -3 || true)"
       offenders+="  • $f"$'\n'"$hits"$'\n'
     fi
   fi
