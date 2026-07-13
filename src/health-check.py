@@ -891,6 +891,8 @@ def check_memory() -> dict:
     name = "memory"
     swap_warn_mb = int(os.environ.get("SUTANDO_MEMORY_SWAP_WARN_MB", "512"))
     swap_fail_mb = int(os.environ.get("SUTANDO_MEMORY_SWAP_FAIL_MB", "2048"))
+    free_fail_pct = int(os.environ.get("SUTANDO_MEMORY_FREE_FAIL_PCT", "15"))
+    free_warn_pct = int(os.environ.get("SUTANDO_MEMORY_FREE_WARN_PCT", "25"))
     import re as _re
 
     try:
@@ -912,11 +914,48 @@ def check_memory() -> dict:
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
 
-    # Swap-in-use is sticky on macOS: pages swapped out during a past pressure
-    # event stay counted until touched again, so high swap with a *normal*
-    # kernel pressure level is residue, not active thrash. Fail only when the
-    # kernel itself signals pressure; swap corroborates, it doesn't convict.
-    if level >= 4 or (level >= 2 and swap_used_mb >= swap_fail_mb):
+    # System-wide free memory % is the honest OOM-proximity signal — the one
+    # this check's own history keeps pointing at. Kernel pressure level is a
+    # transient sample that can read 2 ("warning") for a single tick while free
+    # memory is abundant, and swap-in-use is sticky (pages swapped out during a
+    # *past* event stay counted until touched again). Convicting on those two
+    # alone produced recurring false FAILs — e.g. "level 2, swap 5655M" while
+    # `memory_pressure` reported 47% free. So free% gets the deciding vote: a
+    # transient level-2 or sticky swap only convicts when free memory is
+    # actually low. A kernel-declared level-4 (critical) still fails outright.
+    # Issue #1485 follow-up.
+    free_pct = None
+    try:
+        mp = subprocess.run(
+            ["memory_pressure"], capture_output=True, text=True, timeout=5).stdout
+        fm = _re.search(r'free percentage:\s*(\d+)%', mp)
+        if fm:
+            free_pct = int(fm.group(1))
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    # Kernel-declared critical — trust it regardless of free%.
+    if level >= 4:
+        return {"name": name, "status": "fail",
+                "detail": f"critical memory pressure (level {level}, swap {swap_used_mb:.0f}M in use)"}
+
+    if free_pct is not None:
+        # free% available → it is the deciding vote.
+        if free_pct < free_fail_pct and (level >= 2 or swap_used_mb >= swap_fail_mb):
+            return {"name": name, "status": "fail",
+                    "detail": f"critical memory pressure ({free_pct}% free, level {level}, swap {swap_used_mb:.0f}M in use)"}
+        if free_pct < free_warn_pct and (level >= 2 or swap_used_mb >= swap_warn_mb):
+            return {"name": name, "status": "warn",
+                    "detail": f"memory pressure elevated ({free_pct}% free, level {level}, swap {swap_used_mb:.0f}M in use)"}
+        if swap_used_mb >= swap_warn_mb:
+            return {"name": name, "status": "ok",
+                    "detail": f"{free_pct}% free (healthy); swap {swap_used_mb:.0f}M is residue from a past pressure event, not active pressure (level {level})"}
+        return {"name": name, "status": "ok",
+                "detail": f"pressure normal ({free_pct}% free, level {level}, swap {swap_used_mb:.0f}M)"}
+
+    # free% unavailable (non-macOS, tool missing, or parse failure) → fall back
+    # to the level+swap heuristic (prior behavior; never blind the check).
+    if level >= 2 and swap_used_mb >= swap_fail_mb:
         return {"name": name, "status": "fail",
                 "detail": f"critical memory pressure (level {level}, swap {swap_used_mb:.0f}M in use)"}
     if level >= 2:
@@ -1567,19 +1606,22 @@ def emit_task_for_failures(checks: list[dict], state_file: Optional[Path] = None
         # Same failure set, within cooldown — skip.
         return
 
-    # Build task content.
+    # Build task content. task: is placed LAST (after trusted metadata fields)
+    # so that the multi-line bullet body cannot shadow source/access_tier/priority
+    # even in the theoretical case where check detail strings ever carry
+    # external data. Consistent with the bridge field-order convention.
     ts_iso = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-    bullet_lines = [f"- {c['name']}: {c['status']} ({c['detail']})" for c in failures]
+    bullet_str = "\n".join(f"- {c['name']}: {c['status']} ({c['detail']})" for c in failures)
     body = (
         f"id: task-health-{now_ms}\n"
         f"timestamp: {ts_iso}\n"
-        f"task: Health check found issues. Decide whether to restart, DM owner, or treat as transient:\n"
-        + "\n".join(bullet_lines) + "\n"
         f"source: health-check\n"
         f"interaction_type: system_event\n"
         f"user_id: health-check\n"
         f"access_tier: owner\n"
         f"priority: low\n"
+        f"task: Health check found issues. Decide whether to restart, DM owner, or treat as transient:\n"
+        f"{bullet_str}\n"
     )
     task_path = tasks_dir / f"task-health-{now_ms}.txt"
     task_path.write_text(body)
@@ -1975,6 +2017,35 @@ def _core_started_within(seconds: float, workspace: Optional[Path] = None, now: 
     return (now - youngest_start) < seconds
 
 
+def _resolve_launch_env() -> dict:
+    """Environment for out-of-process core restarts (start-cli.sh --restart).
+
+    launchd's minimal PATH (``/usr/bin:/bin:/usr/sbin:/sbin``) cannot find the
+    tools start-cli.sh needs — homebrew ``tmux``, ``claude`` in ``~/.local/bin``,
+    or the Sutando.app-bundled ``node`` runtime — so the restart exits rc=127
+    (``node unavailable`` / ``exec: claude: not found``) and silently falls
+    through to the legacy fallback. Prepend all of them.
+
+    Extends the existing tmux-only PATH fix to node + claude. Incident
+    2026-07-10: the watchdog restart path was broken under launchd for ~70 min
+    (queue backlog) because every canonical restart hit rc=127. Same PATH-
+    narrowing class as _resolve_tmux_bin (2026-06-09), applied here.
+    """
+    env = dict(os.environ)
+    extra = [
+        "/opt/homebrew/bin",                        # homebrew (Apple Silicon) — tmux
+        "/usr/local/bin",                           # homebrew (Intel) / misc
+        str(Path.home() / ".local" / "bin"),        # `claude` install location
+    ]
+    # Sutando.app-bundled node runtime: sibling of the repo inside the app bundle
+    # (Contents/Resources/{repo,runtime}). Absent in a plain dev checkout → skipped.
+    bundled_bin = REPO_DIR.parent / "runtime" / "bin"
+    if bundled_bin.is_dir():  # pragma: no cover — only present inside the app bundle
+        extra.append(str(bundled_bin))
+    env["PATH"] = ":".join(extra) + ":" + env.get("PATH", "/usr/bin:/bin")
+    return env
+
+
 def _default_core_restart(standard_context: bool) -> bool:
     """Run src/agent/claude/cli/start-cli.sh --restart out-of-process. When
     standard_context is True, pin SUTANDO_CORE_MODEL=opus so the restarted core
@@ -1983,9 +2054,7 @@ def _default_core_restart(standard_context: bool) -> bool:
     script = REPO_DIR / "src" / "agent" / "claude" / "cli" / "start-cli.sh"
     if not script.exists():
         return False
-    env = dict(os.environ)
-    # launchd's minimal PATH won't find homebrew tmux; start-cli.sh needs it.
-    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "/usr/bin:/bin")
+    env = _resolve_launch_env()  # pragma: no cover — real-subprocess restart path (integration, not unit)
     if standard_context:
         env["SUTANDO_CORE_MODEL"] = "opus"
     try:

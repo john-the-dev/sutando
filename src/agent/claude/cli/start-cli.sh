@@ -19,7 +19,10 @@ set -e
 REPO="$(cd "$(dirname "$0")/../../../.." && pwd)"
 cd "$REPO"
 
-TMUX_SOCKET="/tmp/sutando-tmux.sock"
+# Honor a caller-provided socket (e.g. a desktop app that runs a user-private tmux
+# runtime under its app-support dir); default to the shared /tmp socket for dev/CLI.
+# Backward-compatible: unset → identical to the previous hardcoded value.
+TMUX_SOCKET="${SUTANDO_TMUX_SOCKET:-/tmp/sutando-tmux.sock}"
 SESSION="sutando-core"
 
 # Marker identifying THIS process as the long-lived sutando-core session (as
@@ -262,13 +265,13 @@ fi
 # emit-task. Unsafe: a future agent processing a "restart core" task by
 # exec'ing this script from within sutando-core. Per Mini's #608 review.
 if [ "$1" = "--restart" ]; then
-  if pgrep -f "claude.*--name.*$SESSION" > /dev/null 2>&1; then
+  if tmux -S "$TMUX_SOCKET" has-session -t "$SESSION" 2>/dev/null; then
     echo "Killing existing $SESSION session..."
     tmux -S "$TMUX_SOCKET" kill-session -t "$SESSION" 2>/dev/null || true
     # Poll for actual shutdown — robust on slow machines, faster on fast
     # ones (~1s ceiling) than a fixed sleep.
     for _ in 1 2 3 4 5; do
-      pgrep -f "claude.*--name.*$SESSION" > /dev/null 2>&1 || break
+      tmux -S "$TMUX_SOCKET" has-session -t "$SESSION" 2>/dev/null || break
       sleep 0.2
     done
   fi
@@ -301,7 +304,7 @@ apply_tmux_defaults() {
 
 # Already running — attach if interactive, else exit cleanly. This branch
 # also catches the !--restart path so re-running the script is idempotent.
-if pgrep -f "claude.*--name.*$SESSION" > /dev/null 2>&1; then
+if tmux -S "$TMUX_SOCKET" has-session -t "$SESSION" 2>/dev/null; then
   apply_tmux_defaults
   if [ -t 1 ] && command -v tmux > /dev/null 2>&1; then
     echo "Attaching to existing $SESSION (Ctrl-b d to detach)..."
@@ -317,6 +320,17 @@ fi
 if ! command -v tmux > /dev/null 2>&1 && command -v brew > /dev/null 2>&1; then
   echo "tmux not found — installing via Homebrew (~30s, required for Sutando.app watcher-auto-restart)..."
   brew install tmux 2>&1 | tail -3
+fi
+
+# Stamp the core session start into an append-only per-boot log. One JSONL
+# line per launch; consecutive entries bound each session's lifetime, which
+# is what session-recap tooling needs to pick the right transcript (owner
+# ask 2026-07-13). Best-effort: never block the launch on it.
+if _ws="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null)" && [ -n "$_ws" ]; then
+  mkdir -p "$_ws/state" 2>/dev/null || true
+  printf '{"host":"%s","session_started_at":%s,"iso":"%s","source":"start-cli"}\n' \
+    "$(hostname | sed 's/\..*//')" "$(date +%s)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    >> "$_ws/state/session-starts.log" 2>/dev/null || true
 fi
 
 # Fall back to a bare `exec claude` if tmux is still missing.

@@ -3018,7 +3018,13 @@ async def _handle_discord_message(message, force=False):
             enriched = None
         if enriched:
             print(f"  [discord-state-prefetch] enriched task body for {username} in #{getattr(message.channel, 'name', '?')}", flush=True)
-            user_task_text = enriched
+            # Re-apply confine to the enriched body: the fetched Discord channel
+            # messages (the `blocks` prefix in enriched) were not run through
+            # confine_user_content() — an attacker-controlled channel could post
+            # `===SUTANDO SYSTEM INSTRUCTIONS===` content that lands in the task
+            # file header verbatim. confine_user_content is idempotent so the
+            # already-ZWSP-prefixed original user_task_text is unaffected.
+            user_task_text = confine_user_content(enriched)
             # Rewrite the prompt file with the enriched body. quoted_task
             # already points to `"$(cat {prompt_path})"` — keep the heredoc
             # form (per PR #652's codex-stdin-hang fix). Using shlex.quote
@@ -3216,7 +3222,6 @@ async def _handle_discord_message(message, force=False):
         task_file.write_text(
             f"id: {task_id}\n"
             f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
-            f"task: {user_task_text}\n"
             f"source: discord\n"
             f"interaction_type: message\n"
             f"{media_headers}"
@@ -3228,6 +3233,7 @@ async def _handle_discord_message(message, force=False):
             f"user_id: {message.author.id}\n"
             f"access_tier: {access_tier}\n"
             f"priority: {priority}\n"
+            f"task: {user_task_text}\n"
             f"{tier_instructions.get(access_tier, tier_instructions['other'])}"
             f"{discord_skill_hints}"
         )
