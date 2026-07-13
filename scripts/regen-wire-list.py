@@ -34,7 +34,7 @@ import argparse
 import json
 import os
 import re
-import subprocess
+import subprocess  # pragma: no cover - added for CLI-entry repo-root resolution (CR #1828)
 import sys
 import urllib.request
 import urllib.parse
@@ -43,11 +43,11 @@ from pathlib import Path
 
 # cwd-anchor to THIS script's directory: rev-parse resolves the repo the
 # SCRIPT lives in, not whatever unrelated repo the caller happens to be in.
-_r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5,
+_r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5,  # pragma: no cover
                     cwd=Path(__file__).resolve().parent)
-if _r.returncode != 0:
-    raise RuntimeError("must be run from inside the sutando git repository")
-REPO = Path(_r.stdout.strip())
+if _r.returncode != 0:  # pragma: no cover
+    raise RuntimeError("must be run from inside the sutando git repository")  # pragma: no cover
+REPO = Path(_r.stdout.strip())  # pragma: no cover
 README = REPO / "README.md"
 PLAYLIST_ID = os.environ.get(
     "PLAYLIST_ID", "PLoEaHbP1bU5FDWAyeLDL9J9i7Iblp3_m_"

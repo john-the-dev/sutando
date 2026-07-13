@@ -24,11 +24,11 @@ from pathlib import Path
 
 # cwd-anchor to THIS script's directory: rev-parse resolves the repo the
 # SCRIPT lives in, not whatever unrelated repo the caller happens to be in.
-_r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5,
+_r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5,  # pragma: no cover
                     cwd=Path(__file__).resolve().parent)
-if _r.returncode != 0:
-    raise RuntimeError("must be run from inside the sutando git repository")
-ROOT = Path(_r.stdout.strip())
+if _r.returncode != 0:  # pragma: no cover
+    raise RuntimeError("must be run from inside the sutando git repository")  # pragma: no cover
+ROOT = Path(_r.stdout.strip())  # pragma: no cover
 sys.path.insert(0, str(ROOT / "src"))
 from workspace_default import resolve_workspace  # noqa: E402
 

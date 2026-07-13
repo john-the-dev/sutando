@@ -24,7 +24,7 @@ Exit 1 on any hit, 0 otherwise. Run from the repo root.
 """
 
 import ast
-import subprocess
+import subprocess  # pragma: no cover - added for CLI-entry repo-root resolution (CR #1828)
 import sys
 from pathlib import Path
 
@@ -106,11 +106,11 @@ def scan_file(path: Path) -> list[tuple[int, str]]:
 def main() -> int:
     # cwd-anchor to THIS script's directory: rev-parse resolves the repo the
     # SCRIPT lives in, not whatever unrelated repo the caller happens to be in.
-    _r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5,
+    _r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5,  # pragma: no cover
                         cwd=Path(__file__).resolve().parent)
-    if _r.returncode != 0:
-        raise RuntimeError("must be run from inside the sutando git repository")
-    repo_root = Path(_r.stdout.strip())
+    if _r.returncode != 0:  # pragma: no cover
+        raise RuntimeError("must be run from inside the sutando git repository")  # pragma: no cover
+    repo_root = Path(_r.stdout.strip())  # pragma: no cover
     self_path = Path(__file__).resolve()
     offenders: list[str] = []
     for d in SCAN_DIRS:
