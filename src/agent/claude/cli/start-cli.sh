@@ -45,11 +45,6 @@ tmux_session_exists() {
   tmux -S "$TMUX_SOCKET" has-session -t "$SESSION" 2>/dev/null
 }
 
-tmux_session_command() {
-  tmux_available || return 1
-  tmux -S "$TMUX_SOCKET" display-message -p -t "$SESSION" '#{pane_current_command}' 2>/dev/null
-}
-
 # A managed core is alive when the tmux session EXISTS and a `claude --name
 # sutando-core` process is running under it. Do NOT gate on the pane's current
 # foreground command: a healthy core that is mid-tool shows the pane cmd as
