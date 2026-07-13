@@ -397,7 +397,7 @@ def _transcribe_via_skill(local_path: str) -> str | None:
     transcription failure must never block task delivery.
     """
     import subprocess
-    skill_script = Path(__file__).parent.parent / "skills" / "audio-transcribe" / "scripts" / "transcribe.py"
+    skill_script = Path(os.path.realpath(__file__)).parent.parent / "skills" / "audio-transcribe" / "scripts" / "transcribe.py"  # realpath: symlinked-bundle installs walk the real tree (CR #2002)
     if not skill_script.exists():
         return None
     try:

@@ -29,8 +29,12 @@ from urllib.parse import urlparse
 #   - REPO_DIR      = source tree (this file's parent.parent) — for source paths
 #   - WORKSPACE_DIR = runtime state (resolve_workspace()) — for build_log, etc.
 # Matches PR #775's pattern for agent-api.py + github-webhook.py + task-bridge.ts.
-REPO_DIR = Path(__file__).parent.parent
-sys.path.insert(0, str(Path(__file__).parent))
+# Resolve __file__'s symlink BEFORE walking up (mirrors health-check.py's
+# fix in this PR): on a symlinked-bundle install, walking up from the
+# symlink location computes paths in the wrong tree.
+_real = os.path.realpath(__file__)
+REPO_DIR = Path(_real).parent.parent
+sys.path.insert(0, str(Path(_real).parent))
 from workspace_default import resolve_workspace, status_read_path  # noqa: E402
 from util_paths import personal_path, shared_personal_path  # noqa: E402
 WORKSPACE_DIR = resolve_workspace()

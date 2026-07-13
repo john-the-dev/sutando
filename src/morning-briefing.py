@@ -180,7 +180,7 @@ return output
 
 def get_reminders() -> list[str]:
     """Get today's and overdue reminders via the existing script."""
-    script_path = Path(__file__).parent.parent / "skills" / "macos-tools" / "scripts" / "reminders.py"
+    script_path = Path(os.path.realpath(__file__)).parent.parent / "skills" / "macos-tools" / "scripts" / "reminders.py"  # realpath: symlinked-bundle installs walk the real tree (CR #2002)
     if not script_path.exists():
         return []
     try:

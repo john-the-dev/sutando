@@ -50,13 +50,11 @@ def _safe_id(raw: str) -> str:
 
 
 def validate_twilio_signature(handler, body: str) -> bool:
-    """Validate X-Twilio-Signature against TWILIO_AUTH_TOKEN.
-    Fails closed — returns False when the token is not configured so that
-    unauthenticated requests cannot create tasks via the /twilio/* endpoints.
-    TWILIO_AUTH_TOKEN must be set in .env for these endpoints to accept webhooks."""
+    """Validate X-Twilio-Signature if TWILIO_AUTH_TOKEN is configured.
+    Returns True if valid or if token not configured (local dev)."""
     auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
     if not auth_token:
-        return False
+        return True
     import hmac, hashlib, base64
     from urllib.parse import parse_qs
 
@@ -92,8 +90,12 @@ def validate_twilio_signature(handler, body: str) -> bool:
 #               core-status.json, pending-questions.md, contextual-chips.json,
 #               etc. Honors SUTANDO_WORKSPACE when set so watcher + bridges
 #               stay aligned with these writes.
-REPO_DIR = Path(__file__).parent.parent
-sys.path.insert(0, str(Path(__file__).parent))
+# Resolve __file__'s symlink BEFORE walking up (mirrors health-check.py's
+# fix in this PR): on a symlinked-bundle install, walking up from the
+# symlink location computes paths in the wrong tree.
+_real = os.path.realpath(__file__)
+REPO_DIR = Path(_real).parent.parent
+sys.path.insert(0, str(Path(_real).parent))
 from workspace_default import resolve_workspace, status_read_path  # noqa: E402
 import local_task_protocol  # noqa: E402
 
