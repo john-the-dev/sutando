@@ -36,9 +36,13 @@ from pathlib import Path
 #           the workspace-aware watcher picks them up.
 def _repo_root() -> Path | None:
     try:
+        # cwd-anchor to this file's directory (src/): rev-parse resolves the
+        # repo THIS module lives in, not whatever unrelated repo the launching
+        # process happens to have as its cwd (launchd/cron/manual runs vary).
         r = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, timeout=5,
+            cwd=Path(__file__).resolve().parent,
         )
         return Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
     except Exception:
