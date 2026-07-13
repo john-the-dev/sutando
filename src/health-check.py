@@ -1034,6 +1034,26 @@ def check_notes_split_brain() -> "dict | None":
     }
 
 
+def sutando_app_hotkey_detail(workspace_dir) -> str:
+    """Detail string for a running sutando-app check.
+
+    Hotkey labels come from <workspace>/state/hotkeys.json, published by the
+    app when it registers them (single source of truth since #1920). A running
+    process alone doesn't prove hotkeys exist — app lineages without global
+    hotkey registration (e.g. the Electron shell) match the pgrep pattern but
+    register nothing, and the pre-#1920 hardcoded "(⌃C/⌃V/⌃M)" claim here had
+    already drifted from the real defaults and read as a false positive during
+    live debugging. Missing/malformed/empty file → honest "no hotkeys
+    published" rather than a guess.
+    """
+    try:
+        entries = json.loads((Path(workspace_dir) / "state" / "hotkeys.json").read_text())
+        labels = "/".join(e["label"] for e in entries if e.get("label"))
+    except (OSError, ValueError, TypeError, AttributeError):
+        labels = ""
+    return f"running (hotkeys: {labels})" if labels else "running (no hotkeys published)"
+
+
 def _outermost_bundle(comm: str) -> Optional[Path]:
     """Map an executable path to its OUTERMOST .app bundle, or None.
 
@@ -1423,7 +1443,11 @@ def run_all_checks() -> list[dict]:
         pgrep_status, pids = _resolve_menu_bar_pgrep(pgrep_status, pids)
 
         if pgrep_status == "ok-running" and pids:
-            check = {"name": "sutando-app", "status": "ok", "detail": f"running (⌃C/⌃V/⌃M)"}
+            # pragma: no cover — reachable only when pgrep finds the macOS
+            # menu-bar app (never on ubuntu CI); detail derivation is covered
+            # at helper level in health-check-sutando-app-hotkeys.test.py.
+            check = {"name": "sutando-app", "status": "ok",  # pragma: no cover
+                     "detail": sutando_app_hotkey_detail(WORKSPACE_DIR)}
             # Staleness check is meaningful only in the dev workflow — the
             # .app binary and bundled main.swift share a build mtime, so a
             # comparison there is always equal. Skip when dev_bin missing.
@@ -1951,6 +1975,35 @@ def _core_started_within(seconds: float, workspace: Optional[Path] = None, now: 
     return (now - youngest_start) < seconds
 
 
+def _resolve_launch_env() -> dict:
+    """Environment for out-of-process core restarts (start-cli.sh --restart).
+
+    launchd's minimal PATH (``/usr/bin:/bin:/usr/sbin:/sbin``) cannot find the
+    tools start-cli.sh needs — homebrew ``tmux``, ``claude`` in ``~/.local/bin``,
+    or the Sutando.app-bundled ``node`` runtime — so the restart exits rc=127
+    (``node unavailable`` / ``exec: claude: not found``) and silently falls
+    through to the legacy fallback. Prepend all of them.
+
+    Extends the existing tmux-only PATH fix to node + claude. Incident
+    2026-07-10: the watchdog restart path was broken under launchd for ~70 min
+    (queue backlog) because every canonical restart hit rc=127. Same PATH-
+    narrowing class as _resolve_tmux_bin (2026-06-09), applied here.
+    """
+    env = dict(os.environ)
+    extra = [
+        "/opt/homebrew/bin",                        # homebrew (Apple Silicon) — tmux
+        "/usr/local/bin",                           # homebrew (Intel) / misc
+        str(Path.home() / ".local" / "bin"),        # `claude` install location
+    ]
+    # Sutando.app-bundled node runtime: sibling of the repo inside the app bundle
+    # (Contents/Resources/{repo,runtime}). Absent in a plain dev checkout → skipped.
+    bundled_bin = REPO_DIR.parent / "runtime" / "bin"
+    if bundled_bin.is_dir():  # pragma: no cover — only present inside the app bundle
+        extra.append(str(bundled_bin))
+    env["PATH"] = ":".join(extra) + ":" + env.get("PATH", "/usr/bin:/bin")
+    return env
+
+
 def _default_core_restart(standard_context: bool) -> bool:
     """Run src/agent/claude/cli/start-cli.sh --restart out-of-process. When
     standard_context is True, pin SUTANDO_CORE_MODEL=opus so the restarted core
@@ -1959,9 +2012,7 @@ def _default_core_restart(standard_context: bool) -> bool:
     script = REPO_DIR / "src" / "agent" / "claude" / "cli" / "start-cli.sh"
     if not script.exists():
         return False
-    env = dict(os.environ)
-    # launchd's minimal PATH won't find homebrew tmux; start-cli.sh needs it.
-    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "/usr/bin:/bin")
+    env = _resolve_launch_env()  # pragma: no cover — real-subprocess restart path (integration, not unit)
     if standard_context:
         env["SUTANDO_CORE_MODEL"] = "opus"
     try:
