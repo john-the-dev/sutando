@@ -86,8 +86,8 @@ import json, os
 sp = os.path.expanduser("~/.claude/settings.json"); s = json.load(open(sp))
 cmd = "python3 ~/.claude/hooks/gmail-write-guard.py"
 pre = s.setdefault("hooks", {}).setdefault("PreToolUse", [])
-blk = next((b for b in pre if b.get("matcher") == "mcp__.*gmail.*"), None)
-if blk is None: pre.append({"matcher": "mcp__.*gmail.*", "hooks": [{"type": "command", "command": cmd}]})
+blk = next((b for b in pre if b.get("matcher") == "mcp__.*[Gg][Mm][Aa][Ii][Ll].*"), None)
+if blk is None: pre.append({"matcher": "mcp__.*[Gg][Mm][Aa][Ii][Ll].*", "hooks": [{"type": "command", "command": cmd}]})
 elif cmd not in [h.get("command") for h in blk["hooks"]]: blk["hooks"].append({"type": "command", "command": cmd})
 json.dump(s, open(sp, "w"), indent=2)
 PY
