@@ -317,16 +317,6 @@ class TestCLI(unittest.TestCase):
         self.assertIn("progress update is too long", r.stderr)
         self.assertNotIn("SLACK_BOT_TOKEN", r.stderr)
 
-    def test_long_message_rejected_before_token_lookup(self):
-        r = subprocess.run(
-            [sys.executable, str(SCRIPT), "--source", "slack",
-             "--channel-id", "D123", "--message", "x" * 281],
-            capture_output=True, text=True,
-        )
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("progress update is too long", r.stderr)
-        self.assertNotIn("SLACK_BOT_TOKEN", r.stderr)
-
 
 if __name__ == "__main__":
     unittest.main()

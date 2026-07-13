@@ -26,28 +26,6 @@ import re
 import sys
 import urllib.request
 from pathlib import Path
-from typing import Optional
-
-
-MAX_PROGRESS_CHARS = 280
-MAX_PROGRESS_LINES = 4
-
-
-def _progress_message_error(message: str) -> Optional[str]:
-    """Return a validation error when a notify body looks like a final answer."""
-    stripped = message.strip()
-    if len(stripped) > MAX_PROGRESS_CHARS:
-        return (
-            f"progress update is too long ({len(stripped)} chars; "
-            f"max {MAX_PROGRESS_CHARS})"
-        )
-    line_count = len([line for line in stripped.splitlines() if line.strip()])
-    if line_count > MAX_PROGRESS_LINES:
-        return (
-            f"progress update has too many lines ({line_count}; "
-            f"max {MAX_PROGRESS_LINES})"
-        )
-    return None
 
 
 MAX_PROGRESS_CHARS = 280
@@ -117,7 +95,7 @@ def _post(url: str, payload: dict, headers: dict) -> bool:
         return False
 
 
-def send_slack(channel_id: str, message: str, thread_ts: Optional[str] = None) -> bool:
+def send_slack(channel_id: str, message: str, thread_ts: str | None = None) -> bool:
     token = _token("slack", "SLACK_BOT_TOKEN")
     if not token:
         print("[task-progress] SLACK_BOT_TOKEN not found", file=sys.stderr)
