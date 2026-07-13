@@ -240,13 +240,17 @@ fi
 # Anchoring the lookup to SCRIPT_PARENT means it works regardless of
 # REPO_DIR drift — the helper and this script ship in the same commit.
 #
-# Fallback retains the legacy inline default for the rare case where the
-# wrapper isn't present (e.g. extracted-archive install where SCRIPT_PARENT
-# itself lost the helper).
+# Fallback for the rare case where the wrapper isn't present (e.g.
+# extracted-archive install where SCRIPT_PARENT itself lost the helper):
+# mirror the M0 canonical default — <repo>/workspace/ anchored to
+# SCRIPT_PARENT — rather than any home-dir literal. ($SUTANDO_WORKSPACE is
+# deprecated post-#1440: the resolver ignores its value, so honoring it
+# only here would make the fallback DISAGREE with the helper it stands in
+# for.)
 if [ -f "$SCRIPT_PARENT/scripts/sutando-config.sh" ]; then
     WS_DIR="$(bash "$SCRIPT_PARENT/scripts/sutando-config.sh" workspace)"
 else
-    WS_DIR="${SUTANDO_WORKSPACE:-$HOME/sutando-workspace}"
+    WS_DIR="$SCRIPT_PARENT/workspace"
 fi
 # Disambiguation guard: if WS_DIR points at a public-repo checkout (a
 # legacy-shaped SUTANDO_WORKSPACE value, or — on truly broken installs —
