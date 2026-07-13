@@ -562,37 +562,6 @@ else
   export ANTHROPIC_BASE_URL=http://localhost:7846
 fi
 
-# 0a. Sutando.app OS-level supervisor (com.sutando.menubar launchd job).
-# The template (src/launchd/com.sutando.menubar.plist) sets RunAtLoad=true +
-# KeepAlive{Crashed, !SuccessfulExit}, so once loaded launchd relaunches the app
-# at login/boot AND restarts it on crash. The gap this closes: nothing installed
-# it on boot — startup.sh installed the credential-proxy job above but not this
-# one, so a fresh install / migration left the app with no OS-level watchdog. An
-# OS-update-forced reboot then left Sutando.app dead (macOS "reopen at login"
-# doesn't reliably fire after an update restart). #1294 shipped the supervisor
-# but not the auto-install; this wires it in.
-#
-# SKIP-IF-LOADED is load-bearing, not just an optimization: the installer does
-# `bootout` + `kickstart`, and when startup.sh runs as a child of the already-
-# supervised app, booting the service out would kill the running app (and this
-# very process). So we ONLY install when the service is absent — exactly the
-# fresh-install / post-migration case we need to cover. The normal already-loaded
-# path is a no-op.
-_APP_LABEL="com.sutando.menubar"
-_APP_INSTALLER="$REPO/src/install-sutando-app-launchd.sh"
-if [ -f "$_APP_INSTALLER" ] && [ -f "$REPO/src/launchd/$_APP_LABEL.plist" ]; then
-  if launchctl print "gui/$(id -u)/$_APP_LABEL" > /dev/null 2>&1; then
-    echo "  ✓ app supervisor (launchd-supervised, already loaded)"
-  else
-    echo "  Installing launchd-supervised app supervisor..."
-    if bash "$_APP_INSTALLER" install > /dev/null 2>&1; then
-      echo "  ✓ app supervisor (launchd-supervised) — survives reboot via RunAtLoad"
-    else
-      echo "  ⚠ app-supervisor launchd install failed — app will NOT auto-relaunch after reboot (see $WORKSPACE/logs/sutando-app-stderr.log)"
-    fi
-  fi
-fi
-
 # 0b. Obs collector (OPTIONAL — opt-in via SUTANDO_OBS_COLLECTOR=1).
 # The single, source-agnostic local collector: it receives Claude Code hooks
 # (and, later, voice / filewatcher / bridge events) on /ingest/<source>,
@@ -772,6 +741,28 @@ if [ -f "$SUT_SRC" ] && { [ ! -f "$SUT_BIN" ] || [ "$SUT_SRC" -nt "$SUT_BIN" ]; 
     # denies AppleEvents — getFinderSelection() returns [] and the ⌃C
     # drop handler logs "Nothing selected" with no permission prompt.
     SUT_APP="$REPO/src/Sutando/Sutando.app"
+    if [ ! -d "$SUT_APP" ]; then
+      # Fresh checkout (#2063): only main.swift/SutandoConfig.swift are tracked —
+      # no .app bundle exists in-tree. Create the minimal LSUIElement skeleton so
+      # the sync/sign below AND the launchd supervisor install further down have
+      # a real bundle binary to target; without this, both silently no-op until
+      # a second run after some external process makes the bundle.
+      mkdir -p "$SUT_APP/Contents/MacOS"
+      cat > "$SUT_APP/Contents/Info.plist" <<'SUTANDO_PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key><string>com.sutando.menubar</string>
+	<key>CFBundleName</key><string>Sutando</string>
+	<key>CFBundleExecutable</key><string>Sutando</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>LSUIElement</key><true/>
+</dict>
+</plist>
+SUTANDO_PLIST
+      echo "  ✓ Sutando.app bundle skeleton created (fresh checkout)"
+    fi
     if [ -d "$SUT_APP" ]; then
       cp "$SUT_BIN" "$SUT_APP/Contents/MacOS/Sutando"
       /usr/libexec/PlistBuddy \
@@ -824,6 +815,42 @@ if ! pgrep -f "src/Sutando/Sutando" > /dev/null 2>&1; then
   fi
 else
   echo "  ✓ Sutando (already running)"
+fi
+
+# Sutando.app OS-level supervisor (com.sutando.menubar launchd job).
+# ORDERING (qingyun's #2063 review): this block MUST run AFTER the Sutando
+# build/sync/open region above — on a fresh checkout the app binary does not
+# exist yet at the top of startup, and install-sutando-app-launchd.sh exits at
+# its binary check, so an early install attempt silently misses exactly the
+# fresh-install/post-migration case this exists to cover.
+# The template (src/launchd/com.sutando.menubar.plist) sets RunAtLoad=true +
+# KeepAlive{Crashed, !SuccessfulExit}, so once loaded launchd relaunches the app
+# at login/boot AND restarts it on crash. The gap this closes: nothing installed
+# it on boot — startup.sh installed the credential-proxy job above but not this
+# one, so a fresh install / migration left the app with no OS-level watchdog. An
+# OS-update-forced reboot then left Sutando.app dead (macOS "reopen at login"
+# doesn't reliably fire after an update restart). #1294 shipped the supervisor
+# but not the auto-install; this wires it in.
+#
+# SKIP-IF-LOADED is load-bearing, not just an optimization: the installer does
+# `bootout` + `kickstart`, and when startup.sh runs as a child of the already-
+# supervised app, booting the service out would kill the running app (and this
+# very process). So we ONLY install when the service is absent — exactly the
+# fresh-install / post-migration case we need to cover. The normal already-loaded
+# path is a no-op.
+_APP_LABEL="com.sutando.menubar"
+_APP_INSTALLER="$REPO/src/install-sutando-app-launchd.sh"
+if [ -f "$_APP_INSTALLER" ] && [ -f "$REPO/src/launchd/$_APP_LABEL.plist" ]; then
+  if launchctl print "gui/$(id -u)/$_APP_LABEL" > /dev/null 2>&1; then
+    echo "  ✓ app supervisor (launchd-supervised, already loaded)"
+  else
+    echo "  Installing launchd-supervised app supervisor..."
+    if bash "$_APP_INSTALLER" install > /dev/null 2>&1; then
+      echo "  ✓ app supervisor (launchd-supervised) — survives reboot via RunAtLoad"
+    else
+      echo "  ⚠ app-supervisor launchd install failed — app will NOT auto-relaunch after reboot (see $WORKSPACE/logs/sutando-app-stderr.log)"
+    fi
+  fi
 fi
 
 echo ""
