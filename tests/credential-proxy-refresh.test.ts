@@ -13,6 +13,7 @@ import {
 	keychainServiceCandidates,
 	nextRefreshBackoffMs,
 	parseRefreshResponse,
+	redactForLog,
 	scopedKeychainService,
 	shouldAttemptRefresh,
 } from '../skills/quota-tracker/scripts/credential-proxy.ts';
@@ -133,4 +134,32 @@ test('shouldAttemptRefresh: suppress the retry storm while inside the cooldown w
 	assert.equal(shouldAttemptRefresh(true, now + 29_999, nextAllowed), false);
 	// ...until the window elapses.
 	assert.equal(shouldAttemptRefresh(true, nextAllowed, nextAllowed), true);
+});
+
+test('redactForLog: surfaces the real token-endpoint error (invalid_grant)', () => {
+	const out = redactForLog(JSON.stringify({ error: 'invalid_grant', error_description: 'refresh token expired' }));
+	assert.ok(out.includes('invalid_grant'), out);
+	assert.ok(out.includes('refresh token expired'), out);
+});
+
+test('redactForLog: masks any long token-like string (never log a secret)', () => {
+	const jwt = 'eyJhbGciOiJIUzI1NiJ9.' + 'a'.repeat(60) + '.' + 'b'.repeat(40);
+	const out = redactForLog(`{"error":"x","access_token":"${jwt}"}`);
+	assert.ok(!out.includes(jwt), out);
+	assert.ok(out.includes('[redacted]'), out);
+	assert.ok(out.includes('error'), out); // non-secret error field still visible
+});
+
+test('redactForLog: empty/whitespace body → explicit marker (not blank)', () => {
+	assert.equal(redactForLog(''), '(empty body)');
+	assert.equal(redactForLog('   '), '(empty body)');
+});
+
+test('redactForLog: truncates an over-long body', () => {
+	// Many short words (each < 20 chars, so none get redacted away) → the body
+	// stays long and must be truncated to the cap.
+	const longBody = ('err bad grant no ').repeat(40); // ~680 chars, all short tokens
+	const out = redactForLog(longBody, 300);
+	assert.ok(out.length <= 300 + '…(truncated)'.length, String(out.length));
+	assert.ok(out.endsWith('…(truncated)'));
 });

@@ -180,6 +180,18 @@ function writeCred(service: string, oauth: ClaudeOAuth): boolean {
 // access token that isn't a plausible non-empty string (never write garbage).
 // Exported so this — the highest-risk logic (field names + the guard) — is
 // unit-tested offline: no network, no keychain, no token rotation.
+// Redact + truncate an upstream response body before it goes to the log.
+// The OAuth token-endpoint ERROR body (e.g. `{"error":"invalid_grant",...}`)
+// is what we want to see when a refresh 400s — but never risk emitting a
+// token if one ever appears: mask any long token-like run (20+ base64url/JWT
+// chars, incl. dotted JWTs) and cap the length. Exported for offline testing.
+export function redactForLog(bodyText: string, max: number = 300): string {
+	const trimmed = (bodyText ?? '').trim();
+	if (!trimmed) return '(empty body)';
+	const redacted = trimmed.replace(/[A-Za-z0-9_-]{20,}(?:\.[A-Za-z0-9_-]{10,}){0,2}/g, '[redacted]');
+	return redacted.length > max ? redacted.slice(0, max) + '…(truncated)' : redacted;
+}
+
 export function parseRefreshResponse(
 	statusCode: number,
 	bodyText: string,
@@ -222,8 +234,15 @@ function refreshAccessToken(oauth: ClaudeOAuth): Promise<ClaudeOAuth | null> {
 			const cs: Buffer[] = [];
 			resp.on('data', (c) => cs.push(c));
 			resp.on('end', () => {
-				const fresh = parseRefreshResponse(resp.statusCode ?? 0, Buffer.concat(cs).toString('utf-8'), oauth);
-				if (!fresh) console.error(`${ts()} [Proxy] refresh unusable (HTTP ${resp.statusCode} or bad/empty response)`);
+				const rawBody = Buffer.concat(cs).toString('utf-8');
+				const fresh = parseRefreshResponse(resp.statusCode ?? 0, rawBody, oauth);
+				// Instrument the ACTUAL upstream failure. Previously this masked
+				// every failure as "HTTP N or bad/empty response", so a recurring
+				// refresh 400 (the fb556dd6 crash-loop root cause) was undiagnosable
+				// — "bad/empty response" hid the real token-endpoint error. Log the
+				// redacted+truncated body so the actual `error`/`error_description`
+				// is visible in credential-proxy.log.
+				if (!fresh) console.error(`${ts()} [Proxy] refresh unusable (HTTP ${resp.statusCode}): ${redactForLog(rawBody)}`);
 				resolve(fresh);
 			});
 		});
