@@ -521,8 +521,9 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
     # Only injected for owner tasks when the referenced skills are installed.
     # Use claude_home_path() — honours $CLAUDE_CONFIG_DIR → $CLAUDE_HOME → ~/.claude
     # resolution order (inline os.environ.get misses the $CLAUDE_HOME fallback).
-    _notify_py = claude_home_path("skills", "task-progress", "scripts", "notify.py")  # pragma: no cover
-    _transcribe_py = claude_home_path("skills", "audio-transcribe", "scripts", "transcribe.py")  # pragma: no cover
+    # Behaviorally covered by tests/bridge-skill-path-resolution.test.py (CLAUDE_CONFIG_DIR resolution).
+    _notify_py = claude_home_path("skills", "task-progress", "scripts", "notify.py")
+    _transcribe_py = claude_home_path("skills", "audio-transcribe", "scripts", "transcribe.py")
     skill_hints = ""
     if access_tier == "owner" and (_notify_py.exists() or _transcribe_py.exists()):
         hints_lines = ["===SKILL INSTRUCTIONS (follow before any other action)==="]
