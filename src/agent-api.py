@@ -116,6 +116,12 @@ RESULT_DIR.mkdir(exist_ok=True)
 # In-memory task history (survives file cleanup, lost on restart)
 # {task_id: {status, text, time, result}}
 task_history = {}
+# ThreadingHTTPServer runs each request on its own thread, so every
+# read-modify-write of the module-global task_history (GET /tasks/active
+# rebuild + stale-entry cleanup, POST /task-done) must hold this lock or
+# concurrent requests interleave and lose/reorder task state (#1855 review,
+# qingyun-wu).
+_task_history_lock = threading.Lock()
 
 # Voice state: "connected" or "disconnected". Toggled via /voice/toggle.
 # Web client polls /voice/state and connects/disconnects accordingly.
@@ -404,79 +410,80 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # List active tasks + system status for the web client
             watcher_ok = subprocess.run(["/usr/bin/pgrep", "-f", "watch-tasks"], capture_output=True).returncode == 0
             claude_ok = subprocess.run(["/usr/bin/pgrep", "-f", "claude.*sutando-core"], capture_output=True).returncode == 0
-            # Scan disk for active tasks, update history (preserve existing text)
-            for f in sorted(TASK_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]:
-                task_id = f.stem
-                content = f.read_text()
-                task_line = ""
-                source_line = ""
-                # Capture the first `source:` and first `task:` regardless of
-                # field order — voice/chat tasks put `source:` before `task:`,
-                # but discord/slack tasks put `task:` first. The `not …` guards
-                # keep the real header `source:` from being overridden by any
-                # `source:` line inside the task body (#1781 review, sonichi).
-                for line in content.splitlines():
-                    if not source_line and line.startswith("source:"):
-                        source_line = line[7:].strip()
-                    elif not task_line and line.startswith("task:"):
-                        task_line = line[5:].strip()
-                    if task_line and source_line:
-                        break
-                result_file = RESULT_DIR / f.name
-                existing = task_history.get(task_id, {})
-                # Look for the result in three places, in priority order:
-                # (1) live results/ dir, (2) prior in-memory history (covers
-                # the case where the bridge has already archived the file),
-                # (3) results/archive/<YYYY-MM>/. Without (3), an agent-api
-                # restart loses every prior task's result and the web UI
-                # shows them all as "working" with no body.
-                archived_file = None
-                for month_dir in (RESULT_DIR / "archive").glob("*/"):
-                    candidate = month_dir / f.name
-                    if candidate.exists():
-                        archived_file = candidate
-                        break
-                if result_file.exists():
-                    status = "done"
-                    result_text = result_file.read_text().strip()
-                elif existing.get("status") == "done" or existing.get("result"):
-                    status = "done"
-                    result_text = existing.get("result", "")
-                elif archived_file is not None:
-                    status = "done"
-                    result_text = archived_file.read_text().strip()
-                else:
-                    status = "working"
-                    result_text = ""
-                task_history[task_id] = {"status": status, "text": task_line or existing.get("text", task_id), "time": f.stat().st_mtime, "result": result_text, "source": source_line or existing.get("source", "")}
-            # Also check for result files without task files (already cleaned up)
-            for f in sorted(RESULT_DIR.glob("task-*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]:
-                task_id = f.stem
-                if task_id not in task_history:
-                    result_content = f.read_text().strip()
-                    display_text = result_content.split('\n')[0][:80] if result_content else task_id
-                    task_history[task_id] = {"status": "done", "text": display_text, "time": f.stat().st_mtime, "result": result_content}
-                elif task_history[task_id].get("status") != "done":
-                    task_history[task_id]["status"] = "done"
-                    task_history[task_id]["result"] = f.read_text().strip()
-            # Reconcile stale entries: if task file is gone and result exists, mark done;
-            # if task file is gone, no result, and older than 5 min, remove from history
-            import time as _time
-            stale_ids = []
-            for tid, tdata in list(task_history.items()):
-                if tdata.get("status") == "working":
-                    task_file = TASK_DIR / f"{tid}.txt"
-                    result_file = RESULT_DIR / f"{tid}.txt"
+            with _task_history_lock:
+                # Scan disk for active tasks, update history (preserve existing text)
+                for f in sorted(TASK_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]:
+                    task_id = f.stem
+                    content = f.read_text()
+                    task_line = ""
+                    source_line = ""
+                    # Capture the first `source:` and first `task:` regardless of
+                    # field order — voice/chat tasks put `source:` before `task:`,
+                    # but discord/slack tasks put `task:` first. The `not …` guards
+                    # keep the real header `source:` from being overridden by any
+                    # `source:` line inside the task body (#1781 review, sonichi).
+                    for line in content.splitlines():
+                        if not source_line and line.startswith("source:"):
+                            source_line = line[7:].strip()
+                        elif not task_line and line.startswith("task:"):
+                            task_line = line[5:].strip()
+                        if task_line and source_line:
+                            break
+                    result_file = RESULT_DIR / f.name
+                    existing = task_history.get(task_id, {})
+                    # Look for the result in three places, in priority order:
+                    # (1) live results/ dir, (2) prior in-memory history (covers
+                    # the case where the bridge has already archived the file),
+                    # (3) results/archive/<YYYY-MM>/. Without (3), an agent-api
+                    # restart loses every prior task's result and the web UI
+                    # shows them all as "working" with no body.
+                    archived_file = None
+                    for month_dir in (RESULT_DIR / "archive").glob("*/"):
+                        candidate = month_dir / f.name
+                        if candidate.exists():
+                            archived_file = candidate
+                            break
                     if result_file.exists():
-                        tdata["status"] = "done"
-                        tdata["result"] = result_file.read_text().strip()
-                    elif not task_file.exists() and _time.time() - tdata.get("time", 0) > 300:
-                        stale_ids.append(tid)
-            for tid in stale_ids:
-                del task_history[tid]
-            # Return most recent 10 from history
-            sorted_tasks = sorted(task_history.items(), key=lambda x: x[1].get("time", 0), reverse=True)[:10]
-            tasks = [{"id": tid, **tdata} for tid, tdata in sorted_tasks]
+                        status = "done"
+                        result_text = result_file.read_text().strip()
+                    elif existing.get("status") == "done" or existing.get("result"):
+                        status = "done"
+                        result_text = existing.get("result", "")
+                    elif archived_file is not None:
+                        status = "done"
+                        result_text = archived_file.read_text().strip()
+                    else:
+                        status = "working"
+                        result_text = ""
+                    task_history[task_id] = {"status": status, "text": task_line or existing.get("text", task_id), "time": f.stat().st_mtime, "result": result_text, "source": source_line or existing.get("source", "")}
+                # Also check for result files without task files (already cleaned up)
+                for f in sorted(RESULT_DIR.glob("task-*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]:
+                    task_id = f.stem
+                    if task_id not in task_history:
+                        result_content = f.read_text().strip()
+                        display_text = result_content.split('\n')[0][:80] if result_content else task_id
+                        task_history[task_id] = {"status": "done", "text": display_text, "time": f.stat().st_mtime, "result": result_content}
+                    elif task_history[task_id].get("status") != "done":
+                        task_history[task_id]["status"] = "done"
+                        task_history[task_id]["result"] = f.read_text().strip()
+                # Reconcile stale entries: if task file is gone and result exists, mark done;
+                # if task file is gone, no result, and older than 5 min, remove from history
+                import time as _time
+                stale_ids = []
+                for tid, tdata in list(task_history.items()):
+                    if tdata.get("status") == "working":
+                        task_file = TASK_DIR / f"{tid}.txt"
+                        result_file = RESULT_DIR / f"{tid}.txt"
+                        if result_file.exists():
+                            tdata["status"] = "done"
+                            tdata["result"] = result_file.read_text().strip()
+                        elif not task_file.exists() and _time.time() - tdata.get("time", 0) > 300:
+                            stale_ids.append(tid)
+                for tid in stale_ids:
+                    del task_history[tid]
+                # Return most recent 10 from history
+                sorted_tasks = sorted(task_history.items(), key=lambda x: x[1].get("time", 0), reverse=True)[:10]
+                tasks = [{"id": tid, **tdata} for tid, tdata in sorted_tasks]
             # Parse pending questions
             questions = []
             pq_file = Path(personal_path("pending-questions.md", WORKSPACE_DIR))
@@ -852,11 +859,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 data = json.loads(body)
                 tid = data.get("taskId", "")
                 result = data.get("result", "")
-                if tid in task_history:
-                    task_history[tid]["status"] = "done"
-                    task_history[tid]["result"] = result
-                else:
-                    task_history[tid] = {"status": "done", "text": result[:80], "time": datetime.now().timestamp(), "result": result}
+                with _task_history_lock:
+                    if tid in task_history:
+                        task_history[tid]["status"] = "done"
+                        task_history[tid]["result"] = result
+                    else:
+                        task_history[tid] = {"status": "done", "text": result[:80], "time": datetime.now().timestamp(), "result": result}
                 self.send_json(200, {"ok": True})
             except Exception:
                 self.send_json(400, {"error": "invalid"})
