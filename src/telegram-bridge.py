@@ -23,6 +23,15 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
+# startup.sh redirects stdout to a log file, which makes CPython block-buffer
+# it — diagnostic prints (e.g. api()'s "API error ..." lines) sit invisible in
+# the buffer for hours, and SIGTERM kills the process without flushing, losing
+# them entirely. Both silent-wedge incidents (2026-06-15 TLS, 2026-07-05 stale
+# heartbeat) had empty logs for exactly this reason. Line-buffer so every
+# print lands in the log as it happens.
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 # Vision-frame helper — pushes the latest photo into the active voice session
 # so Gemini can react in-stream. No-op when voice isn't connected. Import is
 # best-effort so the bridge keeps booting if vision_push.py is missing.
