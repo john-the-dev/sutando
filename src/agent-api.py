@@ -354,6 +354,11 @@ def fire_webhook(task_id: str, result: str) -> None:
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    # Drop connections that go silent (e.g. a client that opens TCP and never
+    # sends a request line). Without this, readline() in handle_one_request
+    # blocks forever holding a server thread. Same guard as dashboard (#1709).
+    timeout = 30
+
     def log_message(self, format, *args):
         pass
 
@@ -1059,7 +1064,12 @@ def _resolve_local_ip() -> str:
 
 if __name__ == "__main__":
     bind = os.environ.get("AGENT_API_BIND", "127.0.0.1")
-    server = http.server.HTTPServer((bind, PORT), Handler)
+    # ThreadingHTTPServer: the single-threaded HTTPServer wedged whenever one
+    # client stalled mid-request or a handler ran a slow subprocess/urlopen —
+    # every later request hung on a port that still looked open to startup.sh's
+    # lsof guard, so nothing restarted it (2026-07-04 incident; same fix as
+    # dashboard, #1709).
+    server = http.server.ThreadingHTTPServer((bind, PORT), Handler)
     local_ip = _resolve_local_ip()
     print(f"Sutando Agent API → http://{bind}:{PORT}")
     print(f"  POST /task  — submit a task")
