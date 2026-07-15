@@ -301,7 +301,7 @@ The menu bar also has **Open Core** (brings up the Claude Code terminal) and **O
 
 On first run:
 1. Grant **Accessibility** permission to the Sutando app in System Settings → Privacy & Security
-2. Enable **Allow JavaScript from Apple Events** in Chrome: View → Developer → Allow JavaScript from Apple Events (required for ⌃V voice toggle)
+2. Enable **Allow JavaScript from Apple Events** in Chrome: View → Developer → Allow JavaScript from Apple Events (required for the **Toggle Voice** hotkey — default ⌃V, see [Keyboard shortcuts](#keyboard-shortcuts))
 
 The binary auto-compiles on `startup.sh` if missing. To compile manually: `cd src/Sutando && swiftc -O -o Sutando main.swift -framework Cocoa -framework Carbon -framework ApplicationServices`
 
