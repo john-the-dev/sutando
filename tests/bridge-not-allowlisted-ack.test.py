@@ -44,9 +44,12 @@ def _load_discord():
     d.Thread = type("Thread", (), {})
     d.AllowedMentions = lambda **k: None
     sys.modules["discord"] = d
-    envd = Path.home() / ".claude" / "channels" / "discord"; env = envd / ".env"
-    if not env.exists():
-        envd.mkdir(parents=True, exist_ok=True); env.write_text("DISCORD_BOT_TOKEN=test-stub-token\n")
+    # Inject the token via the process env (discord-bridge reads DISCORD_BOT_TOKEN
+    # env-var-first and skips the .env file when it's set — see src/discord-bridge.py
+    # ~L197/L209). Mirrors _load_slack below. NEVER seed the real
+    # ~/.claude/channels/discord/.env — that mutates the contributor's live config
+    # at import time (CR: qingyun-wu, #2109).
+    os.environ.setdefault("DISCORD_BOT_TOKEN", "test-stub-token")
     src = (REPO / "src" / "discord-bridge.py").read_text()
     spec = importlib.util.spec_from_loader("dbridge_ack", loader=None)
     b = importlib.util.module_from_spec(spec); b.__file__ = str(REPO / "src" / "discord-bridge.py")
