@@ -94,3 +94,40 @@ PY
 ```
 
 Test: `python3 tests/gmail-write-guard.test.py`.
+
+## `correct-method-guard.py`
+
+Denies the **wrong Google integrations** and redirects to the documented paths
+(recurring field report 64340119 / 14015ea1, michael@actoneventures.com,
+team-wide): **Google Drive MCP** → the Drive **service account**; the **Gmail MCP
+connector** (which exposes no attachment-download method) → **IMAP** via
+`X-GM-MSGID` + the vaulted `GMAIL_APP_PASSWORD`. Written rules kept failing
+because they depend on the model recalling them at tool-selection time — one such
+memory was even stranded in a backup tree and never loaded — so this removes the
+wrong tool from the menu the same way `gmail-write-guard.py` does for writes.
+Matches Google Drive MCP tools by name (`google_drive`/`gdrive`) and Gmail via
+the Composio bridge (`composio_exec`/`composio_find` with `toolkit=gmail`); other
+toolkits (googlecalendar, slack, …) and non-Google tools are a no-op, so it is
+safe under a broad `mcp__.*` matcher.
+
+Escape hatch: `SUTANDO_ALLOW_GOOGLE_CONNECTORS=1` lifts the guard (installs where
+the connectors work, or where the service-account / IMAP creds aren't
+provisioned). Fail-OPEN on hook errors.
+
+### Deploy (per node)
+
+```bash
+cp hooks/correct-method-guard.py ~/.claude/hooks/
+python3 - <<'PY'
+import json, os
+sp = os.path.expanduser("~/.claude/settings.json"); s = json.load(open(sp))
+cmd = "python3 ~/.claude/hooks/correct-method-guard.py"
+pre = s.setdefault("hooks", {}).setdefault("PreToolUse", [])
+blk = next((b for b in pre if b.get("matcher") == "mcp__.*"), None)
+if blk is None: pre.append({"matcher": "mcp__.*", "hooks": [{"type": "command", "command": cmd}]})
+elif cmd not in [h.get("command") for h in blk["hooks"]]: blk["hooks"].append({"type": "command", "command": cmd})
+json.dump(s, open(sp, "w"), indent=2)
+PY
+```
+
+Test: `python3 tests/correct-method-guard.test.py`.
