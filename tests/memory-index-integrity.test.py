@@ -69,6 +69,15 @@ with tempfile.TemporaryDirectory() as t:
     hc.MEMORY_DIR = Path(t) / "does-not-exist" / "memory"
     check("missing dir → None", hc.check_memory_index_integrity() is None)
 
+# 5) The probe is wired into run_all_checks() — a memory-index entry appears.
+with tempfile.TemporaryDirectory() as t:
+    mem = make_tree(Path(t))
+    (mem / "MEMORY.md").write_text("# Index\n- [Orphan check](orphan.md)\n")
+    (mem / "orphan.md").write_text("x")
+    hc.MEMORY_DIR = mem
+    names = [c.get("name") for c in hc.run_all_checks()]
+    check("run_all_checks() includes memory-index", "memory-index" in names, str(names))
+
 print()
 if _failed:
     print(f"FAIL — {_failed} check(s) failed"); sys.exit(1)

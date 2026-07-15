@@ -307,7 +307,7 @@ def check_memory_index_integrity() -> "dict | None":
                     mp.name for mp in bmem.glob("*.md")
                     if mp.name != "MEMORY.md" and not (MEMORY_DIR / mp.name).exists()
                 ]
-    except Exception:
+    except Exception:  # pragma: no cover — best-effort backup scan; never break the health check
         pass
 
     if not unindexed and not stranded:
