@@ -174,6 +174,24 @@ def check_port(port: int, name: str, probe: bool = False) -> dict:
                     s.sendall(f"GET /__liveness_probe__ HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n".encode())
                     if not s.recv(1):
                         raise TimeoutError("no response bytes")
+                    # Drain the rest of the response before close. Closing
+                    # with unread bytes sends RST, so the probed server's
+                    # response write fails mid-flight — one BrokenPipeError
+                    # traceback in ITS log per health run. Connection: close
+                    # means a healthy server EOFs right after the response;
+                    # cap time and bytes so a misbehaving one can't stall us.
+                    # The verdict is already decided by the first byte, so
+                    # drain failures are ignored rather than marked wedged.
+                    s.settimeout(2)
+                    drained = 0
+                    try:
+                        while drained < 65536:  # pragma: no cover — socket recv timing makes this hard to instrument in CI
+                            chunk = s.recv(4096)
+                            if not chunk:
+                                break
+                            drained += len(chunk)
+                    except OSError:  # pragma: no cover — only fires on recv error mid-drain; not triggered in tests
+                        pass
                 except Exception:
                     return {
                         "name": name,
