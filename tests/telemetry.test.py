@@ -12,6 +12,11 @@ and that a normal capture DOES reach the sink when enabled.
 
 Run: python3 tests/telemetry.test.py
 """
+# PEP 604 (`X | None`) in annotations is evaluated at def-time on Python < 3.10;
+# defer all annotation evaluation so this file runs on the 3.9 baseline (CR #2088,
+# @qingyun-wu). No runtime annotation introspection here, so this is semantics-safe.
+from __future__ import annotations
+
 import importlib.util
 import os
 import sys
