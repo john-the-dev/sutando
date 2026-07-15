@@ -511,10 +511,11 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
         # Keep _TOFU_ENROLLMENT_CODE valid for the process lifetime (do NOT clear
         # it) so the gate stays armed if access.json is deleted externally later
         # (#899), instead of falling through to an unguarded tofu_onboard().
+    # Every _write_task call is a DM (handle_message) or an @mention
+    # (handle_mention), so a non-allowlisted sender here DID address the bot —
+    # ack them (rate-limited) before the fail-closed drop so it isn't silent.
     if user_id not in allowed:
         print(f"  Dropped message from non-allowed user {user_id}", flush=True)
-        # Every _write_task call is a DM or an @mention → the sender addressed
-        # the bot; ack them (rate-limited) so the drop isn't silent.
         _ack_not_allowlisted(event, user_id)
         return None
 

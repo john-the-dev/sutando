@@ -41,6 +41,8 @@ def _load_discord():
     d.File = lambda *a, **k: None
     class _DM: pass
     d.DMChannel = _DM
+    d.Thread = type("Thread", (), {})
+    d.AllowedMentions = lambda **k: None
     sys.modules["discord"] = d
     envd = Path.home() / ".claude" / "channels" / "discord"; env = envd / ".env"
     if not env.exists():
@@ -68,6 +70,79 @@ def test_discord():
     check("discord: repeat from same sender is rate-limited (no echo)", len(ch.sent) == 1, str(ch.sent))
     asyncio.run(db._ack_not_allowlisted(ch, "U_B", "bob"))
     check("discord: a different sender is not rate-limited", len(ch.sent) == 2, str(ch.sent))
+
+    # Integration: drive the real _handle_discord_message DM path so a
+    # non-allowlisted DM reaches the drop AND fires the ack (covers the wiring).
+    import discord as _dsm
+
+    class _FakeUser:
+        def __init__(self, uid, bot=False): self.id = uid; self.bot = bot
+        def __str__(self): return f"user{self.id}"
+        def __eq__(self, o): return isinstance(o, _FakeUser) and o.id == self.id
+        def __hash__(self): return hash(self.id)
+
+    class _FakeDM(_dsm.DMChannel):
+        def __init__(self, cid): self.id = cid; self.sent = []
+        async def send(self, text, **kw): self.sent.append(text)
+
+    class _FakeMsg:
+        def __init__(self, author, channel, content):
+            self.author = author; self.channel = channel; self.content = content
+            self.mentions = []; self.role_mentions = []; self.id = 12345
+            self.type = _dsm.MessageType.default; self.reference = None
+            self.embeds = []; self.guild = None; self.message_snapshots = []
+
+    async def _noop(*a, **k): return None
+    db._observe_for_mod = _noop            # unrelated mod hook
+    db._update_dm_checkpoint = lambda *a, **k: None
+    db.client.user = _FakeUser("BOT", bot=True)
+    db._not_allowlisted_ack_at.clear()
+    db.ACCESS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    db.ACCESS_FILE.write_text(json.dumps({"dmPolicy": "allowlist", "allowFrom": ["U_OWNER"]}))
+    dm = _FakeDM(999)
+    asyncio.run(db._handle_discord_message(_FakeMsg(_FakeUser("U_STRANGER"), dm, "hi")))
+    check("discord: _handle_discord_message DM drop fires the ack", len(dm.sent) == 1, str(dm.sent))
+
+    # Channel @mention drops → ack (covers the two channel wiring points).
+    class _FakeGuild:
+        def __init__(self, gid): self.id = gid
+        def get_member(self, uid): return None
+
+    class _FakeChan:
+        def __init__(self, cid, name="general"): self.id = cid; self.name = name; self.sent = []
+        async def send(self, text, **kw): self.sent.append(text)
+
+    def _chan_msg(uid, chan, guild):
+        m = _FakeMsg(_FakeUser(uid), chan, "hey @bot")
+        m.guild = guild
+        m.mentions = [db.client.user]  # @mention → bot_mentioned
+        return m
+
+    g = _FakeGuild(1)
+    # (a) unconfigured channel, sender not in global allowlist, @mentioned → ack
+    db._not_allowlisted_ack_at.clear()
+    db.ACCESS_FILE.write_text(json.dumps({"dmPolicy": "allowlist", "allowFrom": ["U_OWNER"]}))
+    c1 = _FakeChan(555)
+    asyncio.run(db._handle_discord_message(_chan_msg("U_S1", c1, g)))
+    check("discord: channel @mention, unconfigured + not in global allowlist → ack", len(c1.sent) == 1, str(c1.sent))
+    # (b) configured channel whose allowFrom excludes the sender, @mentioned → ack
+    db._not_allowlisted_ack_at.clear()
+    db.ACCESS_FILE.write_text(json.dumps({"dmPolicy": "allowlist", "allowFrom": ["U_OWNER"],
+        "groups": {"777": {"requireMention": True, "allowFrom": ["U_OWNER"]}}}))
+    c2 = _FakeChan(777)
+    asyncio.run(db._handle_discord_message(_chan_msg("U_S2", c2, g)))
+    check("discord: channel @mention, channel allowlist excludes sender → ack", len(c2.sent) == 1, str(c2.sent))
+
+    # send failure is swallowed (covers the except branch)
+    class _BoomChan:
+        id = 888
+        async def send(self, *a, **k): raise RuntimeError("boom")
+    db._not_allowlisted_ack_at.clear()
+    try:
+        asyncio.run(db._ack_not_allowlisted(_BoomChan(), "U_BOOM", "boom"))
+        check("discord: a send failure in the ack is swallowed (no raise)", True)
+    except Exception as e:
+        check("discord: a send failure in the ack is swallowed (no raise)", False, repr(e))
 
 
 # ─────────────────────────── Slack ───────────────────────────
@@ -122,6 +197,16 @@ def test_slack():
         check("slack: _write_task fired the ack on drop", len(sb.app.client.posts) == 1, str(sb.app.client.posts))
     except Exception as e:
         check("slack: _write_task drop-path exercised", False, repr(e))
+
+    # send failure is swallowed (covers the slack except branch)
+    def _boom(**kw): raise RuntimeError("boom")
+    sb.app.client.chat_postMessage = _boom
+    sb._not_allowlisted_ack_at.clear()
+    try:
+        sb._ack_not_allowlisted({"channel": "D1", "channel_type": "im", "ts": "9.9"}, "U_BOOM")
+        check("slack: a send failure in the ack is swallowed (no raise)", True)
+    except Exception as e:
+        check("slack: a send failure in the ack is swallowed (no raise)", False, repr(e))
 
 
 if __name__ == "__main__":
