@@ -903,6 +903,16 @@ def main():  # pragma: no cover
                     access_tier=pending_task_tiers[task_id],
                     data={"task_id": task_id, "has_attachment": bool(attachment_note)},
                 )
+                # Anonymous, opt-out product telemetry: one bucketed event per
+                # accepted task, tagged only with the inbound surface. No-op when
+                # opted out / no key; never task content or ids. See
+                # src/telemetry.py + TELEMETRY.md.
+                try:  # pragma: no cover — fire-and-forget; logic tested in tests/telemetry.test.py
+                    from telemetry import task_processed  # sibling module (src/ on sys.path)
+
+                    task_processed("telegram")
+                except Exception:  # pragma: no cover — telemetry must never break the bridge
+                    pass
 
                 # Send typing indicator
                 api("sendChatAction", chat_id=chat_id, action="typing")
