@@ -61,6 +61,12 @@ class _FakeChannel:
 
 def test_discord():
     db = _load_discord()
+    # CRITICAL: redirect ACCESS_FILE to a throwaway temp path so this test can
+    # NEVER read/write the REAL ~/.claude/channels/discord/access.json. Every
+    # reader (load_allowed / load_channel_config / the handler) uses this module
+    # global, so reassigning it fully isolates the test. (Regression guard: an
+    # earlier version wrote placeholder allowlists straight to the live file.)
+    db.ACCESS_FILE = Path(tempfile.mkdtemp(prefix="sutando-ack-dtest-")) / "access.json"
     db._not_allowlisted_ack_at.clear()
     ch = _FakeChannel()
     asyncio.run(db._ack_not_allowlisted(ch, "U_A", "alice"))
@@ -170,6 +176,8 @@ def _load_slack():
 
 def test_slack():
     sb = _load_slack()
+    # CRITICAL: isolate ACCESS_FILE from the real slack access.json (see test_discord).
+    sb.ACCESS_FILE = Path(tempfile.mkdtemp(prefix="sutando-ack-stest-")) / "access.json"
     sb._not_allowlisted_ack_at.clear()
     dm_event = {"channel": "D123", "channel_type": "im", "ts": "1.1"}
     sb._ack_not_allowlisted(dm_event, "U_A")
@@ -185,8 +193,7 @@ def test_slack():
 
     # End-to-end drop path: _write_task for a non-allowlisted user acks + writes no task.
     sb._not_allowlisted_ack_at.clear(); sb.app.client.posts.clear()
-    # Configure access.json with an allowlist that EXCLUDES our sender.
-    acc = Path(os.environ["CLAUDE_CONFIG_DIR"]) if os.environ.get("CLAUDE_CONFIG_DIR") else None
+    # Configure the (temp) access.json with an allowlist that EXCLUDES our sender.
     try:
         access_path = sb.ACCESS_FILE
         access_path.parent.mkdir(parents=True, exist_ok=True)
