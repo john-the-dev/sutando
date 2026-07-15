@@ -47,6 +47,12 @@ from typing import Optional
 SRC_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SRC_DIR))
 
+# Defang any header-field-/fence-like line a crons.json `prompt` body might
+# contain before it is interpolated into the emitted task file's `task:` field
+# (same guard the channel bridges apply). Belt-and-suspenders with `task:` being
+# last: confine_user_content() neutralizes forged fields even in a multi-line body.
+from task_body_guard import confine_user_content  # noqa: E402
+
 try:
     from workspace_default import resolve_workspace  # type: ignore
     WORKSPACE = Path(resolve_workspace())
@@ -181,8 +187,10 @@ def emit_task(name: str, entry: dict) -> Path:
         body_task = entry.get("prompt", "")
     safe_name = _sanitize_name(name)
     task_id = f"task-cron-{safe_name}-{now_ms}"
-    # `task:` is last so a multi-line prompt body cannot forge the structured
+    # Defang forged header/fence lines in the (config-supplied) body, then place
+    # `task:` last so a multi-line prompt body cannot forge the structured
     # header fields above it (source, user_id, access_tier, priority).
+    body_task = confine_user_content(body_task)
     body = (
         f"id: {task_id}\n"
         f"timestamp: {ts_iso}\n"
