@@ -10,12 +10,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import {
+	firstUsableCandidate,
 	keychainServiceCandidates,
 	nextRefreshBackoffMs,
 	parseRefreshResponse,
 	redactForLog,
 	scopedKeychainService,
 	shouldAttemptRefresh,
+	tokenHardExpired,
 } from '../skills/quota-tracker/scripts/credential-proxy.ts';
 
 const base = { accessToken: 'old-access', refreshToken: 'old-refresh', expiresAt: 1000 };
@@ -162,4 +164,39 @@ test('redactForLog: truncates an over-long body', () => {
 	const out = redactForLog(longBody, 300);
 	assert.ok(out.length <= 300 + '…(truncated)'.length, String(out.length));
 	assert.ok(out.endsWith('…(truncated)'));
+});
+
+// --- doomed-token fallback (candidate selection when a scoped token is
+// expired-and-unrefreshable, e.g. the recurring 401 loop cured manually by
+// deleting the scoped keychain entry) ---
+
+test('tokenHardExpired: at/before now → true; future or missing expiresAt → false', () => {
+	assert.equal(tokenHardExpired({ accessToken: A, expiresAt: 100 }, 100), true);  // == now
+	assert.equal(tokenHardExpired({ accessToken: A, expiresAt: 99 }, 100), true);   // before now
+	assert.equal(tokenHardExpired({ accessToken: A, expiresAt: 101 }, 100), false); // future
+	assert.equal(tokenHardExpired({ accessToken: A }, 100), false);                 // unknown → usable
+});
+
+const scopedSvc = 'Claude Code-credentials-c365fc51';
+const defaultSvc = 'Claude Code-credentials';
+const cand = (service: string, expiresAt?: number) => ({ service, oauth: { accessToken: A, refreshToken: 'r', expiresAt } });
+
+test('firstUsableCandidate: expired scoped + valid default → picks default (the auto delete-scoped workaround)', () => {
+	const picked = firstUsableCandidate([cand(scopedSvc, 50), cand(defaultSvc, 999)], 100);
+	assert.equal(picked?.service, defaultSvc);
+});
+
+test('firstUsableCandidate: healthy scoped is preferred (first non-expired wins)', () => {
+	const picked = firstUsableCandidate([cand(scopedSvc, 999), cand(defaultSvc, 999)], 100);
+	assert.equal(picked?.service, scopedSvc);
+});
+
+test('firstUsableCandidate: excludeService skips the just-failed scoped item', () => {
+	const picked = firstUsableCandidate([cand(scopedSvc, 999), cand(defaultSvc, 999)], 100, scopedSvc);
+	assert.equal(picked?.service, defaultSvc);
+});
+
+test('firstUsableCandidate: all hard-expired → null (caller keeps existing behavior)', () => {
+	assert.equal(firstUsableCandidate([cand(scopedSvc, 10), cand(defaultSvc, 20)], 100), null);
+	assert.equal(firstUsableCandidate([], 100), null);
 });

@@ -109,6 +109,31 @@ export function keychainServiceCandidates(configDir = process.env.CLAUDE_CONFIG_
 	return [...new Set(services)];
 }
 
+// A keychain OAuth entry is "hard-expired" once its access token's expiry is at
+// or before now — serving it guarantees an upstream 401. No `expiresAt` → we
+// can't tell, so treat as usable (matches the rest of this file's lenient reads).
+export function tokenHardExpired(oauth: ClaudeOAuth, now: number): boolean {
+	return typeof oauth.expiresAt === 'number' && oauth.expiresAt <= now;
+}
+
+// Pure candidate selection for the doomed-token fallback. Given the ordered
+// keychain candidates already read (scoped first, then default), return the
+// first that is NOT hard-expired, optionally skipping one service. This is the
+// automatic equivalent of the manual "delete the scoped entry" workaround: when
+// a scoped token is expired and unrefreshable, a still-valid default entry (kept
+// fresh by interactive `/login`) is preferred over serving a guaranteed-401 token.
+export function firstUsableCandidate(
+	candidates: StoredClaudeOAuth[],
+	now: number,
+	excludeService?: string,
+): StoredClaudeOAuth | null {
+	for (const c of candidates) {
+		if (excludeService && c.service === excludeService) continue;
+		if (!tokenHardExpired(c.oauth, now)) return c;
+	}
+	return null;
+}
+
 // Read the full cred object from one keychain service (not just accessToken).
 function readCredFromService(service: string): StoredClaudeOAuth | null {
 	try {
@@ -130,6 +155,17 @@ function readCred(): StoredClaudeOAuth | null {
 		if (stored) return stored;
 	}
 	return null;
+}
+
+// Read every candidate keychain entry that currently holds a cred (scoped first,
+// then default), so the serve path can fall back off a doomed token to a sibling.
+function readAllCandidates(): StoredClaudeOAuth[] {
+	const out: StoredClaudeOAuth[] = [];
+	for (const service of keychainServiceCandidates()) {
+		const stored = readCredFromService(service);
+		if (stored) out.push(stored);
+	}
+	return out;
 }
 
 // Atomically write the cred back to the keychain. Returns true ONLY after a
@@ -269,9 +305,10 @@ async function getFreshOAuthToken(): Promise<string | null> {
 	const stored = readCred();
 	if (!stored) return null;
 	const { service, oauth: cred } = stored;
+	const now = Date.now();
 	const needsRefresh =
 		typeof cred.expiresAt === 'number' &&
-		cred.expiresAt - Date.now() <= REFRESH_SKEW_MS &&
+		cred.expiresAt - now <= REFRESH_SKEW_MS &&
 		!!cred.refreshToken;
 	if (shouldAttemptRefresh(needsRefresh, Date.now(), nextRefreshAllowedAt)) {
 		if (!refreshInFlight) {
@@ -290,7 +327,29 @@ async function getFreshOAuthToken(): Promise<string | null> {
 			})().finally(() => { refreshInFlight = null; });
 		}
 		await refreshInFlight;
-		return readCredFromService(service)?.oauth.accessToken ?? cred.accessToken;
+		const after = readCredFromService(service)?.oauth;
+		if (after && !tokenHardExpired(after, Date.now())) return after.accessToken;
+		// Refresh failed and the chosen (typically scoped) token is still expired.
+		// Rather than serve a doomed token and 401-loop until someone deletes the
+		// scoped keychain entry by hand, fall back to any other candidate that
+		// still holds a valid token (the default item interactive `/login` keeps
+		// fresh). This automates the manual "delete the scoped entry" workaround.
+		const fallback = firstUsableCandidate(readAllCandidates(), Date.now(), service);
+		if (fallback) {
+			console.error(`${ts()} [Proxy] '${service}' token unrefreshable — serving valid '${fallback.service}' instead`);
+			return fallback.oauth.accessToken;
+		}
+		return after?.accessToken ?? cred.accessToken;
+	}
+	// Not within the refresh-skew window, but if the chosen token is already
+	// hard-expired (e.g. no refreshToken to trigger the refresh path above), still
+	// prefer a fresher sibling over serving a guaranteed-401 token.
+	if (tokenHardExpired(cred, now)) {
+		const fallback = firstUsableCandidate(readAllCandidates(), now, service);
+		if (fallback) {
+			console.error(`${ts()} [Proxy] '${service}' token hard-expired with no usable refresh — serving valid '${fallback.service}' instead`);
+			return fallback.oauth.accessToken;
+		}
 	}
 	return cred.accessToken;
 }
