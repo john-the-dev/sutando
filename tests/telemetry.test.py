@@ -391,7 +391,23 @@ def run():
         passed += 1
         print("ok   core_model → 'unknown' when unset")
 
-    # 16) token_usage: bucketed utilization (nearest 5%) + status + model; and the
+    # 16) core_model resolution chain: $ANTHROPIC_MODEL fallback, and reading the
+    #     `model` from Claude Code's settings.json when no env var is set.
+    with tempfile.TemporaryDirectory() as td:
+        mod = _load(Path(td), key="phc_live", env={"ANTHROPIC_MODEL": "claude-from-env"})
+        assert mod._core_model() == "claude-from-env", "ANTHROPIC_MODEL fallback"
+        passed += 1
+        print("ok   core_model reads $ANTHROPIC_MODEL fallback")
+    with tempfile.TemporaryDirectory() as td:
+        cfg = Path(td) / "cfg"
+        cfg.mkdir(parents=True)
+        (cfg / "settings.json").write_text(json.dumps({"model": "claude-from-settings"}))
+        mod = _load(Path(td), key="phc_live", env={"CLAUDE_CONFIG_DIR": str(cfg)})
+        assert mod._core_model() == "claude-from-settings", "settings.json model"
+        passed += 1
+        print("ok   core_model reads model from settings.json")
+
+    # 17) token_usage: bucketed utilization (nearest 5%) + status + model; and the
     #     _bucket_pct helper clamps/rounds/sentinels.
     with tempfile.TemporaryDirectory() as td:
         mod = _load(Path(td), key="phc_live", env={"SUTANDO_CORE_MODEL": "claude-sonnet-5"})
@@ -414,7 +430,7 @@ def run():
         passed += 1
         print("ok   token_usage bucketed (5%) + status + model; _bucket_pct clamps/sentinels")
 
-    # 17) token_usage honors opt-out (no path around capture()).
+    # 18) token_usage honors opt-out (no path around capture()).
     with tempfile.TemporaryDirectory() as td:
         mod = _load(Path(td), key="phc_live", env={"DO_NOT_TRACK": "1"})
         calls = []
