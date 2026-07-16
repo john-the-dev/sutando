@@ -212,8 +212,8 @@ def run():
         # Beyond the source bucket, the only extra keys are the standard anonymity
         # + surface envelope every event carries (#2071): surface + $set. Still no
         # task content, ids, user, or channel — that's the invariant under test.
-        assert set(tp["properties"]) == {"$ip", "$geoip_disable", "source", "surface", "$set"}, \
-            f"task_processed must ship ONLY the source bucket + surface envelope, got {tp['properties']}"
+        assert set(tp["properties"]) == {"$ip", "$geoip_disable", "source", "surface", "core_model", "$set"}, \
+            f"task_processed must ship ONLY the source bucket + surface/core_model envelope, got {tp['properties']}"
         passed += 1
         print("ok   task_processed/feature_used send correct bucketed events")
 
