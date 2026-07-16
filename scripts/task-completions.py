@@ -21,13 +21,13 @@ import json
 import sys
 from pathlib import Path
 
-# Resolve the workspace the same way the rest of the stack does.
-try:  # pragma: no cover - workspace_default is always importable in the real stack
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-    from workspace_default import resolve_workspace
-    WS = Path(resolve_workspace())
-except Exception:  # pragma: no cover
-    WS = Path.home() / ".sutando" / "repo" / "workspace"
+# Resolve the workspace the same way the rest of the stack does — the sanctioned
+# resolver (workspace_default.resolve_workspace) owns all fallback/override logic;
+# never reconstruct a workspace path inline here.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from workspace_default import resolve_workspace  # noqa: E402
+
+WS = Path(resolve_workspace())
 
 HISTORY = WS / "state" / "task-completions-daily.json"
 COUNTER = WS / "state" / "task-counter.json"
