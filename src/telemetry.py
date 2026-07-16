@@ -221,6 +221,36 @@ def _install_surface() -> str:
     return "oss"
 
 
+def _core_model() -> str:
+    """Categorical name of the model powering the Sutando core (e.g.
+    ``claude-opus-4-8``), or ``"unknown"``.
+
+    Claude Code does not export the active model to the core process, so there
+    is no fully-reliable runtime signal. Resolution order, first hit wins:
+      1. ``$SUTANDO_CORE_MODEL`` — explicit, set by the launcher (startup.sh /
+         desktop app) that DOES know which model it started the core with;
+      2. ``$ANTHROPIC_MODEL`` — honored by some launch paths;
+      3. ``model`` in Claude Code's settings.json (``$CLAUDE_CONFIG_DIR`` or
+         ``~/.claude``) when the user pinned one there;
+      4. ``"unknown"``.
+    Categorical only — a model id, never PII. Fail-safe: any error → ``"unknown"``.
+    """
+    for var in ("SUTANDO_CORE_MODEL", "ANTHROPIC_MODEL"):
+        v = os.environ.get(var, "").strip()
+        if v:
+            return v
+    try:
+        cfg_home = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+        settings = Path(cfg_home) / "settings.json"
+        if settings.exists():
+            m = json.loads(settings.read_text()).get("model")
+            if isinstance(m, str) and m.strip():
+                return m.strip()
+    except Exception:  # pragma: no cover — best-effort read
+        pass
+    return "unknown"
+
+
 def enabled() -> bool:
     """Telemetry fires only when a key is configured AND not opted out."""
     return bool(_KEY) and not opted_out()
@@ -278,6 +308,33 @@ def feature_used(feature: str, *, flush: bool = False) -> None:
     capture("feature_used", {"feature": str(feature)}, flush=flush)
 
 
+def _bucket_pct(x) -> int:
+    """Round a 0-100 utilization percentage to the nearest 5 — coarse enough to
+    stay a bucket (never a fingerprint), fine enough to trend usage."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return -1
+    v = max(0.0, min(100.0, v))
+    return int(round(v / 5.0) * 5)
+
+
+def token_usage(util_5h_pct=None, util_7d_pct=None, status: str = "unknown") -> None:
+    """One anonymous event snapshotting quota/token consumption, as the
+    Anthropic rate-limit *utilization* of the 5h and 7d windows (the accessible
+    usage signal — raw token counts aren't exposed to the core). Values are
+    bucketed to the nearest 5% so they stay coarse aggregates, never a
+    fingerprint. ``status`` is the categorical rate-limit status
+    (``allowed`` / ``allowed_warning`` / ``rejected`` / ``unknown``). No PII.
+    Emitted best-effort by the heartbeat once per boot; safe to call anywhere.
+    """
+    capture("token_usage", {
+        "util_5h_pct": _bucket_pct(util_5h_pct),
+        "util_7d_pct": _bucket_pct(util_7d_pct),
+        "status": str(status),
+    })
+
+
 def _dispatch(event: str, properties: dict | None, *, flush: bool = False) -> None:
     props = {
         "$ip": "",
@@ -290,7 +347,12 @@ def _dispatch(event: str, properties: dict | None, *, flush: bool = False) -> No
     # caller spread + merged into any existing $set so it's always present.
     surface = _install_surface()
     props["surface"] = surface
-    props["$set"] = {**props.get("$set", {}), "surface": surface}
+    # Core model (categorical) on EVERY event + as a person property, so any
+    # metric — installs, tasks, features — can be broken down by which model the
+    # core runs. "unknown" until the launcher sets $SUTANDO_CORE_MODEL.
+    model = _core_model()
+    props["core_model"] = model
+    props["$set"] = {**props.get("$set", {}), "surface": surface, "core_model": model}
     payload = {
         "api_key": _KEY,
         "event": event,

@@ -16,6 +16,13 @@ Only bucketed / categorical **product events**:
 | `skill_invoked` | `skill` | Skill adoption |
 | `voice_session` | `duration_bucket` (`<30s` / `30-120s` / `>120s`) | Voice usage |
 | `error` | `type` | Reliability (type only) |
+| `token_usage` | `util_5h_pct`, `util_7d_pct` (Anthropic rate-limit utilization, bucketed to nearest 5%), `status` | Aggregate quota/token consumption trend (the accessible usage signal — raw token counts are never read) |
+
+Every event **also** carries two categorical properties so any metric can be
+broken down by them: `surface` (`desktop`/`oss`) and `core_model` (the model id
+powering the core, e.g. `claude-opus-4-8`, or `unknown`). `core_model` is read
+from `$SUTANDO_CORE_MODEL` → `$ANTHROPIC_MODEL` → Claude Code `settings.json` →
+`unknown`; set `SUTANDO_CORE_MODEL` in the launcher for accurate model tracking.
 
 *(Later events are added as they are wired in; this table is the source of truth.)*
 

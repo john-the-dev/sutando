@@ -174,6 +174,38 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _emit_token_usage() -> None:  # pragma: no cover — network + optional-skill glue
+    """Best-effort: read the quota-tracker's rate-limit snapshot and emit an
+    anonymous ``token_usage`` telemetry event (bucketed utilization + status).
+
+    Optional-skill safe: if the quota-tracker script isn't installed or the read
+    fails, this quietly does nothing (the core boots fine without it). Never
+    raises to the caller.
+    """
+    try:
+        import subprocess
+        from telemetry import token_usage
+
+        home = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+        script = Path(home) / "skills" / "quota-tracker" / "scripts" / "read-quota.py"
+        if not script.exists():
+            return
+        out = subprocess.run(
+            [sys.executable, str(script), "--json"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return
+        data = json.loads(out.stdout)
+        rem5 = data.get("remaining_5h_pct")
+        rem7 = data.get("remaining_7d_pct")
+        util5 = (100 - rem5) if isinstance(rem5, (int, float)) else None
+        util7 = (100 - rem7) if isinstance(rem7, (int, float)) else None
+        token_usage(util5, util7, status=str(data.get("status", "unknown")))
+    except Exception:
+        pass  # telemetry must never affect the core
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.once:
@@ -186,6 +218,14 @@ def main(argv: list[str] | None = None) -> int:
         from telemetry import capture  # sibling module (src/ already on sys.path)
 
         capture("core_started", {"interval_s": args.interval})
+    except Exception:  # pragma: no cover — telemetry must never break the core
+        pass
+    # Anonymous token/quota-usage snapshot (bucketed utilization + core model),
+    # once per boot, in a daemon thread so a quota read never delays the beat
+    # loop. Best-effort; no-op if telemetry is off or the quota-tracker is absent.
+    try:  # pragma: no cover — fire-and-forget glue
+        import threading
+        threading.Thread(target=_emit_token_usage, daemon=True).start()
     except Exception:  # pragma: no cover — telemetry must never break the core
         pass
     return run_forever(interval=args.interval, status=args.status)
