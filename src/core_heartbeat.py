@@ -185,9 +185,9 @@ def _emit_token_usage() -> None:  # pragma: no cover — network + optional-skil
     try:
         import subprocess
         from telemetry import token_usage
+        from util_paths import claude_home_path
 
-        home = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
-        script = Path(home) / "skills" / "quota-tracker" / "scripts" / "read-quota.py"
+        script = claude_home_path("skills", "quota-tracker", "scripts", "read-quota.py")
         if not script.exists():
             return
         out = subprocess.run(

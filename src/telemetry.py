@@ -240,8 +240,10 @@ def _core_model() -> str:
         if v:
             return v
     try:
-        cfg_home = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
-        settings = Path(cfg_home) / "settings.json"
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from util_paths import claude_home_path  # noqa: E402
+
+        settings = claude_home_path("settings.json")
         if settings.exists():
             m = json.loads(settings.read_text()).get("model")
             if isinstance(m, str) and m.strip():
