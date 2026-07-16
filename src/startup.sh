@@ -332,6 +332,13 @@ bash "$REPO/scripts/install-git-hooks.sh" >/dev/null 2>&1 || true
 # dark whenever a session restarts without an explicit /schedule-crons invocation.
 bash "$REPO/scripts/install-session-start-hook.sh" 2>&1 || true
 
+# Re-inject PERSONAL_CLAUDE.md after context compaction (SessionStart
+# "compact" matcher). CLAUDE.md + the memory index survive compaction via the
+# system prompt; PERSONAL_CLAUDE.md only enters context via an explicit Read,
+# which compaction summarizes away — so long sessions silently lose per-user
+# rules. Idempotent — safe to run on every start.
+bash "$REPO/scripts/install-personal-claude-hook.sh" 2>&1 || true
+
 # Auto-bootstrap: create-if-missing files and dirs that the agent + skills
 # expect to exist (logs, state, tasks, results, notes, contextual-chips.json,
 # pending-questions.md, build_log.md, crons.json, …). Idempotent — safe to
@@ -620,6 +627,14 @@ if ! lsof -i :9900 > /dev/null 2>&1; then
 else
   echo "  ✓ voice agent (already running)"
 fi
+
+# 1b. Call-tier advertisement (one-shot): write state/call-tiers.json so the
+# runtime descriptor advertises which DIRECT call endpoints are reachable now
+# (Track 9 availability-driven call-tier menu). Backgrounded — it probes tailscale
+# with its own short timeout and never blocks the rest of startup; absent file
+# just means the descriptor advertises no direct tiers (client falls back to cloud).
+npx tsx src/emit-call-tiers.ts > "$LOGS_DIR/emit-call-tiers.log" 2>&1 &
+echo "  ✓ call-tiers advertisement"
 
 # 2. Web client (port 8080)
 reap_wedged_listener 8080 web-client
