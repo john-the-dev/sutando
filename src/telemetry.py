@@ -78,6 +78,33 @@ def _state_dir() -> Path:
         return Path.home() / ".sutando" / "repo" / "workspace" / "state"
 
 
+def _durable_id_path() -> Path:
+    """Launcher-independent, update-surviving path for the per-install id.
+
+    The id MUST outlive: app auto-updates (bundle replaced), workspace churn,
+    and repo re-clones — otherwise every boot mints a fresh id and PostHog
+    counts each boot as a brand-new user (DAU == new-installs; the ~20-40x
+    inflation observed 2026-07-16). ``<workspace>/state`` did not survive on
+    desktop installs, so the id lives in the OS user-data dir instead:
+
+      - macOS:  ~/Library/Application Support/Sutando/telemetry-id
+      - other:  ${XDG_DATA_HOME:-~/.local/share}/sutando/telemetry-id
+
+    ``SUTANDO_TELEMETRY_ID_FILE`` overrides the full path (tests / explicit
+    control).
+    """
+    override = os.environ.get("SUTANDO_TELEMETRY_ID_FILE")
+    if override:
+        return Path(override)
+    home = Path.home()
+    if sys.platform == "darwin":
+        base = home / "Library" / "Application Support" / "Sutando"
+    else:
+        xdg = os.environ.get("XDG_DATA_HOME")
+        base = (Path(xdg) if xdg else home / ".local" / "share") / "sutando"
+    return base / "telemetry-id"
+
+
 def opted_out() -> bool:
     """True if the user has opted out via env var or the disable file.
 
@@ -97,21 +124,71 @@ def opted_out() -> bool:
     return False
 
 
-def _distinct_id() -> str:
-    """Stable random per-install id (not a fingerprint, not PII)."""
+def _read_id(path: Path) -> str:
+    """Return a non-empty id stored at ``path``, else ``""``."""
     try:
-        d = _state_dir()
-        d.mkdir(parents=True, exist_ok=True)
-        f = d / "telemetry-id"
-        if f.exists():
-            got = f.read_text().strip()
+        if path.exists():
+            got = path.read_text().strip()
             if got:
                 return got
-        new = uuid.uuid4().hex
-        f.write_text(new)
-        return new
-    except Exception:  # pragma: no cover — best-effort id; fall back to constant
-        return "anonymous"
+    except Exception:  # pragma: no cover — defensive FS read
+        pass
+    return ""
+
+
+def _distinct_id() -> str:
+    """Stable random per-install id (not a fingerprint, not PII).
+
+    Persisted at the durable, update-surviving location (:func:`_durable_id_path`)
+    so a returning install keeps ONE id across boots/updates — the fix for the
+    2026-07-16 inflation where the id lived under ``<workspace>/state`` and did
+    not survive desktop relaunch/update, so every boot looked like a new user.
+
+    Resolution order:
+      1. durable path — the source of truth once written;
+      2. migrate: if durable is empty but a legacy ``<workspace>/state/telemetry-id``
+         exists, adopt that id (preserve installs whose id already persisted —
+         no one-time reset for them) and copy it to the durable path;
+      3. otherwise mint a new id and write it to the durable path.
+    A best-effort copy is also left at the legacy path for back-compat readers.
+    Any FS failure falls back to the legacy behavior, then to ``"anonymous"``.
+    """
+    durable = _durable_id_path()
+    got = _read_id(durable)
+    if got:
+        return got
+    # Migrate an existing id from the legacy workspace location if present.
+    legacy = None
+    try:
+        legacy = _state_dir() / "telemetry-id"
+    except Exception:  # pragma: no cover — resolver glue
+        legacy = None
+    ident = _read_id(legacy) if legacy is not None else ""
+    if not ident:
+        ident = uuid.uuid4().hex
+    # Write to the durable path (source of truth going forward).
+    try:
+        durable.parent.mkdir(parents=True, exist_ok=True)
+        durable.write_text(ident)
+    except Exception:
+        # Durable location unwritable → fall back to legacy behavior so the id
+        # still persists as well as it can on this platform.
+        try:
+            if legacy is not None:
+                legacy.parent.mkdir(parents=True, exist_ok=True)
+                legacy.write_text(ident)
+        except Exception:  # pragma: no cover — best-effort; fall back to constant
+            return "anonymous"
+        return ident
+    # Best-effort back-compat copy at the legacy path (readers that still look
+    # there keep working); never fatal.
+    try:
+        if legacy is not None and not legacy.exists():
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+            legacy.write_text(ident)
+    except Exception:  # pragma: no cover — non-fatal
+        pass
+    return ident
 
 
 def _install_surface() -> str:
