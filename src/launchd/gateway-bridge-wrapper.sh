@@ -41,8 +41,15 @@ if _RELAY_ENV="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path channel
 fi
 
 # Map legacy AG2_REMOTE_* → REMOTE_TASK_* (the names the bridge reads).
+# Default tier is "owner" for the personal-agent model (PR #2018, 2026-07-08): a
+# user's own gateway authenticates with their own owner bearer and the broker
+# owner-scopes every pull, so its tasks are the owner's own. This MUST match
+# src/startup.sh's inline launch and the bridge's own default — otherwise the
+# launchd path would sandbox the owner's own mobile messages as team-tier
+# (read-only). A shared / multi-user gateway sets REMOTE_TASK_TIER=team in the
+# channel .env explicitly, which this honors.
 REMOTE_TASK_TOKEN="${REMOTE_TASK_TOKEN:-${AG2_REMOTE_TOKEN:-}}"
-REMOTE_TASK_TIER="${REMOTE_TASK_TIER:-${AG2_REMOTE_TIER:-team}}"
+REMOTE_TASK_TIER="${REMOTE_TASK_TIER:-${AG2_REMOTE_TIER:-owner}}"
 export REMOTE_TASK_TOKEN REMOTE_TASK_TIER
 
 # If there's still no token, the bridge would FATAL-exit and KeepAlive would
