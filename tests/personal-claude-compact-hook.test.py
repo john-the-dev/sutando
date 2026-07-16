@@ -164,5 +164,29 @@ with tempfile.TemporaryDirectory() as tmp:
         fail("installer idempotent", f"rc={r2.returncode} n={len(cmds)} out={r2.stdout[:120]!r}")
 
 
+# ── Test 7: hook is cwd-independent (hooks run from the session cwd) ──────────
+# Regression: util_paths' internal `from workspace_default import ...` needs
+# repo/src on sys.path; without it resolution fell back to cwd-dependent
+# `git rev-parse` and silently no-op'd from a non-repo cwd (live-test finding).
+with tempfile.TemporaryDirectory() as ws:
+    with open(os.path.join(ws, "PERSONAL_CLAUDE.md"), "w") as f:
+        f.write("CWD-INDEPENDENT-RULES\n")
+    env = dict(os.environ)
+    env["SUTANDO_TEST_MODE"] = "1"
+    env["SUTANDO_WORKSPACE"] = ws
+    r = subprocess.run(
+        ["bash", HINT], capture_output=True, text=True, env=env, timeout=30,
+        cwd="/",  # decidedly not a git checkout
+    )
+    try:
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        if "CWD-INDEPENDENT-RULES" in ctx:
+            ok("hook resolves workspace from a non-repo cwd")
+        else:
+            fail("cwd independence", f"ctx={ctx[:120]!r}")
+    except (json.JSONDecodeError, KeyError) as e:
+        fail("cwd independence", f"bad output {r.stdout[:200]!r} ({e})")
+
+
 print(f"\n{_pass} passed, {_fail} failed")
 sys.exit(1 if _fail else 0)

@@ -37,6 +37,13 @@ import json
 import sys
 
 repo = sys.argv[1]
+# Insert BOTH repo and repo/src: util_paths internally does a flat
+# `from workspace_default import resolve_workspace`, which needs repo/src on
+# sys.path. Without it, _workspace_root() falls back to cwd-dependent
+# `git rev-parse` — and Claude Code runs hooks from the session cwd, which is
+# not guaranteed to be a git checkout (caught in the PR's live test: from a
+# non-repo cwd the hook silently resolved to ~/sutando-workspace and no-op'd).
+sys.path.insert(0, repo + "/src")
 sys.path.insert(0, repo)
 
 try:
