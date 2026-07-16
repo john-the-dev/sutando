@@ -462,6 +462,43 @@ def _ref_from_attachment(att, local_path) -> "local_task_protocol.AttachmentRef"
     )
 
 
+def _select_sibling_attachments(history, referenced_ids, cutoff, cap=5):
+    """Pick attachments that belong to a *referenced* user's recent sibling
+    messages — the case the primary loop and the reply-context loop both miss.
+
+    When someone pings the bot with text but no media of their own and mentions
+    another user ("@bot make the video @Alice sent"), the media usually lives on
+    that user's own earlier, un-mentioned messages. Those messages neither invoke
+    the bot nor are replied-to, so nothing downloads them (2026-07-16: a friend
+    posted a garden video, the owner @mentioned the bot in a separate message,
+    and the video was silently dropped).
+
+    Pure selection logic, kept out of the async I/O loop so it is unit-testable
+    without a live discord channel. `history` is an iterable of message-like
+    objects (`.author.id`, `.created_at`, `.attachments`) in Discord's
+    newest-first order (as `channel.history(before=...)` yields). Returns a list
+    of ``(author_str, attachment)`` pairs, oldest-first for natural task reading,
+    limited to messages authored by a referenced user no older than ``cutoff``
+    and capped at ``cap`` attachments (nearest-to-the-trigger kept).
+    """
+    picked = []
+    for msg in history:  # newest-first
+        # Stop scanning once we fall outside the time window — history is
+        # ordered, so everything past this point is older still.
+        if msg.created_at < cutoff:
+            break
+        if msg.author.id not in referenced_ids:
+            continue
+        for att in (getattr(msg, "attachments", None) or []):
+            picked.append((str(msg.author), att))
+            if len(picked) >= cap:
+                break
+        if len(picked) >= cap:
+            break
+    picked.reverse()  # oldest-first
+    return picked
+
+
 # Presenter mode: when scripts/presenter-mode.sh is active, the bridge
 # must not send proactive DMs to the owner. The sentinel contains an
 # ISO-8601 expiry; see scripts/presenter-mode.sh for the contract.
@@ -2879,6 +2916,49 @@ async def _handle_discord_message(message, force=False):
                         print(f"  [reply-context] parent attachment download failed: {e}", flush=True)
         except Exception as e:
             print(f"  [reply-context] fetch failed: {e}", flush=True)
+
+    # Sibling-message attachments — when the triggering mention carries no media
+    # of its own but references ANOTHER user ("@bot make the video @Alice sent"),
+    # the media usually lives on that user's own earlier, un-mentioned messages,
+    # which neither the primary loop (this message's attachments) nor the
+    # reply-context loop (a replied-to parent) can see. Pull recent attachments
+    # posted by any referenced user within a short window so the task isn't blind
+    # to the source material the owner is pointing at. Gated on referencing a
+    # non-bot user so a plain mention doesn't vacuum unrelated media. Selection
+    # logic lives in _select_sibling_attachments (unit-tested); the download I/O
+    # below mirrors the primary loop's save + sanitize + vision-push pattern.
+    if not attachment_note and _message_mentions_bot(message):  # pragma: no cover
+        referenced_ids = {
+            u.id for u in message.mentions
+            if client.user is None or u.id != client.user.id
+        }
+        if referenced_ids:
+            try:
+                from datetime import timedelta
+                cutoff = message.created_at - timedelta(minutes=15)
+                history = [m async for m in message.channel.history(limit=15, before=message)]
+                for author_str, att in _select_sibling_attachments(history, referenced_ids, cutoff):
+                    s_path = INBOX_DIR / f"{int(time.time()*1000)}_{_safe_attachment_basename(att.filename)}"
+                    try:
+                        await att.save(s_path)
+                        attachment_refs.append(_ref_from_attachment(att, s_path))
+                        transcript = _transcribe_via_skill(str(s_path))
+                        if transcript:
+                            attachment_note += f"\n[Voice transcript (from {author_str}'s recent message): {transcript}]"
+                        else:
+                            attachment_note += f"\n[File attached (from {author_str}'s recent message): {s_path}]"
+                        try:
+                            ct = (getattr(att, "content_type", "") or "").lower()
+                            if ct.startswith("image/") or str(s_path).lower().endswith(
+                                (".jpg", ".jpeg", ".png", ".webp", ".gif")
+                            ):
+                                _push_vision_image(str(s_path), source="discord")
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        print(f"  [sibling-attach] download failed: {e}", flush=True)
+            except Exception as e:
+                print(f"  [sibling-attach] history scan failed: {e}", flush=True)
 
     if not text and not attachment_note:
         # Bare mention — user deliberately pinged the bot with no content.
