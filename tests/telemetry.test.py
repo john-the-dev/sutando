@@ -32,9 +32,16 @@ SRC = Path(__file__).resolve().parent.parent / "src"
 
 def _load(state_dir: Path, key: str = "", env: dict | None = None):
     """Import a fresh telemetry module with a temp state dir + clean env."""
-    for k in ("DO_NOT_TRACK", "SUTANDO_TELEMETRY", "POSTHOG_API_KEY", "SUTANDO_DEBUG_TELEMETRY", "SUTANDO_SURFACE"):
+    for k in ("DO_NOT_TRACK", "SUTANDO_TELEMETRY", "POSTHOG_API_KEY",
+              "SUTANDO_DEBUG_TELEMETRY", "SUTANDO_SURFACE", "SUTANDO_TELEMETRY_ID_FILE"):
         os.environ.pop(k, None)
     os.environ["SUTANDO_STATE_DIR"] = str(state_dir)
+    # Isolate the durable per-install-id path into the temp tree so tests never
+    # touch (or depend on) the real ~/Library/Application Support/Sutando path
+    # (added with id-persistence). Defaulting it to <state_dir>/telemetry-id also
+    # keeps the legacy assertions valid (durable == the state-dir file). `env` may
+    # override this to exercise durable-vs-legacy migration explicitly.
+    os.environ["SUTANDO_TELEMETRY_ID_FILE"] = str(state_dir / "telemetry-id")
     # Force the module's state dir to the temp path even if workspace_default
     # resolves elsewhere: point SUTANDO_STATE_DIR and stub resolve_workspace.
     os.environ.update(env or {})
@@ -292,6 +299,74 @@ def run():
         assert received[0]["properties"]["feature"] == "subprocess_probe"
         passed += 1
         print("ok   short-lived subprocess flushes feature_used before exit")
+
+    # 10) Per-install id PERSISTS across workspace churn — the id-persistence fix.
+    #    Change the state dir between boots (as a desktop update/relaunch does)
+    #    but keep the durable path: the id must NOT change (else every boot looks
+    #    like a new user → the ~20-40x DAU inflation this fix removes).
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        durable = td / "appsupport" / "telemetry-id"
+        m1 = _load(td / "ws1", key="phc_live", env={"SUTANDO_TELEMETRY_ID_FILE": str(durable)})
+        id1 = m1._distinct_id()
+        m2 = _load(td / "ws2-CHURNED", key="phc_live", env={"SUTANDO_TELEMETRY_ID_FILE": str(durable)})
+        id2 = m2._distinct_id()
+        assert id1 and id1 != "anonymous" and id2 == id1, f"id churned: {id1!r} != {id2!r}"
+        passed += 1
+        print("ok   distinct_id persists across workspace churn")
+
+    # 11) Migrate an existing legacy <state>/telemetry-id into the durable path —
+    #    installs whose id already persisted are adopted, NOT reset.
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        legacy_sd = td / "legacy"
+        legacy_sd.mkdir(parents=True)
+        (legacy_sd / "telemetry-id").write_text("legacy-stable-id-abc123")
+        durable = td / "appsupport" / "telemetry-id"  # absent
+        m = _load(legacy_sd, key="phc_live", env={"SUTANDO_TELEMETRY_ID_FILE": str(durable)})
+        got = m._distinct_id()
+        assert got == "legacy-stable-id-abc123", got
+        assert durable.read_text().strip() == "legacy-stable-id-abc123"
+        passed += 1
+        print("ok   migrates a legacy id without reset")
+
+    # 12) Durable location unwritable (its parent is a FILE) → still persists via
+    #     the legacy path instead of churning; never "anonymous".
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        blocker = td / "blocker"
+        blocker.write_text("i am a file, not a dir")
+        durable = blocker / "telemetry-id"  # mkdir(parents) on `blocker` fails
+        sd = td / "st"
+        m = _load(sd, key="phc_live", env={"SUTANDO_TELEMETRY_ID_FILE": str(durable)})
+        got = m._distinct_id()
+        assert got and got != "anonymous", got
+        assert (sd / "telemetry-id").read_text().strip() == got
+        passed += 1
+        print("ok   falls back to legacy path when durable unwritable")
+
+    # 13) _durable_id_path branches: macOS, XDG, default, and explicit override.
+    with tempfile.TemporaryDirectory() as td:
+        m = _load(Path(td), key="phc_live")
+        os.environ.pop("SUTANDO_TELEMETRY_ID_FILE", None)
+        real, real_xdg = m.sys.platform, os.environ.get("XDG_DATA_HOME")
+        try:
+            m.sys.platform = "darwin"
+            assert "Application Support/Sutando" in str(m._durable_id_path())
+            m.sys.platform = "linux"
+            os.environ["XDG_DATA_HOME"] = "/tmp/xdg-test"
+            assert str(m._durable_id_path()) == "/tmp/xdg-test/sutando/telemetry-id"
+            os.environ.pop("XDG_DATA_HOME")
+            assert str(m._durable_id_path()).endswith(".local/share/sutando/telemetry-id")
+        finally:
+            m.sys.platform = real
+            if real_xdg is not None:
+                os.environ["XDG_DATA_HOME"] = real_xdg
+        os.environ["SUTANDO_TELEMETRY_ID_FILE"] = "/tmp/override-id"
+        assert str(m._durable_id_path()) == "/tmp/override-id"
+        os.environ.pop("SUTANDO_TELEMETRY_ID_FILE")
+        passed += 1
+        print("ok   durable path — macOS / XDG / default / override branches")
 
     print(f"\nALL PASS ({passed} checks)")
     return 0
