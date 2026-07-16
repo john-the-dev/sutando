@@ -53,6 +53,7 @@ def run_hint(workspace: str) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["SUTANDO_TEST_MODE"] = "1"
     env["SUTANDO_WORKSPACE"] = workspace
+    env["SUTANDO_CORE_SESSION"] = "1"  # pass the core-session scope gate
     return subprocess.run(
         ["bash", HINT], capture_output=True, text=True, env=env, timeout=30
     )
@@ -174,6 +175,7 @@ with tempfile.TemporaryDirectory() as ws:
     env = dict(os.environ)
     env["SUTANDO_TEST_MODE"] = "1"
     env["SUTANDO_WORKSPACE"] = ws
+    env["SUTANDO_CORE_SESSION"] = "1"
     r = subprocess.run(
         ["bash", HINT], capture_output=True, text=True, env=env, timeout=30,
         cwd="/",  # decidedly not a git checkout
@@ -186,6 +188,22 @@ with tempfile.TemporaryDirectory() as ws:
             fail("cwd independence", f"ctx={ctx[:120]!r}")
     except (json.JSONDecodeError, KeyError) as e:
         fail("cwd independence", f"bad output {r.stdout[:200]!r} ({e})")
+
+# ── Test 8: scope gate — non-core session (no SUTANDO_CORE_SESSION) is silent ──
+with tempfile.TemporaryDirectory() as ws:
+    with open(os.path.join(ws, "PERSONAL_CLAUDE.md"), "w") as f:
+        f.write("SHOULD-NOT-APPEAR\n")
+    env = dict(os.environ)
+    env["SUTANDO_TEST_MODE"] = "1"
+    env["SUTANDO_WORKSPACE"] = ws
+    env.pop("SUTANDO_CORE_SESSION", None)
+    r = subprocess.run(
+        ["bash", HINT], capture_output=True, text=True, env=env, timeout=30
+    )
+    if r.returncode == 0 and r.stdout.strip() == "":
+        ok("scope gate: no SUTANDO_CORE_SESSION → no output, exit 0")
+    else:
+        fail("scope gate", f"rc={r.returncode} out={r.stdout[:120]!r}")
 
 
 print(f"\n{_pass} passed, {_fail} failed")

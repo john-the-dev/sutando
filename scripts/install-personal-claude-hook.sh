@@ -35,8 +35,12 @@ if [ ! -f "$SETTINGS" ]; then
   echo '{"hooks":{}}' > "$SETTINGS"
 fi
 
-# Idempotent merge (avoids jq dependency)
-python3 /dev/stdin "$SETTINGS" "$HOOK_CMD" <<'PYEOF'
+# Idempotent merge (avoids jq dependency). `python3 -` (not `/dev/stdin`):
+# /dev/stdin is a silent no-op under some sandboxed environments (caught in
+# review on this PR — the merge never ran and settings.json stayed {"hooks":{}}),
+# while `-` reads the program from stdin portably and matches the hint
+# script's own pattern.
+python3 - "$SETTINGS" "$HOOK_CMD" <<'PYEOF'
 import json, sys
 
 settings_path = sys.argv[1]

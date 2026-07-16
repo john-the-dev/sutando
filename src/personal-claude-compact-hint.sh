@@ -30,6 +30,18 @@
 
 set -euo pipefail
 
+# SCOPE GATE (mirrors schedule-crons-session-hint.sh): only the long-lived
+# sutando-core session gets the injection. The core launcher
+# (src/agent/claude/cli/start-cli.sh) sets SUTANDO_CORE_SESSION=1; ad-hoc
+# sessions in the same checkout (PR-review agents, codex delegates, a plain
+# `claude` in the repo) do not — injecting the owner's personal rules into a
+# sandboxed reviewer's context would be both a token cost and behavioral
+# contamination for a session that is deliberately NOT operating as the
+# owner's agent. When the marker is absent we stay silent (exit 0).
+if [ "${SUTANDO_CORE_SESSION:-}" != "1" ]; then
+  exit 0
+fi
+
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 python3 - "$REPO" <<'PYEOF' || exit 0
