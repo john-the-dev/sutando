@@ -33,7 +33,8 @@ SRC = Path(__file__).resolve().parent.parent / "src"
 def _load(state_dir: Path, key: str = "", env: dict | None = None):
     """Import a fresh telemetry module with a temp state dir + clean env."""
     for k in ("DO_NOT_TRACK", "SUTANDO_TELEMETRY", "POSTHOG_API_KEY",
-              "SUTANDO_DEBUG_TELEMETRY", "SUTANDO_SURFACE", "SUTANDO_TELEMETRY_ID_FILE"):
+              "SUTANDO_DEBUG_TELEMETRY", "SUTANDO_SURFACE", "SUTANDO_TELEMETRY_ID_FILE",
+              "SUTANDO_CORE_MODEL", "ANTHROPIC_MODEL"):
         os.environ.pop(k, None)
     os.environ["SUTANDO_STATE_DIR"] = str(state_dir)
     # Isolate the durable per-install-id path into the temp tree so tests never
@@ -367,6 +368,64 @@ def run():
         os.environ.pop("SUTANDO_TELEMETRY_ID_FILE")
         passed += 1
         print("ok   durable path — macOS / XDG / default / override branches")
+
+    # 14) core_model rides on EVERY event (property + $set), from $SUTANDO_CORE_MODEL.
+    with tempfile.TemporaryDirectory() as td:
+        mod = _load(Path(td), key="phc_live", env={"SUTANDO_CORE_MODEL": "claude-opus-4-8"})
+        calls = []
+        mod._post = lambda payload: calls.append(payload)  # type: ignore
+        _capture_sync(mod, "core_started", {"interval_s": 30})
+        pr = calls[0]["properties"]
+        assert pr["core_model"] == "claude-opus-4-8", pr
+        assert pr["$set"]["core_model"] == "claude-opus-4-8", pr["$set"]
+        passed += 1
+        print("ok   core_model attached to every event (property + $set)")
+
+    # 15) core_model falls back to 'unknown' when unset and no settings model.
+    with tempfile.TemporaryDirectory() as td:
+        mod = _load(Path(td), key="phc_live", env={"CLAUDE_CONFIG_DIR": str(Path(td) / "no-such")})
+        calls = []
+        mod._post = lambda payload: calls.append(payload)  # type: ignore
+        _capture_sync(mod, "feature_used", {"feature": "x"})
+        assert calls[0]["properties"]["core_model"] == "unknown", calls[0]["properties"]
+        passed += 1
+        print("ok   core_model → 'unknown' when unset")
+
+    # 16) token_usage: bucketed utilization (nearest 5%) + status + model; and the
+    #     _bucket_pct helper clamps/rounds/sentinels.
+    with tempfile.TemporaryDirectory() as td:
+        mod = _load(Path(td), key="phc_live", env={"SUTANDO_CORE_MODEL": "claude-sonnet-5"})
+        calls = []
+        mod._post = lambda payload: calls.append(payload)  # type: ignore
+        before = set(threading.enumerate())
+        mod.token_usage(41.2, 3.9, status="allowed")
+        for t in set(threading.enumerate()) - before:
+            t.join(timeout=2)
+        p = calls[0]
+        assert p["event"] == "token_usage", p["event"]
+        assert p["properties"]["util_5h_pct"] == 40, p["properties"]  # 41.2 → 40
+        assert p["properties"]["util_7d_pct"] == 5, p["properties"]   # 3.9 → 5
+        assert p["properties"]["status"] == "allowed", p["properties"]
+        assert p["properties"]["core_model"] == "claude-sonnet-5", p["properties"]
+        assert mod._bucket_pct(0) == 0 and mod._bucket_pct(100) == 100
+        assert mod._bucket_pct(150) == 100 and mod._bucket_pct(-5) == 0  # clamp
+        assert mod._bucket_pct(97.5) == 100                              # round
+        assert mod._bucket_pct(None) == -1 and mod._bucket_pct("x") == -1  # sentinel
+        passed += 1
+        print("ok   token_usage bucketed (5%) + status + model; _bucket_pct clamps/sentinels")
+
+    # 17) token_usage honors opt-out (no path around capture()).
+    with tempfile.TemporaryDirectory() as td:
+        mod = _load(Path(td), key="phc_live", env={"DO_NOT_TRACK": "1"})
+        calls = []
+        mod._post = lambda payload: calls.append(payload)  # type: ignore
+        before = set(threading.enumerate())
+        mod.token_usage(50, 20, status="allowed")
+        for t in set(threading.enumerate()) - before:
+            t.join(timeout=2)
+        assert calls == [], f"opt-out MUST silence token_usage, got {calls}"
+        passed += 1
+        print("ok   token_usage honors opt-out (zero sends)")
 
     print(f"\nALL PASS ({passed} checks)")
     return 0
