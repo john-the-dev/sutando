@@ -10,7 +10,7 @@ import ApplicationServices
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     // Hotkeys are configurable via ~/.config/sutando/hotkeys.json.
-    // Defaults: drop_context=⌃C, drop_screenshot=⌃S, toggle_voice=⌃V, toggle_mute=⌃M
+    // Hotkey defaults are published in state/hotkeys.json (see PR #1920/#1924).
     var hotKeyRefs: [EventHotKeyRef?] = []  // one entry per registered hotkey
     var hotKeyActions: [UInt32: String] = [:]  // hotkey id → action name
     var lastDropTime: Date = .distantPast
@@ -90,7 +90,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// different TMPDIR due to sandboxing) must target the same socket
     /// to find the same server. Without this, tmux has-session fails
     /// app-side even when the session is alive shell-side.
-    let sutandoTmuxSocket = "/tmp/sutando-tmux.sock"
+    /// Honors SUTANDO_TMUX_SOCKET (the env var start-cli.sh + the desktop
+    /// private-socket runtime set) so the app's state-detection / wakeup /
+    /// pane-capture target the SAME tmux server as a private-socket core;
+    /// falls back to the /tmp default when unset. Without this, a private-
+    /// socket core is invisible to all four control paths below.
+    let sutandoTmuxSocket = ProcessInfo.processInfo.environment["SUTANDO_TMUX_SOCKET"] ?? "/tmp/sutando-tmux.sock"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Self-preventive single-instance: if another Sutando.app is already
@@ -647,9 +652,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // first so the chip reflects THIS host's questions, not a stale flat-root copy.
         let pqPath = perHostPath("pending-questions.md")
         if let pq = try? String(contentsOfFile: pqPath, encoding: .utf8) {
-            // Skip the leading "# Memory" or similar h1, find first h2.
+            // Skip h1 and [RESOLVED] h2s; latch onto the first open h2.
             for line in pq.split(separator: "\n") {
-                if line.hasPrefix("## ") {
+                if line.hasPrefix("## ") && !line.hasPrefix("## [RESOLVED]") {
                     let title = String(line.dropFirst(3))
                     let preview = title.count > 60 ? String(title.prefix(57)) + "..." : title
                     chips.append(["label": "Pending: \(preview)", "desc": "Resolve in pending-questions.md"])
