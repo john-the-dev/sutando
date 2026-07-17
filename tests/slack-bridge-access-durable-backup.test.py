@@ -108,6 +108,32 @@ fresh = json.loads(slack.ACCESS_FILE.read_text())
 check("genuine first-run TOFU still enrolls when no backup exists",
       fresh.get("tofuOwner") == "U_FIRST" and "U_FIRST" in first)
 
+# ── error-branch coverage on the helpers directly ─────────────────────────────
+# backup: OSError during write is swallowed (best-effort), never raises
+import unittest.mock as _mock
+with _mock.patch.object(slack.ACCESS_BACKUP_FILE.__class__, "write_text", side_effect=OSError("disk full")):
+    slack._backup_access_to_disk({"tofuOwner": "U", "allowFrom": ["U"]})  # must not raise
+check("backup swallows OSError (best-effort)", True)
+
+# backup: no tofuOwner → early return, no file written
+slack.ACCESS_BACKUP_FILE.unlink(missing_ok=True)
+slack._backup_access_to_disk({"allowFrom": []})
+check("backup skips a non-enrolled state", not slack.ACCESS_BACKUP_FILE.exists())
+
+# restore: missing backup file → False
+slack.ACCESS_BACKUP_FILE.unlink(missing_ok=True)
+check("restore returns False when backup absent", slack._restore_access_from_disk() is False)
+
+# restore: backup present but no tofuOwner → False
+slack.ACCESS_BACKUP_FILE.parent.mkdir(parents=True, exist_ok=True)
+slack.ACCESS_BACKUP_FILE.write_text('{"allowFrom": []}')
+check("restore returns False when backup lacks tofuOwner", slack._restore_access_from_disk() is False)
+
+# restore: valid backup but ACCESS_FILE write fails → False (exception branch)
+slack.ACCESS_BACKUP_FILE.write_text('{"tofuOwner": "U", "allowFrom": ["U"]}')
+with _mock.patch.object(slack.ACCESS_FILE.__class__, "write_text", side_effect=OSError("readonly")):
+    check("restore returns False when access.json write fails", slack._restore_access_from_disk() is False)
+
 print()
 if failures:
     print(f"FAIL — {len(failures)}: {failures}")
