@@ -84,7 +84,7 @@ def call_write_task(text: str, user_id: str = "U_OWNER", access_tier: str = "own
 
     with patch.object(mod, "load_allowed", _fake_load_allowed), \
          patch.object(mod, "load_tier_map", _fake_tier_map), \
-         patch.object(mod, "write_owner_activity", lambda *a: None):
+         patch.object(mod, "write_owner_activity", lambda *a, **k: None):
         task_id = mod._write_task(event, "DM", text, "testowner")
 
     if task_id is None:
@@ -129,7 +129,7 @@ def call_other_tier(text: str) -> Path | None:
 
     with patch.object(mod, "load_allowed", _fake_load_allowed), \
          patch.object(mod, "load_tier_map", _fake_tier_map), \
-         patch.object(mod, "write_owner_activity", lambda *a: None):
+         patch.object(mod, "write_owner_activity", lambda *a, **k: None):
         task_id = mod._write_task(event, "DM", text, "otherperson")
 
     if task_id is None:

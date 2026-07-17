@@ -99,7 +99,7 @@ def _write_owner_task(text: str, files: list | None = None) -> str:
         event["files"] = files
     with patch.object(_mod, "load_allowed", lambda: {"U_OWNER"}), \
          patch.object(_mod, "load_tier_map", dict), \
-         patch.object(_mod, "write_owner_activity", lambda *a: None), \
+         patch.object(_mod, "write_owner_activity", lambda *a, **k: None), \
          patch.object(_mod, "_download_slack_file", lambda fd: "/tmp/fake-voice.m4a"), \
          patch.object(_mod, "_transcribe_via_skill", lambda p: None):
         task_id = _mod._write_task(event, "DM", text, "testowner")
