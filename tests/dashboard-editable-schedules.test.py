@@ -22,7 +22,9 @@ spec = importlib.util.spec_from_file_location("dashboard_es", REPO / "src" / "da
 dash = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dash)
 
-# Redirect crons.json to a temp file (never touch the real per-host cron set).
+# Exercise the REAL _crons_path() once, then redirect to a temp file (never
+# touch the real per-host cron set).
+_real_crons_path = dash._crons_path()
 _tmp = Path(tempfile.mkdtemp(prefix="dash-es-")) / "crons.json"
 dash._crons_path = lambda: _tmp
 
@@ -38,9 +40,8 @@ def check(name, cond, detail=""):
 # ── _html_attr + real _crons_path ─────────────────────────────────────────────
 check("_html_attr escapes quote/angle/amp",
       dash._html_attr('a"<b>&') == "a&quot;&lt;b&gt;&amp;")
-_real = dash._crons_path()  # exercise the real path builder once
 check("_crons_path ends with hosts/<host>/crons.json",
-      str(_real).endswith("crons.json") and "hosts" in str(_real))
+      str(_real_crons_path).endswith("crons.json") and "hosts" in str(_real_crons_path))
 
 # ── validation ────────────────────────────────────────────────────────────────
 check("valid job passes", dash._validate_job(
