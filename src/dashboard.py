@@ -22,6 +22,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+import urllib.parse
 from urllib.parse import urlparse
 
 # Two-variable split (see docs/workspace-contract.md):
@@ -242,7 +243,44 @@ fetch('/stand-identity').then(r=>r.json()).then(s=>{
 <p class="intro">Tracks current system status alongside the latest capability matrix, recent activity, local endpoints, and quota pressure.</p>
 <div class="grid" id="content">__CONTENT__</div>
 <p class="refresh">Auto-refreshes every 15s</p>
-<script>setInterval(()=>location.reload(),15000)</script>
+<script>
+let _schedBusy=false;
+setInterval(()=>{if(!_schedBusy && !(document.activeElement&&document.activeElement.tagName==='INPUT'))location.reload();},15000);
+function _schedMsg(t,ok){const m=document.getElementById('sched-msg');if(m){m.textContent=t;m.style.color=ok?'#7d9':'#d99';}}
+async function _post(job){
+  _schedBusy=true;
+  try{const r=await fetch('/api/schedules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(job)});
+    const d=await r.json();
+    if(r.ok){_schedMsg(d.note||'Saved.',true);setTimeout(()=>location.reload(),900);}
+    else{_schedMsg(d.error||'Save failed',false);}
+  }catch(e){_schedMsg('Request failed: '+e,false);}
+  finally{_schedBusy=false;}
+}
+function saveCron(btn){
+  const tr=btn.closest('tr');const name=tr.dataset.name;
+  const cron=tr.querySelector('.cron-in').value.trim();
+  _post({name:name,cron:cron});
+}
+async function delCron(btn){
+  const tr=btn.closest('tr');const name=tr.dataset.name;
+  if(!confirm('Delete schedule "'+name+'"?'))return;
+  _schedBusy=true;
+  try{const r=await fetch('/api/schedules/'+encodeURIComponent(name),{method:'DELETE'});
+    const d=await r.json();
+    if(r.ok){_schedMsg(d.note||'Removed.',true);setTimeout(()=>location.reload(),900);}
+    else{_schedMsg('Delete failed',false);}
+  }catch(e){_schedMsg('Request failed: '+e,false);}finally{_schedBusy=false;}
+}
+function addCron(){
+  const name=document.getElementById('ns-name').value.trim();
+  const cron=document.getElementById('ns-cron').value.trim();
+  const body=document.getElementById('ns-body').value.trim();
+  if(!name||!cron||!body){_schedMsg('name, cron, and body are all required',false);return;}
+  const job={name:name,cron:cron};
+  if(body.startsWith('/'))job.prompt_skill=body.slice(1); else job.prompt=body;
+  _post(job);
+}
+</script>
 </body></html>"""
 
 
@@ -336,25 +374,76 @@ def _cron_next_run(expr: str, now: datetime, horizon_days: int = 8):
     return None
 
 
+def _html_attr(v: str) -> str:
+    """Escape a string for safe use inside a double-quoted HTML attribute."""
+    return (str(v).replace("&", "&amp;").replace('"', "&quot;")
+            .replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _crons_path():
+    """This host's crons.json — canonical host-label (matches schedule-crons +
+    where the file is actually written), NOT the bare hostname (which drifts on
+    DHCP lease changes; #1745). Read and write MUST agree, so both go through
+    this helper."""
+    return WORKSPACE_DIR / "hosts" / _host_label() / "crons.json"
+
+
+def _read_crons() -> list:
+    """Load the cron job list; [] on missing/invalid (never raises)."""
+    p = _crons_path()
+    if not p.exists():
+        return []
+    try:
+        jobs = json.loads(p.read_text())
+        return jobs if isinstance(jobs, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _write_crons(jobs: list) -> None:
+    """Persist the cron list atomically (tmp + os.replace) so a crash mid-write
+    can't leave a truncated crons.json."""
+    p = _crons_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(jobs, indent=2) + "\n")
+    os.replace(tmp, p)
+
+
+def _validate_job(job: dict) -> str | None:
+    """Return an error string if the job is invalid, else None. A job needs a
+    non-empty name, a valid 5-field cron expr, and exactly one of prompt /
+    prompt_skill (what schedule-crons requires to actually fire something)."""
+    if not isinstance(job, dict):
+        return "job must be an object"
+    name = (job.get("name") or "").strip()
+    if not name:
+        return "name is required"
+    expr = (job.get("cron") or "").strip()
+    if len(expr.split()) != 5:
+        return "cron must be a 5-field expression (min hour dom month dow)"
+    try:
+        _cron_next_run(expr, datetime.now())
+    except Exception:
+        return f"invalid cron expression: {expr!r}"
+    has_prompt = bool((job.get("prompt") or "").strip())
+    has_skill = bool((job.get("prompt_skill") or "").strip())
+    if has_prompt == has_skill:
+        return "provide exactly one of prompt or prompt_skill"
+    return None
+
+
 def get_schedules() -> list[dict]:
     """This host's cron schedules + computed next-run time.
 
     Source: <workspace>/hosts/<hostname>/crons.json (see skills/schedule-crons).
     Status is 'active' + next run; last-run history isn't tracked on disk.
     """
-    # scutil-first canonical label (NOT bare hostname) — must match the WRITER,
-    # schedule-crons, which keys hosts/<host>/crons.json off
-    # `sutando-config.sh host-label` (= util_paths._host_label()). A bare
-    # `hostname` can drift under DHCP and read the wrong hosts/<host>/ dir, so
-    # this panel would show no schedules on a drift machine (#1745).
-    host = _host_label()
-    cfg = WORKSPACE_DIR / "hosts" / host / "crons.json"
-    if not cfg.exists():
-        return []
-    try:
-        jobs = json.loads(cfg.read_text())
-    except (OSError, ValueError):
-        return []
+    # Reads via _read_crons() → _crons_path(), which keys off the scutil-first
+    # canonical `_host_label()` (NOT bare hostname) so this panel matches the
+    # WRITER (schedule-crons) and doesn't read the wrong hosts/<host>/ dir under
+    # a DHCP hostname drift (#1745).
+    jobs = _read_crons()
     now = datetime.now()
     out = []
     for job in jobs:
@@ -507,29 +596,49 @@ def render_dashboard() -> str:
 
     # Schedules (cron jobs from this host's crons.json)
     schedules = get_schedules()
-    if schedules:
-        sched_rows = ""
-        for s in schedules:
-            sched_rows += (
-                f'<tr>'
-                f'<td style="color:#8ab">{s["name"]}'
-                f'<div style="font-size:9px;color:#555">{s.get("desc","")}</div></td>'
-                f'<td style="color:#666;font-family:monospace;font-size:10px">{s["cron"]}</td>'
-                f'<td style="color:#555;font-size:10px">{s["kind"]}</td>'
-                f'<td style="color:#4a8aaa">{s["next"]}</td>'
-                f'</tr>\n'
-            )
-        cards.append(
-            '<div class="card full"><h2>Schedules</h2>'
-            '<table style="width:100%;font-size:11px;border-collapse:collapse">'
-            '<tr style="color:#555;text-align:left"><th>Name</th><th>Cron</th>'
-            '<th>Type</th><th>Next run</th></tr>'
-            + sched_rows +
-            '</table>'
-            '<div style="font-size:9px;color:#444;margin-top:4px">'
-            f'{len(schedules)} active. Next-run computed from cron expression '
-            '(local time); last-run history not tracked.</div></div>'
+    sched_rows = ""
+    for s in schedules:
+        nm = _html_attr(s["name"])
+        sched_rows += (
+            f'<tr data-name="{nm}">'
+            f'<td style="color:#8ab">{s["name"]}'
+            f'<div style="font-size:9px;color:#555">{s.get("desc","")}</div></td>'
+            f'<td><input class="cron-in" value="{_html_attr(s["cron"])}" '
+            f'style="width:110px;font-family:monospace;font-size:10px;background:#12121c;'
+            f'color:#9cf;border:1px solid #2a2a3e;border-radius:3px;padding:2px 4px"></td>'
+            f'<td style="color:#555;font-size:10px">{s["kind"]}</td>'
+            f'<td style="color:#4a8aaa;font-size:10px">{s["next"]}</td>'
+            f'<td style="white-space:nowrap">'
+            f'<button onclick="saveCron(this)" style="font-size:10px;cursor:pointer;'
+            f'background:#1a3a2a;color:#7d9;border:none;border-radius:3px;padding:2px 6px;margin-right:3px">Save</button>'
+            f'<button onclick="delCron(this)" style="font-size:10px;cursor:pointer;'
+            f'background:#3a1a1a;color:#d99;border:none;border-radius:3px;padding:2px 6px">Del</button>'
+            f'</td></tr>\n'
         )
+    _in = ('background:#12121c;color:#ccd;border:1px solid #2a2a3e;'
+           'border-radius:3px;padding:2px 4px;font-size:10px')
+    add_row = (
+        '<tr style="border-top:1px solid #2a2a3e">'
+        f'<td><input id="ns-name" placeholder="name" style="width:90px;{_in}"></td>'
+        f'<td><input id="ns-cron" placeholder="*/10 * * * *" style="width:110px;font-family:monospace;{_in}"></td>'
+        f'<td colspan="2"><input id="ns-body" placeholder="/skill-name  or  Run: ..." style="width:100%;{_in}"></td>'
+        '<td><button onclick="addCron()" style="font-size:10px;cursor:pointer;'
+        'background:#1a2a3a;color:#9cf;border:none;border-radius:3px;padding:2px 8px">Add</button></td>'
+        '</tr>'
+    )
+    cards.append(
+        '<div class="card full"><h2>Schedules</h2>'
+        '<table style="width:100%;font-size:11px;border-collapse:collapse">'
+        '<tr style="color:#555;text-align:left"><th>Name</th><th>Cron</th>'
+        '<th>Type</th><th>Next run</th><th></th></tr>'
+        + sched_rows + add_row +
+        '</table>'
+        '<div id="sched-msg" style="font-size:10px;margin-top:4px;min-height:12px"></div>'
+        '<div style="font-size:9px;color:#444;margin-top:2px">'
+        f'{len(schedules)} active. Edits persist to crons.json and take effect on the '
+        'next /schedule-crons run (restart). New job body: a <code>/skill-name</code> '
+        '(→ prompt_skill) or free text (→ prompt).</div></div>'
+    )
 
     # Quick links
     cards.append(f"""<div class="card full">
@@ -562,9 +671,62 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Methods", "GET, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
+
+    def _json_body(self):
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            return json.loads(self.rfile.read(n) or b"{}")
+        except (ValueError, TypeError):
+            return None
+
+    def _reply_json(self, code, obj):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(obj).encode())
+
+    def do_POST(self):
+        """Upsert a cron job in this host's crons.json. Loopback-only (same
+        bind as GET). Merges onto an existing job by name so an inline cron-only
+        edit inherits its prompt/prompt_skill."""
+        path = urlparse(self.path).path
+        if path != "/api/schedules":
+            self.send_response(404); self.end_headers(); return
+        body = self._json_body()
+        if not isinstance(body, dict):
+            self._reply_json(400, {"error": "malformed JSON body"}); return
+        name = (body.get("name") or "").strip()
+        if not name:
+            self._reply_json(400, {"error": "name is required"}); return
+        jobs = _read_crons()
+        existing = next((j for j in jobs if j.get("name") == name), None)
+        merged = dict(existing) if existing else {}
+        merged["name"] = name
+        for k in ("cron", "prompt", "prompt_skill", "description"):
+            if k in body and str(body.get(k)).strip():
+                merged[k] = str(body[k]).strip()
+        if (body.get("prompt_skill") or "").strip():
+            merged.pop("prompt", None)
+        elif (body.get("prompt") or "").strip():
+            merged.pop("prompt_skill", None)
+        err = _validate_job(merged)
+        if err:
+            self._reply_json(400, {"error": err}); return
+        clean = {"name": merged["name"], "cron": merged["cron"]}
+        if merged.get("prompt_skill"):
+            clean["prompt_skill"] = merged["prompt_skill"]
+        else:
+            clean["prompt"] = merged["prompt"]
+        if merged.get("description"):
+            clean["description"] = merged["description"]
+        jobs = [j for j in jobs if j.get("name") != name]
+        jobs.append(clean)
+        _write_crons(jobs)
+        self._reply_json(200, {"ok": True, "name": name, "count": len(jobs),
+                               "note": "Saved. Takes effect on the next /schedule-crons run (restart)."})
 
     def do_GET(self):
         if urlparse(self.path).path == "/":
@@ -710,6 +872,15 @@ load()
             else:
                 self.send_response(404)
                 self.end_headers()
+        elif path.startswith("/api/schedules/"):
+            name = urllib.parse.unquote(path.split("/api/schedules/", 1)[1])
+            jobs = _read_crons()
+            remaining = [j for j in jobs if j.get("name") != name]
+            if len(remaining) == len(jobs):
+                self.send_response(404); self.end_headers(); return
+            _write_crons(remaining)
+            self._reply_json(200, {"deleted": name, "count": len(remaining),
+                                   "note": "Removed. Takes effect on the next /schedule-crons run (restart)."})
         else:
             self.send_response(404)
             self.end_headers()
