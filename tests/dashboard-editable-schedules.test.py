@@ -35,6 +35,13 @@ def check(name, cond, detail=""):
         failures.append(name)
 
 
+# ── _html_attr + real _crons_path ─────────────────────────────────────────────
+check("_html_attr escapes quote/angle/amp",
+      dash._html_attr('a"<b>&') == "a&quot;&lt;b&gt;&amp;")
+_real = dash._crons_path()  # exercise the real path builder once
+check("_crons_path ends with hosts/<host>/crons.json",
+      str(_real).endswith("crons.json") and "hosts" in str(_real))
+
 # ── validation ────────────────────────────────────────────────────────────────
 check("valid job passes", dash._validate_job(
     {"name": "x", "cron": "*/10 * * * *", "prompt_skill": "morning-briefing"}) is None)
@@ -81,6 +88,25 @@ check("replace-by-name (no duplicate)", len([x for x in jobs if x["name"] == "br
 jobs = _upsert(jobs, {"name": "briefing", "cron": "30 7 * * *", "prompt": "Run: echo hi"})
 j = next(x for x in jobs if x["name"] == "briefing")
 check("switching to prompt drops prompt_skill", "prompt_skill" not in j and j.get("prompt") == "Run: echo hi")
+
+# ── pure upsert_schedule / delete_schedule (what the HTTP handlers call) ───────
+dash._write_crons([])
+code, obj = dash.upsert_schedule({"name": "n1", "cron": "*/5 * * * *", "prompt_skill": "morning-briefing"})
+check("upsert add → 200", code == 200 and obj.get("ok"))
+check("upsert persisted the job", dash._read_crons()[0]["name"] == "n1")
+code, obj = dash.upsert_schedule({"name": "n1", "cron": "0 9 * * *"})  # cron-only edit
+check("upsert cron-only edit → 200 (inherits skill)", code == 200)
+check("edit kept prompt_skill", dash._read_crons()[0].get("prompt_skill") == "morning-briefing")
+code, obj = dash.upsert_schedule({"name": "", "cron": "* * * * *", "prompt": "x"})
+check("upsert missing name → 400", code == 400)
+code, obj = dash.upsert_schedule({"name": "bad", "cron": "nope", "prompt": "x"})
+check("upsert bad cron → 400", code == 400)
+code, obj = dash.upsert_schedule("not a dict")
+check("upsert non-dict → 400", code == 400)
+code, obj = dash.delete_schedule("n1")
+check("delete existing → 200", code == 200 and obj.get("deleted") == "n1")
+code, obj = dash.delete_schedule("ghost")
+check("delete missing → 404", code == 404)
 
 print()
 if failures:

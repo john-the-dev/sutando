@@ -424,13 +424,62 @@ def _validate_job(job: dict) -> str | None:
         return "cron must be a 5-field expression (min hour dom month dow)"
     try:
         _cron_next_run(expr, datetime.now())
-    except Exception:
+    except Exception:  # pragma: no cover — defensive; _cron_next_run doesn't raise on bad fields
         return f"invalid cron expression: {expr!r}"
     has_prompt = bool((job.get("prompt") or "").strip())
     has_skill = bool((job.get("prompt_skill") or "").strip())
     if has_prompt == has_skill:
         return "provide exactly one of prompt or prompt_skill"
     return None
+
+
+def upsert_schedule(body: dict) -> tuple[int, dict]:
+    """Pure add/edit: merge `body` onto an existing job by name (so an inline
+    cron-only edit inherits its prompt/prompt_skill), validate the merged
+    result, persist. Returns (http_status, response_obj). Unit-tested; the
+    do_POST handler is a thin wrapper around this."""
+    if not isinstance(body, dict):
+        return 400, {"error": "malformed JSON body"}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return 400, {"error": "name is required"}
+    jobs = _read_crons()
+    existing = next((j for j in jobs if j.get("name") == name), None)
+    merged = dict(existing) if existing else {}
+    merged["name"] = name
+    for k in ("cron", "prompt", "prompt_skill", "description"):
+        if k in body and str(body.get(k)).strip():
+            merged[k] = str(body[k]).strip()
+    if (body.get("prompt_skill") or "").strip():
+        merged.pop("prompt", None)
+    elif (body.get("prompt") or "").strip():
+        merged.pop("prompt_skill", None)
+    err = _validate_job(merged)
+    if err:
+        return 400, {"error": err}
+    clean = {"name": merged["name"], "cron": merged["cron"]}
+    if merged.get("prompt_skill"):
+        clean["prompt_skill"] = merged["prompt_skill"]
+    else:
+        clean["prompt"] = merged["prompt"]
+    if merged.get("description"):
+        clean["description"] = merged["description"]
+    jobs = [j for j in jobs if j.get("name") != name]
+    jobs.append(clean)
+    _write_crons(jobs)
+    return 200, {"ok": True, "name": name, "count": len(jobs),
+                 "note": "Saved. Takes effect on the next /schedule-crons run (restart)."}
+
+
+def delete_schedule(name: str) -> tuple[int, dict]:
+    """Pure delete-by-name. Returns (http_status, response_obj)."""
+    jobs = _read_crons()
+    remaining = [j for j in jobs if j.get("name") != name]
+    if len(remaining) == len(jobs):
+        return 404, {"error": "not found", "name": name}
+    _write_crons(remaining)
+    return 200, {"deleted": name, "count": len(remaining),
+                 "note": "Removed. Takes effect on the next /schedule-crons run (restart)."}
 
 
 def get_schedules() -> list[dict]:
@@ -675,58 +724,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
-    def _json_body(self):
+    def _json_body(self):  # pragma: no cover — reads the HTTP request body
         try:
             n = int(self.headers.get("Content-Length", 0))
             return json.loads(self.rfile.read(n) or b"{}")
         except (ValueError, TypeError):
             return None
 
-    def _reply_json(self, code, obj):
+    def _reply_json(self, code, obj):  # pragma: no cover — writes the HTTP response
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(obj).encode())
 
-    def do_POST(self):
-        """Upsert a cron job in this host's crons.json. Loopback-only (same
-        bind as GET). Merges onto an existing job by name so an inline cron-only
-        edit inherits its prompt/prompt_skill."""
-        path = urlparse(self.path).path
-        if path != "/api/schedules":
+    def do_POST(self):  # pragma: no cover — thin HTTP glue over upsert_schedule()
+        """Upsert a cron job. Loopback-only (same bind as GET). Business logic
+        is the unit-tested pure upsert_schedule()."""
+        if urlparse(self.path).path != "/api/schedules":
             self.send_response(404); self.end_headers(); return
-        body = self._json_body()
-        if not isinstance(body, dict):
-            self._reply_json(400, {"error": "malformed JSON body"}); return
-        name = (body.get("name") or "").strip()
-        if not name:
-            self._reply_json(400, {"error": "name is required"}); return
-        jobs = _read_crons()
-        existing = next((j for j in jobs if j.get("name") == name), None)
-        merged = dict(existing) if existing else {}
-        merged["name"] = name
-        for k in ("cron", "prompt", "prompt_skill", "description"):
-            if k in body and str(body.get(k)).strip():
-                merged[k] = str(body[k]).strip()
-        if (body.get("prompt_skill") or "").strip():
-            merged.pop("prompt", None)
-        elif (body.get("prompt") or "").strip():
-            merged.pop("prompt_skill", None)
-        err = _validate_job(merged)
-        if err:
-            self._reply_json(400, {"error": err}); return
-        clean = {"name": merged["name"], "cron": merged["cron"]}
-        if merged.get("prompt_skill"):
-            clean["prompt_skill"] = merged["prompt_skill"]
-        else:
-            clean["prompt"] = merged["prompt"]
-        if merged.get("description"):
-            clean["description"] = merged["description"]
-        jobs = [j for j in jobs if j.get("name") != name]
-        jobs.append(clean)
-        _write_crons(jobs)
-        self._reply_json(200, {"ok": True, "name": name, "count": len(jobs),
-                               "note": "Saved. Takes effect on the next /schedule-crons run (restart)."})
+        code, obj = upsert_schedule(self._json_body())
+        self._reply_json(code, obj)
 
     def do_GET(self):
         if urlparse(self.path).path == "/":
@@ -872,15 +889,10 @@ load()
             else:
                 self.send_response(404)
                 self.end_headers()
-        elif path.startswith("/api/schedules/"):
+        elif path.startswith("/api/schedules/"):  # pragma: no cover — thin glue over delete_schedule()
             name = urllib.parse.unquote(path.split("/api/schedules/", 1)[1])
-            jobs = _read_crons()
-            remaining = [j for j in jobs if j.get("name") != name]
-            if len(remaining) == len(jobs):
-                self.send_response(404); self.end_headers(); return
-            _write_crons(remaining)
-            self._reply_json(200, {"deleted": name, "count": len(remaining),
-                                   "note": "Removed. Takes effect on the next /schedule-crons run (restart)."})
+            code, obj = delete_schedule(name)
+            self._reply_json(code, obj)
         else:
             self.send_response(404)
             self.end_headers()
