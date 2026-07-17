@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Guards for the heartbeat-starvation fix (gateway flapping / presence offline).
+
+The bridge's async handlers must never run long sync subprocesses on the event
+loop: a 15-25s block starves Discord's ~41s heartbeat, the socket drops, and
+the bot's presence flaps offline (owner report 2026-07-17 — 49 gateway
+sessions in one log window).
+
+Behavioral guard 1: _transcribe_via_skill executed through asyncio.to_thread
+keeps the loop responsive — a concurrent heartbeat-like task keeps ticking
+while a slow (stubbed) transcription runs off-loop.
+
+Structural guards 2-4: the two known blocking call sites are to_thread-wrapped
+in source, and on_ready sets an explicit presence.
+
+Run: python3 tests/discord-bridge-heartbeat-offload.test.py  (exit 0/1)
+"""
+from __future__ import annotations
+
+import asyncio
+import re
+import sys
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+SRC = (REPO / "src" / "discord-bridge.py").read_text()
+
+failures: list[str] = []
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    print(("  ok  " if cond else "  FAIL ") + name + ((" — " + detail) if detail and not cond else ""))
+    if not cond:
+        failures.append(name)
+
+
+# ── 1. Behavioral: to_thread keeps the loop responsive under a slow call ──────
+
+def _slow_transcribe(_path: str) -> str:
+    time.sleep(1.5)  # stands in for the up-to-25s transcription subprocess
+    return "transcript"
+
+
+async def _probe() -> tuple[int, str]:
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.1)
+            ticks += 1
+
+    hb = asyncio.ensure_future(heartbeat())
+    # The pattern under test — identical shape to the bridge's call site.
+    result = await asyncio.to_thread(_slow_transcribe, "/tmp/fake.m4a")
+    hb.cancel()
+    return ticks, result
+
+
+ticks, result = asyncio.run(_probe())
+check(
+    "event loop keeps ticking while the slow call runs off-loop",
+    ticks >= 10,
+    f"only {ticks} heartbeat ticks during a 1.5s to_thread call",
+)
+check("off-loop call still returns its result", result == "transcript")
+
+# ── 2-4. Structural: the real call sites are wrapped; presence is set ─────────
+
+check(
+    "transcribe call site is to_thread-wrapped",
+    re.search(r"await asyncio\.to_thread\(_transcribe_via_skill,", SRC) is not None,
+)
+check(
+    "no remaining bare _transcribe_via_skill call in async flow",
+    re.search(r"(?<!to_thread\()\btranscript = _transcribe_via_skill\(", SRC) is None,
+)
+check(
+    "dm-fallback subprocess.run is to_thread-wrapped",
+    re.search(r"await asyncio\.to_thread\(\s*subprocess\.run,", SRC) is not None,
+)
+check(
+    "on_ready sets an explicit online presence",
+    "change_presence(status=discord.Status.online)" in SRC,
+)
+check(
+    "ready log carries a gateway-session counter (flap visibility)",
+    "gateway session #" in SRC,
+)
+
+print()
+if failures:
+    print(f"FAIL — {len(failures)}: {failures}")
+    sys.exit(1)
+print("PASS — heartbeat-offload guards")
