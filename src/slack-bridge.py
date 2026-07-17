@@ -286,8 +286,10 @@ def load_allowed():
 def load_tier_map() -> dict:
     """Return the per-user-id → tier map from access.json `tierMap`, or
     empty dict if missing. Recognized tiers: "owner", "team", "other".
-    Unmapped users default to "owner" — preserves the pre-tierMap behavior
-    where every entry in `allowFrom` was treated as owner-tier."""
+    Unmapped users are resolved by the caller: "other" when a tierMap exists
+    (fail-safe), "owner" only in the legacy no-tierMap case — which
+    `_ensure_tier_map_seeded()` now eliminates by grandfathering existing
+    members, so new allowlist additions default to read-only."""
     with _access_cache_lock:
         cached = _access_cache
         cached_mtime = _access_cache_mtime
@@ -305,6 +307,31 @@ def load_tier_map() -> dict:
         return {}
 
 
+def _ensure_tier_map_seeded() -> None:
+    """One-time migration: if access.json has a populated allowFrom but no
+    tierMap, seed tierMap from allowFrom (all existing members -> owner) and
+    persist. Idempotent: does nothing once a tierMap exists. This flips the
+    default for FUTURE allowlist additions to read-only (they'll be missing
+    from tierMap -> resolved as "other") without demoting anyone already
+    trusted. Owner request 2026-07-17: allowlist default should be read-only.
+    """
+    try:
+        data = json.loads(ACCESS_FILE.read_text())
+    except Exception:
+        return
+    allow = data.get("allowFrom") or []
+    if data.get("tierMap") or not allow:
+        return  # already seeded, or nothing to grandfather
+    data["tierMap"] = {uid: "owner" for uid in allow}
+    try:
+        ACCESS_FILE.write_text(json.dumps(data, indent=2) + "\n")
+        os.chmod(ACCESS_FILE, 0o600)
+        _update_access_cache(data)
+        print(f"  [tier-map] grandfathered {len(allow)} existing allowFrom member(s) as owner; new additions now default to read-only", flush=True)
+    except OSError:
+        pass
+
+
 def tofu_onboard(user_id: str, username: str | None) -> set:
     """First-time auto-onboard — same contract as telegram-bridge.py.
 
@@ -320,6 +347,7 @@ def tofu_onboard(user_id: str, username: str | None) -> set:
     ACCESS_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "allowFrom": [user_id],
+        "tierMap": {user_id: "owner"},  # TOFU enrollee is the owner; explicit
         "tofuOwner": user_id,
         "tofuOnboardedAt": int(time.time()),
         "tofuOnboardedUsername": username or None,
@@ -525,6 +553,7 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
     #   2. tierMap present but uid missing → "other" (fail-safe, prevents
     #      silent privilege escalation when operator forgets a tierMap line)
     # See #893 for the rationale behind the split default.
+    _ensure_tier_map_seeded()
     tier_map = load_tier_map()
     if user_id in tier_map:
         access_tier = tier_map[user_id]

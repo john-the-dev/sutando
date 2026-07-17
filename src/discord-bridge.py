@@ -557,6 +557,40 @@ def load_policy():
     except Exception:
         return "pairing"
 
+
+def load_tier_map() -> dict:
+    """Per-user-id -> tier ("owner"|"team"|"other") from access.json `tierMap`.
+    Empty dict if absent. Mirrors slack-bridge.load_tier_map so the two
+    bridges share one access-control model."""
+    try:
+        data = json.loads(ACCESS_FILE.read_text())
+        return data.get("tierMap") or {}
+    except Exception:
+        return {}
+
+
+def ensure_tier_map_seeded() -> None:
+    """One-time migration (owner request 2026-07-17: allowlist default =
+    read-only). If access.json has a populated global allowFrom but no
+    tierMap, seed tierMap = {existing -> owner} once and persist. Existing
+    members are grandfathered as owner; any NEW allowFrom addition is then
+    missing from tierMap and resolves to team (read-only, sandboxed) instead
+    of the previous unconditional owner. Idempotent once a tierMap exists."""
+    try:
+        data = json.loads(ACCESS_FILE.read_text())
+    except Exception:
+        return
+    allow = data.get("allowFrom") or []
+    if data.get("tierMap") or not allow:
+        return
+    data["tierMap"] = {uid: "owner" for uid in allow}
+    try:
+        ACCESS_FILE.write_text(json.dumps(data, indent=2) + "\n")
+        os.chmod(ACCESS_FILE, 0o600)
+        print(f"  [tier-map] grandfathered {len(allow)} existing Discord allowFrom member(s) as owner; new additions now default to read-only (team)", flush=True)
+    except OSError:
+        pass
+
 def load_channel_config(channel_id):
     """Load channel config. Returns (requireMention, allowFrom set) or None if not configured."""
     try:
@@ -2938,9 +2972,16 @@ async def _handle_discord_message(message, force=False):
     # owner. Scope is strictly per-channel (keyed on the serving channel_id).
     is_collaborator = False
     if sender_id in allowed:
-        access_tier = "owner"
-        # Record owner activity for status-aware-pivot in proactive loop
-        write_owner_activity("discord", text, channel_id=getattr(message.channel, "id", None))
+        # Global-allowlist members are owner ONLY if the tierMap says so.
+        # Seed-on-first-run grandfathers everyone currently trusted; any
+        # newly-added allowFrom id is missing from tierMap and resolves to
+        # "team" (read-only, sandboxed) — the owner-requested default.
+        ensure_tier_map_seeded()
+        _tier_map = load_tier_map()
+        access_tier = _tier_map.get(sender_id, "owner" if not _tier_map else "team")
+        if access_tier == "owner":
+            # Record owner activity for status-aware-pivot in proactive loop
+            write_owner_activity("discord", text, channel_id=getattr(message.channel, "id", None))
     else:
         # Check if team member (from channel allowlists)
         try:
