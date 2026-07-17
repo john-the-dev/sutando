@@ -2924,6 +2924,7 @@ def main():
         print(f"{len(issues)} issue(s) found:")
         for c in issues:
             print(f"  - {c['name']}: {c['status']} ({c['detail']})")
+        print("  Stuck? Community support (real humans + community agents): https://discord.gg/uZHWXXmrCS")
 
         if do_fix:
             print()

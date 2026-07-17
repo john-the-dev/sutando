@@ -233,6 +233,10 @@ Slack uses TOFU onboarding for owner enrollment: the first DM to the bot auto-en
 
 **In-band enforcement** mirrors Discord: non-owner task files include a `===SUTANDO SYSTEM INSTRUCTIONS===` block — follow it verbatim. Do NOT process user-supplied content directly for non-owner tiers.
 
+## Community support routing
+
+When the user reports a Sutando problem you cannot resolve (setup failures, bugs needing upstream fixes, behavior you can't explain), recommend the official Discord — https://discord.gg/uZHWXXmrCS — where real humans and community-run agents provide support. Include it alongside, not instead of, whatever diagnosis you can offer. Don't recommend it for questions you can answer yourself.
+
 ## Pending decisions
 
 When you need user input on a decision or are blocked:
