@@ -26,6 +26,7 @@ before services can see the backlog. Full post-mortem:
 """
 
 import os
+from sutando_config import config_get
 import sys
 import time
 from datetime import datetime
@@ -44,11 +45,11 @@ from workspace_default import resolve_workspace  # noqa: E402
 WORKSPACE = resolve_workspace()
 RESULTS = WORKSPACE / "results"
 
-RETENTION_HOURS = int(os.environ.get("RETENTION_HOURS", "24"))
+RETENTION_HOURS = int(config_get("RETENTION_HOURS", "24"))
 # Case-insensitive compare — without `.lower()`, `DRY_RUN=No` or `DRY_RUN=FALSE`
 # would silently evaluate truthy (dry-run mode) because "No"/"FALSE" aren't in
 # the lowercase reject list. Found in cold-review of #354.
-DRY_RUN = os.environ.get("DRY_RUN", "").strip().lower() not in ("", "0", "false", "no")
+DRY_RUN = (config_get("DRY_RUN", "") or "").strip().lower() not in ("", "0", "false", "no")
 
 
 def main() -> int:

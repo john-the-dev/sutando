@@ -68,7 +68,8 @@ from message_chunking import chunk_message  # noqa: E402  (Result Router S3 — 
 import local_task_protocol  # noqa: E402
 from task_body_guard import confine_user_content  # noqa: E402
 from util_paths import channel_access_path, claude_home_path  # noqa: E402
-from workspace_default import resolve_workspace  # noqa: E402
+from workspace_default import resolve_workspace
+from sutando_config import config_get  # noqa: E402
 from task_archive import find_task_file  # noqa: E402
 from single_instance import acquire as _single_instance_acquire  # noqa: E402
 from vault_intercept import intercept_vault_commands, redact_vault_commands  # noqa: E402
@@ -328,7 +329,7 @@ pending_replies_lock = threading.Lock()
 # may have hit a limit" reply so the failure is visible instead of silent.
 # The pending entry is KEPT after notifying, so if the core later recovers and
 # writes a result, the real answer still gets delivered. 0 disables.
-TASK_TIMEOUT_SEC = int(os.environ.get("SLACK_TASK_TIMEOUT_SEC", "600"))
+TASK_TIMEOUT_SEC = int(config_get("SLACK_TASK_TIMEOUT_SEC", "600"))
 
 # Username cache — users.info is rate-limited (Tier 4 = 100/min). One
 # cache lookup per known user saves a network hop on every DM. Cache

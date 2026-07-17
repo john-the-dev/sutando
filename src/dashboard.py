@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 REPO_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
 from workspace_default import resolve_workspace, status_read_path  # noqa: E402
+from sutando_config import config_get  # noqa: E402
 from util_paths import personal_path, shared_personal_path  # noqa: E402
 WORKSPACE_DIR = resolve_workspace()
 PORT = 7844
@@ -703,7 +704,7 @@ if __name__ == "__main__":
     # `DASHBOARD_BIND=0.0.0.0` to opt back into LAN exposure when you
     # know you want it. Same env-override shape as `AGENT_API_BIND` in
     # agent-api.py.
-    bind = os.environ.get("DASHBOARD_BIND", "127.0.0.1")
+    bind = config_get("DASHBOARD_BIND", "127.0.0.1")
     # ThreadingHTTPServer: the single-threaded HTTPServer wedged whenever one
     # client held a connection without completing a request — every later
     # request (and the dashboard UI) hung on a port that still looked open
