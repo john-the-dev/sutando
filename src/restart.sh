@@ -7,6 +7,11 @@
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "Stopping Sutando services..."
+# Graceful-shutdown signal: mark BEFORE killing so the core loop (which
+# restart.sh does NOT kill) sees an intentional stop and can finish the
+# current task + exit cleanly, and health-check reads a graceful stop vs a
+# crash. Cleared on the restart path below and by startup.sh on boot.
+python3 "$REPO/src/shutdown.py" mark "restart.sh${1:+ $1}" >/dev/null 2>&1 || true
 pkill -f "voice-agent" 2>/dev/null
 pkill -f "web-client.ts" 2>/dev/null
 pkill -f "dashboard.py" 2>/dev/null
@@ -71,5 +76,8 @@ for _ in $(seq 1 30); do
     sleep 0.1
 done
 
+# We're restarting (not a permanent stop) — clear the sentinel so the fresh
+# core doesn't immediately think it should shut down.
+python3 "$REPO/src/shutdown.py" clear >/dev/null 2>&1 || true
 echo "Starting..."
 exec bash "$REPO/src/startup.sh"
