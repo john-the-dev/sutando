@@ -2144,6 +2144,38 @@ intents.message_content = True
 # connect. Gated behind env var so bridge boots safely without the flag.
 if os.environ.get("DISCORD_GUILD_MEMBERS_INTENT", "").lower() in ("1", "true", "yes"):
     intents.members = True
+async def _deliver_pairing_prompt(channel, code, username, sender_id, allowed):
+    """Route a pairing code to the owner via DM, never the public channel.
+
+    The code IS the approval credential — anyone who sees it can ask the
+    owner to pair them, and posting it in a shared channel leaks it to every
+    member (owner catch 2026-07-17). DM each global-allowlist owner; the
+    originating channel only learns that a request was sent. Falls back to
+    the legacy in-channel prompt ONLY when no owner DM could be delivered
+    (e.g. empty allowFrom pre-TOFU, or DMs closed) — without the fallback,
+    pairing would be impossible to complete. Returns "dm" or "channel".
+    """
+    where = getattr(channel, "name", None) or "DM"
+    prompt = (
+        f"Pairing request from @{username} (id {sender_id}) in #{where}.\n"
+        f"To approve, run: `/discord:access pair {code}`\n"
+        f"Ignore this to deny (codes expire in 1 hour)."
+    )
+    delivered = False
+    for oid in allowed:
+        try:
+            owner_user = await client.fetch_user(int(oid))
+            await owner_user.send(prompt)
+            delivered = True
+        except Exception as e:
+            print(f"  pairing DM to {oid} failed: {type(e).__name__}: {e}", flush=True)
+    if delivered:
+        await channel.send("Pairing required — the request has been sent to the owner for approval.")
+        return "dm"
+    await channel.send(f"Pairing required. Ask the owner to run:\n`/discord:access pair {code}`")
+    return "channel"
+
+
 client = discord.Client(intents=intents)
 
 
@@ -2726,8 +2758,8 @@ async def _handle_discord_message(message, force=False):
         access["pending"] = pending
         ACCESS_FILE.write_text(json.dumps(access, indent=2))
         os.chmod(ACCESS_FILE, 0o600)  # don't inherit umask 644 — file holds owner's Discord user IDs
-        await message.channel.send(f"Pairing required. Ask the owner to run:\n`/discord:access pair {code}`")
-        print(f"  Pairing requested: @{username} ({sender_id}) code={code}")
+        route = await _deliver_pairing_prompt(message.channel, code, username, sender_id, allowed)
+        print(f"  Pairing requested: @{username} ({sender_id}) code delivered via {route}")
         return
 
     # Handle forwarded messages (message_snapshots) — Discord's forwarding feature
