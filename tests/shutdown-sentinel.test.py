@@ -20,6 +20,10 @@ spec = importlib.util.spec_from_file_location("shutdown_mod", REPO / "src" / "sh
 sd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sd)
 
+# Cover the REAL _sentinel_path() once (it's replaced with a temp path below).
+_real_path = sd._sentinel_path()
+assert str(_real_path).endswith("state/shutdown.sentinel"), _real_path
+
 # Redirect the sentinel to a temp path (never touch the real state dir).
 _tmp = Path(tempfile.mkdtemp(prefix="shutdown-")) / "shutdown.sentinel"
 sd._sentinel_path = lambda: _tmp
@@ -59,15 +63,17 @@ check("corrupt sentinel still reads as shutting-down", sd.is_shutting_down() is 
 check("corrupt sentinel info degrades gracefully", sd.shutdown_info().get("reason") == "unknown")
 _tmp.unlink()
 
-# ── CLI (as restart.sh / startup.sh invoke it) ────────────────────────────────
-# Point the CLI's workspace at our temp via a tiny wrapper env would be ideal,
-# but the module resolves the real workspace; exercise the pure functions above
-# for behavior and the CLI dispatch for exit codes with a monkeypatched path.
-import os
-env = dict(os.environ)
-# check exits 1 when not shutting down (real state dir has no sentinel in CI)
-r = subprocess.run([sys.executable, str(REPO / "src" / "shutdown.py"), "check"], env=env, capture_output=True)
-check("CLI check exits nonzero when not shutting down", r.returncode == 1, f"rc={r.returncode}")
+# ── CLI dispatch (in-process so coverage counts; uses the patched temp path) ──
+sd.clear_shutdown()
+check("main('check') → 1 when not shutting down", sd.main(["shutdown.py", "check"]) == 1)
+check("main('mark') → 0 and writes sentinel",
+      sd.main(["shutdown.py", "mark", "cli-test"]) == 0 and sd.is_shutting_down())
+check("main('mark') recorded the reason", sd.shutdown_info().get("reason") == "cli-test")
+check("main('check') → 0 when shutting down", sd.main(["shutdown.py", "check"]) == 0)
+check("main('clear') → 0 and removes sentinel",
+      sd.main(["shutdown.py", "clear"]) == 0 and not sd.is_shutting_down())
+check("main() with no arg defaults to check", sd.main(["shutdown.py"]) == 1)
+check("main('bogus') → 2 usage", sd.main(["shutdown.py", "bogus"]) == 2)
 
 print()
 if failures:
