@@ -22,7 +22,9 @@
  *                          $SUTANDO_WORKSPACE is no longer honored for resolution.
  *                          Stores tasks/, results/, state/, logs/, conversation.log.
  *   PORT                — WebSocket port (default: 9900)
- *   HOST                — Bind address (default: 0.0.0.0)
+ *   HOST                — Bind address (default: 127.0.0.1 loopback; the voice WS
+ *                          has no auth. Set 0.0.0.0 only for a trusted deployment;
+ *                          LAN reach normally goes through the opt-in /ws proxy.)
  */
 
 import 'dotenv/config';
@@ -98,7 +100,11 @@ if (process.env.GEMINI_VOICE_API_KEY) {
 }
 
 const PORT = Number(process.env.PORT) || 9900;
-const HOST = process.env.HOST || '0.0.0.0';
+// Loopback by default: the voice WS has no auth, so it must NOT be reachable
+// from the LAN out of the box. LAN reach is an explicit opt-in via the
+// web-client /ws proxy (SUTANDO_LAN_SHARE), never a direct bind to this port.
+// Set HOST=0.0.0.0 explicitly only for a trusted deployment that needs it.
+const HOST = process.env.HOST || '127.0.0.1';
 // Per-user runtime state lives under the resolved workspace (post-v0.8
 // / #1440 default: <repo>/workspace/), not the repo checkout. Pre-#762
 // voice-agent resolved its tasks/results/state against the repo path via
@@ -723,6 +729,23 @@ async function main() {
 	// the file is always present + always reflects the latest known state.
 	writeVoiceState(false);
 
+	// voice-agent.json is runtime-authored state recording the ACTUAL bound WS
+	// endpoint. `sutando-config.sh runtime` reads it (validated by pid liveness)
+	// so the AgentRuntime descriptor's `voice_ws` reports the port this process
+	// really bound — correct for installs on a non-default PORT, not a hardcoded
+	// default. Same "the running process is the authority on its own resource"
+	// principle by which the tmux socket is sourced from the core's heartbeat.
+	function writeVoiceRuntimeState() {
+		try {
+			writeFileSync(
+				statusPath('voice-agent.json', WORKSPACE_DIR),
+				JSON.stringify({ voice_ws: `ws://127.0.0.1:${PORT}`, port: PORT, pid: process.pid, ts: Math.floor(Date.now() / 1000) })
+			);
+		} catch (err) {
+			console.error(`${ts()} [VoiceRuntime] state write failed:`, err);
+		}
+	}
+
 
 	const session = new VoiceSession({
 		sessionId: SESSION_ID,
@@ -1181,6 +1204,10 @@ async function main() {
 			}
 		}
 	}, 30_000);
+
+	// The server bound successfully (EADDRINUSE would have exited via main().catch
+	// before here) — record the actual bound endpoint for the runtime descriptor.
+	writeVoiceRuntimeState();
 
 	console.log('============================================================');
 	console.log('Sutando — Voice Interface');
