@@ -33,42 +33,124 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Slack bridge
+# Slack bridge — behavioral (CR #1839: exercise _write_task and assert on the
+# WRITTEN TASK FILE, not on slack-bridge.py source text). The discord/telegram
+# sections below remain structural; converting them is tracked separately.
 # ---------------------------------------------------------------------------
 
-slack_src = SLACK_BRIDGE.read_text()
+import importlib.util
+import os
+import tempfile
+import types
+from unittest.mock import patch
 
+# Stub slack_bolt — mirrors tests/slack-bridge-write-task.test.py
+class _FakeApp:
+    def __init__(self, token=None):
+        self.client = types.SimpleNamespace(
+            chat_postMessage=lambda **k: {"ok": True},
+            conversations_replies=lambda **k: {"ok": True, "messages": []},
+        )
+
+    def _decorator(self, *a, **k):
+        return lambda fn: fn
+
+    event = message = command = action = shortcut = view = _decorator
+
+
+_bolt = types.ModuleType("slack_bolt")
+_bolt.App = _FakeApp
+sys.modules["slack_bolt"] = _bolt
+_adapter = types.ModuleType("slack_bolt.adapter")
+_socket = types.ModuleType("slack_bolt.adapter.socket_mode")
+_socket.SocketModeHandler = type("SocketModeHandler", (), {"__init__": lambda self, *a, **k: None})
+sys.modules["slack_bolt.adapter"] = _adapter
+sys.modules["slack_bolt.adapter.socket_mode"] = _socket
+
+_tmp_ws = tempfile.mkdtemp(prefix="sutando-hints-test-")
+os.environ["SUTANDO_TEST_MODE"] = "1"
+os.environ["SLACK_BOT_TOKEN"] = "xoxb-test-not-real"
+os.environ["SLACK_APP_TOKEN"] = "xapp-test-not-real"
+
+# Two config dirs: one with the notify/transcribe skills "installed" (empty
+# executable stand-ins — _write_task only checks existence), one without.
+_ccd_with = Path(tempfile.mkdtemp(prefix="sutando-hints-ccd-with-"))
+_ccd_without = Path(tempfile.mkdtemp(prefix="sutando-hints-ccd-without-"))
+_notify_py = _ccd_with / "skills/task-progress/scripts/notify.py"
+_transcribe_py = _ccd_with / "skills/audio-transcribe/scripts/transcribe.py"
+for f in (_notify_py, _transcribe_py):
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("# test stand-in\n")
+
+os.environ["CLAUDE_CONFIG_DIR"] = str(_ccd_with)
+
+_spec = importlib.util.spec_from_file_location("slackbridge_hints", SLACK_BRIDGE)
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+_TASKS_DIR = Path(_tmp_ws) / "tasks"
+_TASKS_DIR.mkdir(parents=True, exist_ok=True)
+_mod.TASKS_DIR = _TASKS_DIR
+
+
+def _write_owner_task(text: str, files: list | None = None) -> str:
+    """Run _write_task as an allowed owner; return the written task body."""
+    event = {"user": "U_OWNER", "channel": "CFAKE", "channel_type": "im", "ts": "1000.001"}
+    if files is not None:
+        event["files"] = files
+    with patch.object(_mod, "load_allowed", lambda: {"U_OWNER"}), \
+         patch.object(_mod, "load_tier_map", dict), \
+         patch.object(_mod, "write_owner_activity", lambda *a: None), \
+         patch.object(_mod, "_download_slack_file", lambda fd: "/tmp/fake-voice.m4a"), \
+         patch.object(_mod, "_transcribe_via_skill", lambda p: None):
+        task_id = _mod._write_task(event, "DM", text, "testowner")
+    assert task_id, "_write_task returned None for an allowed owner"
+    return (_TASKS_DIR / f"{task_id}.txt").read_text()
+
+
+# Case A: skills installed, plain text task
+_body = _write_owner_task("please check the Zacks")
 check(
-    "slack: skill_hints block defined for owner tasks",
-    'skill_hints = ""' in slack_src and 'access_tier == "owner"' in slack_src,
+    "slack: owner task carries the SKILL INSTRUCTIONS block",
+    "===SKILL INSTRUCTIONS" in _body,
 )
 check(
-    "slack: skill injection guarded by skill file existence check",
-    "_notify_py.exists()" in slack_src and "_transcribe_py.exists()" in slack_src,
+    "slack: notify hint present when task-progress skill is installed",
+    f"python3 {_notify_py}" in _body and "--source slack --channel-id CFAKE" in _body,
 )
 check(
-    "slack: notify command uses task-progress skill",
-    "task-progress/scripts/notify.py" in slack_src,
+    "slack: no transcribe hint for a text-only task",
+    "TRANSCRIBE:" not in _body,
+)
+
+# Case B: skills NOT installed — CONTEXT-FIRST must survive, hints must not
+os.environ["CLAUDE_CONFIG_DIR"] = str(_ccd_without)
+_body = _write_owner_task("terse follow-up")
+check(
+    "slack: CONTEXT-FIRST injected even with no skills installed",
+    "CONTEXT-FIRST" in _body,
 )
 check(
-    "slack: audio transcription command uses audio-transcribe skill",
-    "audio-transcribe/scripts/transcribe.py" in slack_src,
+    "slack: notify hint absent when task-progress skill is missing (exists() guard)",
+    "NOTIFY FIRST" not in _body,
+)
+os.environ["CLAUDE_CONFIG_DIR"] = str(_ccd_with)
+
+# Case C: attachment present + audio-transcribe installed
+_body = _write_owner_task("", files=[{"id": "F1", "name": "note.m4a"}])
+check(
+    "slack: transcribe hint present for an attachment task",
+    f"TRANSCRIBE: python3 {_transcribe_py} '/tmp/fake-voice.m4a'" in _body,
 )
 check(
-    "slack: skill_hints appended to task_file.write_text",
-    re.search(r'task_file\.write_text\(.*skill_hints', slack_src, re.DOTALL) is not None,
-    "skill_hints not found inside write_text call",
+    "slack: attachment task swaps notify message to the voice variant",
+    "Got your voice message" in _body,
 )
 check(
-    "slack: SKILL INSTRUCTIONS sentinel present",
-    "===SKILL INSTRUCTIONS" in slack_src,
+    "slack: task body carries the attached-file line",
+    "[File attached: /tmp/fake-voice.m4a]" in _body,
 )
-# NOTE: CONTEXT-FIRST injection + the owner-only gate (access_tier == "owner")
-# are covered BEHAVIORALLY in tests/slack-bridge-write-task.test.py — it calls
-# _write_task for an owner and a non-owner and asserts CONTEXT-FIRST / the whole
-# SKILL INSTRUCTIONS block is present for the owner and absent for the other tier.
-# The prior source-grep substring/regex checks here were redundant with that and
-# were removed per CR #1839 (source_grep_tests).
+# NOTE: CONTEXT-FIRST wording + the owner-only gate (non-owner gets no hints)
+# are covered behaviorally in tests/slack-bridge-write-task.test.py.
 
 # ---------------------------------------------------------------------------
 # Discord bridge
