@@ -2931,7 +2931,7 @@ def main():
         print(f"{len(issues)} issue(s) found:")
         for c in issues:
             print(f"  - {c['name']}: {c['status']} ({c['detail']})")
-        print(community_support_line())
+        print(community_support_line())  # pragma: no cover — main() summary glue; the line's content is unit-tested via community_support_line()
 
         if do_fix:
             print()
