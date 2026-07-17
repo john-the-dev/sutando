@@ -134,6 +134,23 @@ export function firstUsableCandidate(
 	return null;
 }
 
+// Pure serve decision for calls where NO refresh attempt happens this request —
+// outside the skew window, no refreshToken, or (the CR #2106 case) a
+// failure-backoff cooldown skipping the attempt. The doomed-token fallback must
+// hold here exactly as it does post-attempt: a hard-expired chosen token is
+// never served while a valid sibling exists.
+export function serveWithoutRefresh(
+	stored: StoredClaudeOAuth,
+	candidates: StoredClaudeOAuth[],
+	now: number,
+): { token: string; via: string; fellBack: boolean } {
+	if (tokenHardExpired(stored.oauth, now)) {
+		const fb = firstUsableCandidate(candidates, now, stored.service);
+		if (fb) return { token: fb.oauth.accessToken, via: fb.service, fellBack: true };
+	}
+	return { token: stored.oauth.accessToken, via: stored.service, fellBack: false };
+}
+
 // Read the full cred object from one keychain service (not just accessToken).
 function readCredFromService(service: string): StoredClaudeOAuth | null {
 	try {
@@ -341,17 +358,15 @@ async function getFreshOAuthToken(): Promise<string | null> {
 		}
 		return after?.accessToken ?? cred.accessToken;
 	}
-	// Not within the refresh-skew window, but if the chosen token is already
-	// hard-expired (e.g. no refreshToken to trigger the refresh path above), still
-	// prefer a fresher sibling over serving a guaranteed-401 token.
-	if (tokenHardExpired(cred, now)) {
-		const fallback = firstUsableCandidate(readAllCandidates(), now, service);
-		if (fallback) {
-			console.error(`${ts()} [Proxy] '${service}' token hard-expired with no usable refresh — serving valid '${fallback.service}' instead`);
-			return fallback.oauth.accessToken;
-		}
+	// No refresh attempt this call — outside the skew window, no refreshToken,
+	// OR the failure-backoff cooldown skipped it (shouldAttemptRefresh false).
+	// In every one of those cases a hard-expired chosen token must still fall
+	// back to a valid sibling rather than serve a guaranteed 401.
+	const served = serveWithoutRefresh(stored, readAllCandidates(), now);
+	if (served.fellBack) {
+		console.error(`${ts()} [Proxy] '${service}' token hard-expired and refresh unavailable this call — serving valid '${served.via}' instead`);
 	}
-	return cred.accessToken;
+	return served.token;
 }
 
 // Back-compat sync reader (startup probe only — does not refresh).

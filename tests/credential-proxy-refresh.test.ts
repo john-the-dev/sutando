@@ -200,3 +200,43 @@ test('firstUsableCandidate: all hard-expired → null (caller keeps existing beh
 	assert.equal(firstUsableCandidate([cand(scopedSvc, 10), cand(defaultSvc, 20)], 100), null);
 	assert.equal(firstUsableCandidate([], 100), null);
 });
+
+// ── CR #2106: the doomed-token fallback must hold when refresh is SKIPPED ──
+// (failure-backoff cooldown / no refreshToken), not only after a failed attempt.
+
+import { serveWithoutRefresh } from '../skills/quota-tracker/scripts/credential-proxy.ts';
+
+const NOW = 1_000_000;
+const scopedDoomed = {
+	service: 'Claude Code-credentials-scoped01',
+	oauth: { accessToken: 'doomed-scoped-token-aaaaaaaaaa', refreshToken: 'dead', expiresAt: NOW - 60_000 },
+};
+const defaultValid = {
+	service: 'Claude Code-credentials',
+	oauth: { accessToken: 'valid-default-token-bbbbbbbbbb', expiresAt: NOW + 3_600_000 },
+};
+
+test('cooldown skips the refresh attempt (shouldAttemptRefresh false during backoff)', () => {
+	assert.equal(shouldAttemptRefresh(true, NOW, NOW + 60_000), false);
+});
+
+test('cooldown path: hard-expired scoped token falls back to the valid sibling', () => {
+	// This is the exact branch a cooldown-skipped call takes in getFreshOAuthToken.
+	const served = serveWithoutRefresh(scopedDoomed, [scopedDoomed, defaultValid], NOW);
+	assert.equal(served.fellBack, true);
+	assert.equal(served.via, 'Claude Code-credentials');
+	assert.equal(served.token, 'valid-default-token-bbbbbbbbbb');
+});
+
+test('cooldown path: still-valid token is served as-is (no spurious fallback)', () => {
+	const scopedValid = { ...scopedDoomed, oauth: { ...scopedDoomed.oauth, expiresAt: NOW + 120_000 } };
+	const served = serveWithoutRefresh(scopedValid, [scopedValid, defaultValid], NOW);
+	assert.equal(served.fellBack, false);
+	assert.equal(served.token, 'doomed-scoped-token-aaaaaaaaaa');
+});
+
+test('cooldown path: no usable sibling → original token served (fail-safe, never null)', () => {
+	const served = serveWithoutRefresh(scopedDoomed, [scopedDoomed], NOW);
+	assert.equal(served.fellBack, false);
+	assert.equal(served.token, 'doomed-scoped-token-aaaaaaaaaa');
+});
