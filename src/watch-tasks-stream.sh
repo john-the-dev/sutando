@@ -170,6 +170,15 @@ fswatch \
     *.txt)
       parent="$(dirname "$path")"
       if [ "$parent" = "$TASKS_DIR_ABS" ] && [ -f "$path" ]; then
+        # Graceful-shutdown gate (#2165): while the shutdown sentinel is present
+        # do NOT surface a NEW task to the core loop — it is exiting, and handing
+        # it a fresh task would orphan that task mid-pass (recovered only after
+        # the result-watcher timeout, the visible "no response" delay). The file
+        # stays in tasks/ and is re-surfaced by the next boot's INITIAL_SCAN
+        # (startup.sh clears the sentinel on boot). Cheap file-existence check.
+        if [ -f "$STATE_DIR/shutdown.sentinel" ]; then
+          continue
+        fi
         printf 'TASK_FILE: %s\n' "$(basename "$path")" || exit 0
       fi
       ;;

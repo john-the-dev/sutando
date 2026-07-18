@@ -75,6 +75,31 @@ check("main('clear') → 0 and removes sentinel",
 check("main() with no arg defaults to check", sd.main(["shutdown.py"]) == 1)
 check("main('bogus') → 2 usage", sd.main(["shutdown.py", "bogus"]) == 2)
 
+# ── before/after: a task-intake gate that honors the sentinel defers new work
+#    during shutdown — the orphan-prevention semantics (CR #2165). Both real
+#    consumers use exactly this is_shutting_down() decision: the task watcher
+#    (src/watch-tasks-stream.sh skips emitting a new TASK_FILE while the
+#    sentinel exists) and the proactive-loop top-of-pass check (CLAUDE.md /
+#    AGENTS.md "Graceful shutdown"). Model the gate and drive it with the REAL
+#    primitive to prove the before/after: without the fix a new task arriving
+#    mid-shutdown is handed to a dying core (orphaned until the result-watcher
+#    timeout); with it, the task is deferred and re-surfaced after boot.
+def _intake_accepts_new_task() -> bool:
+    """The decision shared by the watcher emit + the loop's top-of-pass check:
+    accept/surface a NEW task ONLY when not shutting down."""
+    return not sd.is_shutting_down()
+
+
+sd.clear_shutdown()
+_before = _intake_accepts_new_task()          # BEFORE: no sentinel → task flows to the core
+sd.mark_shutdown("restart.sh --stop-only")
+_after = _intake_accepts_new_task()           # AFTER: sentinel → deferred, no mid-shutdown orphan
+check("BEFORE shutdown — a new task is accepted (flows to the core loop)", _before is True)
+check("AFTER shutdown — a new task is deferred, not handed to a dying core", _after is False)
+sd.clear_shutdown()
+check("after clear on boot — task intake resumes (no permanent suppression)",
+      _intake_accepts_new_task() is True)
+
 print()
 if failures:
     print(f"FAIL — {len(failures)}: {failures}")

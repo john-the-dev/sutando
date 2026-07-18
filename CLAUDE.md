@@ -84,6 +84,16 @@ echo '{"status":"idle","ts":<epoch>}' > "$CORE_STATUS"                          
 
 This applies to all work — proactive loop passes, voice tasks, user requests, code changes.
 
+## Graceful shutdown (issue: #2165)
+
+**At the top of every proactive-loop pass, before starting new work, check the shutdown sentinel:**
+
+```bash
+python3 src/shutdown.py check   # exit 0 = shutting down, 1 = not
+```
+
+If it exits 0, an intentional stop has been signalled (`restart.sh`/an explicit stop wrote `state/shutdown.sentinel`). **Finish the current task, do NOT start a new one, write `{"status":"idle"}` to core-status, and end the loop cleanly** — this is the durable signal that lets the core exit between passes instead of being killed mid-task (which orphans the task until the result-watcher timeout, the visible "no response" delay). `startup.sh` clears the sentinel on boot, so the next session runs normally. Helpers: `src/shutdown.py` (`is_shutting_down()` / `shutdown_info()` for Python callers).
+
 ## Chat-path task tracking (issue #585)
 
 When you accept a non-trivial commitment from the user via **chat** (direct text input, not through voice/Discord/Telegram bridges), write a task file so the dashboard can track it.
