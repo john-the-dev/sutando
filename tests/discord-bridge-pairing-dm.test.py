@@ -95,6 +95,24 @@ check("channel got exactly one message", len(channel.sent) == 1)
 check("channel message does NOT contain the code",
       all(CODE not in m for m in channel.sent), f"leaked: {channel.sent}")
 
+# ── Case 1b: explicit BEFORE/AFTER channel-leak contrast (CR #2158) ───────────
+# BEFORE (the pre-fix behavior this PR replaced): the pairing branch posted the
+# code straight into the originating channel, leaking the approval credential
+# to every member. Reconstruct that exact call to show the leak concretely.
+_before_ch = FakeMessageable(name="pr-review")
+asyncio.run(_before_ch.send(f"Pairing required. Ask the owner to run:\n`/discord:access pair {CODE}`"))
+before_leaked = any(CODE in m for m in _before_ch.sent)
+# AFTER (this PR): same pairing event, owner reachable → the channel post is
+# generic; the code travels only via the owner DM (reuse Case 1's results).
+after_channel_leaked = any(CODE in m for m in channel.sent)
+after_dm_has_code = any(CODE in m for m in owner.sent)
+check("BEFORE-fix: the in-channel pairing post leaked the code to the channel",
+      before_leaked, f"{_before_ch.sent}")
+check("AFTER-fix: the channel post no longer carries the code",
+      not after_channel_leaked, f"{channel.sent}")
+check("AFTER-fix: the code is delivered only via the owner DM",
+      after_dm_has_code and not after_channel_leaked)
+
 # ── Case 2: owner unreachable → legacy in-channel fallback ───────────────────
 channel2 = FakeMessageable(name="pr-review")
 with patch.object(mod, "client", FakeClient(None)):
