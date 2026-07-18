@@ -151,7 +151,10 @@ class _FakeMsg:
         self.message_snapshots: list = []
 
 # Isolated ACCESS_FILE (CLAUDE_CONFIG_DIR was tmp'd before import): pairing on,
-# empty allowFrom → the sender is unpaired, so the pairing branch fires.
+# empty allowFrom → the sender is unpaired, so the pairing branch fires. Create
+# the nested channels/discord/ parent first — a fresh tmp CLAUDE_CONFIG_DIR
+# (CI) has no such dir, and both this seed AND the code-under-test write it.
+mod.ACCESS_FILE.parent.mkdir(parents=True, exist_ok=True)
 mod.ACCESS_FILE.write_text(_json.dumps({"dmPolicy": "pairing", "allowFrom": [], "pending": {}}))
 
 _fake_client = type("_C", (), {"user": object()})()
