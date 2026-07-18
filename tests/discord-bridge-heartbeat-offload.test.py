@@ -66,7 +66,47 @@ check(
 )
 check("off-loop call still returns its result", result == "transcript")
 
+# ── 1b. BEFORE/AFTER behavioral contrast (CR #2159) ───────────────────────────
+# The bug: a long SYNC subprocess ran directly on the event loop, starving
+# Discord's ~41s heartbeat until the socket dropped and presence flapped
+# offline (49 gateway sessions in one window). Run the SAME 1.5s work + the
+# SAME 0.1s heartbeat two ways and contrast the tick counts — this is the
+# behavior-level, not source-grep, evidence that the flap cause is removed.
+async def _probe_blocking() -> int:
+    ticks_b = 0
+
+    async def heartbeat():
+        nonlocal ticks_b
+        while True:
+            await asyncio.sleep(0.1)
+            ticks_b += 1
+
+    hb = asyncio.ensure_future(heartbeat())
+    await asyncio.sleep(0.05)          # let the heartbeat register (may tick once)
+    _slow_transcribe("/tmp/fake.m4a")  # BLOCKING on the loop — the pre-fix shape
+    hb.cancel()
+    try:
+        await hb
+    except asyncio.CancelledError:
+        pass
+    return ticks_b
+
+
+before_ticks = asyncio.run(_probe_blocking())
+check(
+    "BEFORE-fix: a blocking on-loop call starves the heartbeat (the flap cause)",
+    before_ticks <= 1,
+    f"expected ~0 ticks during a 1.5s on-loop block, got {before_ticks}",
+)
+check(
+    "AFTER-fix: the same work via to_thread keeps the heartbeat ticking",
+    ticks >= 10 and (ticks - before_ticks) >= 8,
+    f"blocking={before_ticks} ticks vs to_thread={ticks} ticks over the same 1.5s",
+)
+
 # ── 2-4. Structural: the real call sites are wrapped; presence is set ─────────
+# (Secondary to the behavioral contrast above — these confirm the fix is applied
+# at the two specific blocking call sites, which a stand-in probe can't verify.)
 
 check(
     "transcribe call site is to_thread-wrapped",
