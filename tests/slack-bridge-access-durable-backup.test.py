@@ -108,6 +108,35 @@ fresh = json.loads(slack.ACCESS_FILE.read_text())
 check("genuine first-run TOFU still enrolls when no backup exists",
       fresh.get("tofuOwner") == "U_FIRST" and "U_FIRST" in first)
 
+# 3b. EXPLICIT before/after wipe+restart contrast (CR #2163 missing_before_after)
+# Same scenario — access.json wiped, fresh process (cache cleared), a stranger
+# sends the first DM — run in both worlds, asserting the resulting OWNER differs.
+#   BEFORE (no durable backup, the pre-fix world): stranger is TOFU-enrolled as owner.
+#   AFTER  (durable backup present, this fix): the original owner is restored;
+#          the stranger is not owner.
+_owner_before = _tmp / "auth" / "slack-access-backup.json"
+# BEFORE: no backup on disk, no cache → wipe+restart enrolls the stranger.
+slack.ACCESS_FILE.unlink(missing_ok=True)
+slack.ACCESS_BACKUP_FILE.unlink(missing_ok=True)
+_reset_cache()
+slack.tofu_onboard("U_ATTACKER", "attacker")
+before_owner = json.loads(slack.ACCESS_FILE.read_text()).get("tofuOwner")
+# AFTER: a good backup exists on disk (written before the wipe) → restore, no enroll.
+slack.ACCESS_FILE.unlink(missing_ok=True)
+_reset_cache()
+slack.ACCESS_BACKUP_FILE.parent.mkdir(parents=True, exist_ok=True)
+slack.ACCESS_BACKUP_FILE.write_text(json.dumps(
+    {"allowFrom": ["U_REAL_OWNER"], "tierMap": {"U_REAL_OWNER": "owner"}, "tofuOwner": "U_REAL_OWNER"}) + "\n")
+slack.tofu_onboard("U_ATTACKER", "attacker")
+after_owner = json.loads(slack.ACCESS_FILE.read_text()).get("tofuOwner")
+check("BEFORE-fix: wipe+restart TOFU-enrolls the stranger as owner",
+      before_owner == "U_ATTACKER", f"got {before_owner}")
+check("AFTER-fix: wipe+restart restores the real owner, not the stranger",
+      after_owner == "U_REAL_OWNER", f"got {after_owner}")
+check("before/after owner identity differs (exposure closed)",
+      before_owner != after_owner and after_owner == "U_REAL_OWNER",
+      f"before={before_owner} after={after_owner}")
+
 # ── error-branch coverage on the helpers directly ─────────────────────────────
 # backup: OSError during write is swallowed (best-effort), never raises
 import unittest.mock as _mock
