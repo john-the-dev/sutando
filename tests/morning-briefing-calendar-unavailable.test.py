@@ -193,10 +193,88 @@ class TestMainCalendarStatusLine(unittest.TestCase):
             self.assertIn("couldn't read your calendar", printed)
 
 
+class TestWeatherLatLonOverride(unittest.TestCase):
+    """get_weather() honors WEATHER_LAT/WEATHER_LON via config_get (env legacy
+    fallback), exercising the config_get override branch."""
+
+    def setUp(self):
+        self.mod = _load()
+
+    class _FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return self._payload
+
+    _WX = (
+        b'{"current":{"temperature_2m":62.4,"weather_code":1},'
+        b'"daily":{"temperature_2m_max":[70],"temperature_2m_min":[52],'
+        b'"precipitation_probability_max":[10]}}'
+    )
+
+    def test_env_latlon_override_used(self):
+        import os
+        captured = {}
+
+        def fake_urlopen(url, timeout=8):
+            captured["url"] = url
+            return self._FakeResp(self._WX)
+
+        with patch.dict(os.environ, {"WEATHER_LAT": "47.67", "WEATHER_LON": "-122.12"}), \
+             patch.object(self.mod, "_run_applescript", return_value=("America/Los_Angeles", "")), \
+             patch.object(self.mod, "urlopen", side_effect=fake_urlopen):
+            out = self.mod.get_weather()
+
+        # config_get picked up the override → URL carries the Redmond coords,
+        # not the SF default.
+        self.assertIn("latitude=47.67", captured["url"])
+        self.assertIn("longitude=-122.12", captured["url"])
+        self.assertIn("62°F", out)
+        self.assertIn("mostly clear", out)
+
+    def test_no_override_uses_default(self):
+        import os
+        captured = {}
+
+        def fake_urlopen(url, timeout=8):
+            captured["url"] = url
+            return self._FakeResp(self._WX)
+
+        # Neither env nor config set → default SF coords; config_get returns None
+        # so the override branch is skipped.
+        env_clear = {k: v for k, v in os.environ.items()
+                     if k not in ("WEATHER_LAT", "WEATHER_LON")}
+        with patch.dict(os.environ, env_clear, clear=True), \
+             patch.object(self.mod, "_run_applescript", return_value=("UTC", "")), \
+             patch.object(self.mod, "urlopen", side_effect=fake_urlopen):
+            out = self.mod.get_weather()
+
+        self.assertIn("latitude=37.77", captured["url"])
+        self.assertIn("62°F", out)
+
+
 if __name__ == "__main__":
     # Hard-exit after the suite to sidestep a Python interpreter-teardown SIGSEGV
     # on ubuntu-latest runners: the 9 tests pass, then the process segfaults during
     # interpreter shutdown (not the test logic - subprocess calls are mocked).
     import os
     _r = unittest.main(exit=False)
+    # os._exit() below skips atexit handlers — including coverage.py's data
+    # writer — so under `coverage run` this file would otherwise record 0% and
+    # its exercised src/morning-briefing.py lines show as uncovered in the diff
+    # gate. Flush the active coverage session explicitly before the hard exit.
+    try:
+        import coverage
+        _cov = coverage.Coverage.current()
+        if _cov is not None:
+            _cov.save()
+    except Exception:
+        pass
     os._exit(0 if _r.result.wasSuccessful() else 1)
