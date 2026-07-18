@@ -109,6 +109,37 @@ check("delete existing → 200", code == 200 and obj.get("deleted") == "n1")
 code, obj = dash.delete_schedule("ghost")
 check("delete missing → 404", code == 404)
 
+# ── explicit BEFORE/AFTER state transitions for add / edit / delete (CR #2164) ──
+# Show the persisted crons.json content before and after each operation — the
+# add/edit/delete evidence, driving the pure handlers the HTTP routes call.
+import json as _json
+dash._write_crons([])  # start from a clean slate
+
+# ADD
+before_add = dash._read_crons()
+dash.upsert_schedule({"name": "briefing", "cron": "0 9 * * *", "prompt_skill": "morning-briefing"})
+after_add = dash._read_crons()
+print("ADD    before:", _json.dumps(before_add), "→ after:", _json.dumps(after_add))
+check("ADD: crons.json goes [] → one job named 'briefing'",
+      before_add == [] and len(after_add) == 1 and after_add[0]["name"] == "briefing")
+
+# EDIT (cron-only, by name — must not duplicate, must keep prompt_skill)
+before_edit = dash._read_crons()
+dash.upsert_schedule({"name": "briefing", "cron": "30 7 * * *"})
+after_edit = dash._read_crons()
+print("EDIT   before:", _json.dumps(before_edit), "→ after:", _json.dumps(after_edit))
+check("EDIT: still one job, cron '0 9 * * *' → '30 7 * * *', prompt_skill preserved",
+      len(after_edit) == 1 and after_edit[0]["cron"] == "30 7 * * *"
+      and after_edit[0].get("prompt_skill") == "morning-briefing")
+
+# DELETE
+before_del = dash._read_crons()
+dash.delete_schedule("briefing")
+after_del = dash._read_crons()
+print("DELETE before:", _json.dumps(before_del), "→ after:", _json.dumps(after_del))
+check("DELETE: crons.json goes one job → []",
+      len(before_del) == 1 and after_del == [])
+
 print()
 if failures:
     print(f"FAIL — {len(failures)}: {failures}")
