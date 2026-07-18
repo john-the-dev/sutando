@@ -23,11 +23,16 @@ Set ANY of the following and all telemetry becomes a silent no-op:
 
 * ``DO_NOT_TRACK=1``     — the cross-project standard (Astro, Bun, Prisma, …)
 * ``SUTANDO_TELEMETRY=0``
-* a file at ``<workspace>/state/telemetry-disabled``
+* a file named ``telemetry-disabled`` in EITHER the durable OS data dir (see
+  Identity below — survives workspace churn / app updates) OR the legacy
+  ``<workspace>/state/`` dir. A marker in either location opts you out.
 
 Identity
 --------
-A random per-install UUID persisted at ``<workspace>/state/telemetry-id``. It
+A random per-install UUID persisted at the durable, update-surviving OS data
+dir (macOS: ``~/Library/Application Support/Sutando/telemetry-id``; other:
+``${XDG_DATA_HOME:-~/.local/share}/sutando/telemetry-id``), with a back-compat
+copy at the legacy ``<workspace>/state/telemetry-id``. It
 is not a device fingerprint and is not tied to any account or email. Events set
 ``$ip=""`` and ``$geoip_disable`` so PostHog does not store or geolocate the
 request IP; the network-level source IP is inherent to any HTTPS request (as
@@ -117,7 +122,14 @@ def opted_out() -> bool:
     if os.environ.get("SUTANDO_TELEMETRY", "").strip().lower() in {"0", "false", "no", "off"}:
         return True
     try:
-        if (_state_dir() / "telemetry-disabled").exists():
+        # Honor the opt-out marker in EITHER the durable OS data dir (survives
+        # workspace churn / app updates — same reason the install id moved
+        # there, #2147) OR the legacy <workspace>/state dir. A marker in either
+        # location means opted out (fail toward privacy). Without the durable
+        # check, a desktop user's opt-out was lost on workspace churn and
+        # telemetry silently re-enabled — the same bandaid the id fix generalizes.
+        if (_durable_id_path().parent / "telemetry-disabled").exists() \
+                or (_state_dir() / "telemetry-disabled").exists():
             return True
     except Exception:  # pragma: no cover — defensive; never let a FS error force opt-in
         pass
