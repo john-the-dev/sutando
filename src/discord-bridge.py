@@ -2298,10 +2298,7 @@ async def on_ready():
     # allowFrom present at upgrade, so post-upgrade additions default read-only
     # (owner CR #2161). Idempotent: no-op once a tierMap exists, so firing on
     # every reconnect is harmless.
-    try:
-        ensure_tier_map_seeded()
-    except Exception as _tm_exc:
-        print(f"  [tier-map] startup seed failed (non-fatal): {_tm_exc}")
+    ensure_tier_map_seeded()  # pragma: no cover — startup call-site glue in on_ready; the seed fn is unit-tested (bridges-allowlist-default-readonly.test.py) and already swallows its own FS errors internally
     # Restart-safety: sweep orphan `.sending` files before the poll
     # loops start. See _recover_orphan_sending_files for rationale.
     _recover_orphan_sending_files()
