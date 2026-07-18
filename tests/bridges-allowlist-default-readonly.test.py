@@ -111,6 +111,52 @@ tofu = json.loads(_sf.read_text())
 check("slack: TOFU writes tierMap with enrollee as owner",
       tofu.get("tierMap", {}).get("U_TOFU") == "owner", str(tofu.get("tierMap")))
 
+# 5. seed swallows a read failure (except Exception -> return, no write)
+class _ReadRaises:
+    def read_text(self):
+        raise OSError("access.json unreadable")
+    def write_text(self, *a, **k):
+        raise AssertionError("seed must not write when the read failed")
+slack.ACCESS_FILE = _ReadRaises()
+slack._ensure_tier_map_seeded()  # must swallow and return without writing
+check("slack: seed swallows a read failure", True)
+slack.ACCESS_FILE = _sf
+
+# 6. seed swallows a write failure (except OSError -> pass)
+class _WriteRaises:
+    def __init__(self, payload):
+        self._p = payload
+    def read_text(self):
+        return self._p
+    def write_text(self, *a, **k):
+        raise OSError("disk full")
+slack.ACCESS_FILE = _WriteRaises(json.dumps({"allowFrom": ["U_W"]}))  # no tierMap -> attempts the write
+slack._ensure_tier_map_seeded()  # must swallow the OSError
+check("slack: seed swallows a write failure", True)
+slack.ACCESS_FILE = _sf
+
+# 7. _write_task runs the tier-map seed call + resolution (covers the seed call
+#    site) for a non-owner sender, and writes the task to a redirected TASKS_DIR.
+_sf.write_text(json.dumps({"allowFrom": ["U_X"], "tierMap": {"U_SEED": "owner"}}))
+if hasattr(slack, "_update_access_cache"):
+    slack._update_access_cache(json.loads(_sf.read_text()))
+_tasks_tmp = Path(tempfile.mkdtemp(prefix="sl-tasks-"))
+_orig_tasks_dir = slack.TASKS_DIR
+_orig_woa = getattr(slack, "write_owner_activity", None)
+slack.TASKS_DIR = _tasks_tmp
+slack.write_owner_activity = lambda *a, **k: None
+try:
+    _tid = slack._write_task(
+        {"user": "U_X", "channel": "C1", "channel_type": "im", "ts": "123.456"},
+        "dm", "hello world", "xuser",
+    )
+    check("slack: _write_task resolves non-owner tier + writes task (covers seed call site)",
+          _tid is not None and (_tasks_tmp / f"{_tid}.txt").exists(), f"tid={_tid}")
+finally:
+    slack.TASKS_DIR = _orig_tasks_dir
+    if _orig_woa is not None:
+        slack.write_owner_activity = _orig_woa
+
 
 # ── Discord ──────────────────────────────────────────────────────────────────
 os.environ.setdefault("DISCORD_BOT_TOKEN", "faketoken")
@@ -147,6 +193,85 @@ if _have_discord:
     resolved = tmap.get("333", "owner" if not tmap else "team")
     check("discord: newly-added allowlist user resolves to team, not owner",
           resolved == "team", f"got {resolved}")
+
+    # 7. seed swallows a write failure (except OSError -> pass)
+    class _DWriteRaises:
+        def __init__(self, payload):
+            self._p = payload
+        def read_text(self):
+            return self._p
+        def write_text(self, *a, **k):
+            raise OSError("disk full")
+    dmod.ACCESS_FILE = _DWriteRaises(json.dumps({"allowFrom": ["999"]}))  # no tierMap -> attempts write
+    dmod.ensure_tier_map_seeded()  # must swallow the OSError
+    check("discord: seed swallows a write failure", True)
+    dmod.ACCESS_FILE = _df
+
+    # 8. load_tier_map / seed swallow a read failure (except -> {} / return)
+    class _DReadRaises:
+        def read_text(self):
+            raise OSError("access.json unreadable")
+    dmod.ACCESS_FILE = _DReadRaises()
+    check("discord: load_tier_map swallows a read failure", dmod.load_tier_map() == {})
+    dmod.ensure_tier_map_seeded()  # must swallow + return
+    check("discord: seed swallows a read failure", True)
+    dmod.ACCESS_FILE = _df
+
+    # 9. _handle_discord_message resolves owner via the tier-map seed (covers the
+    #    access-tier resolution block): a DM from an allowlisted sender with no
+    #    tierMap gets grandfathered owner, and owner activity is recorded.
+    import asyncio as _asyncio
+    from unittest.mock import patch as _patch, AsyncMock as _AsyncMock
+    _df.write_text(json.dumps({"dmPolicy": "allowlist", "allowFrom": ["4242"]}))
+
+    class _FakeDM(discord.DMChannel):
+        def __init__(self):
+            self.id = 999
+            self.sent: list = []
+        async def send(self, t):
+            self.sent.append(t)
+
+    class _FakeAuthor:
+        id = 4242
+        bot = False
+        def __str__(self):
+            return "owneruser#1"
+
+    class _FakeMsg:
+        def __init__(self, ch, au):
+            self.channel = ch
+            self.author = au
+            self.content = "hello"
+            self.mentions: list = []
+            self.role_mentions: list = []
+            self.embeds: list = []
+            self.attachments: list = []
+            self.type = discord.MessageType.default
+            self.reference = None
+            self.id = 555
+            self.message_snapshots: list = []
+
+    _woa_calls: list = []
+    _dc_tasks_tmp = Path(tempfile.mkdtemp(prefix="dc-tasks-"))
+    _orig_dc_tasks = getattr(dmod, "TASKS_DIR", None)
+    dmod.TASKS_DIR = _dc_tasks_tmp  # never write into the real workspace tasks/
+    _fake_client = type("_C", (), {"user": object()})()
+    with _patch.object(dmod, "client", _fake_client), \
+         _patch.object(dmod, "_observe_for_mod", _AsyncMock()), \
+         _patch.object(dmod, "_update_dm_checkpoint", lambda *a, **k: None), \
+         _patch.object(dmod, "write_owner_activity", lambda *a, **k: _woa_calls.append(1)):
+        try:
+            _asyncio.run(dmod._handle_discord_message(_FakeMsg(_FakeDM(), _FakeAuthor())))
+        except Exception:
+            # The tier-resolution block (under test) runs before any later
+            # task-write step; a downstream error there does not undo its coverage.
+            pass
+    if _orig_dc_tasks is not None:
+        dmod.TASKS_DIR = _orig_dc_tasks
+    _seeded2 = json.loads(_df.read_text()).get("tierMap", {})
+    check("discord: allowlisted DM sender resolved owner via tier-map seed",
+          _seeded2.get("4242") == "owner" and _woa_calls == [1],
+          f"seed={_seeded2} woa={_woa_calls}")
 else:
     print("  SKIP discord — discord.py not importable")
 
