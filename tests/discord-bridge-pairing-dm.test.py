@@ -113,6 +113,64 @@ with patch.object(mod, "client", FakeClient(owner)):
     )
 check("empty allowFrom routes to channel fallback", route3 == "channel")
 
+# ── Case 4: on_message pairing branch drives _deliver_pairing_prompt ──────────
+# The isolation cases above exercise _deliver_pairing_prompt directly; this one
+# drives the on_message dispatch (_handle_discord_message) into the pairing
+# branch so the changed CALL SITE — `route = await _deliver_pairing_prompt(...)`
+# plus the "Pairing requested" log — is covered. A DM from an unpaired sender
+# under dmPolicy=pairing reaches that branch; _deliver_pairing_prompt is stubbed
+# so the test asserts the dispatch wiring, not the (separately-tested) delivery.
+import json as _json
+from unittest.mock import AsyncMock
+
+class _FakeDM(discord.DMChannel):  # isinstance(_, discord.DMChannel) must be True
+    def __init__(self, cid=999):
+        self.id = cid
+        self.sent: list[str] = []
+    async def send(self, text):
+        self.sent.append(text)
+
+class _FakeAuthor:
+    def __init__(self, uid=424242):
+        self.id = uid
+        self.bot = False
+    def __str__(self):
+        return "pairme#0001"
+
+class _FakeMsg:
+    def __init__(self, channel, author):
+        self.channel = channel
+        self.author = author
+        self.content = "hello"
+        self.mentions: list = []
+        self.role_mentions: list = []
+        self.embeds: list = []
+        self.type = discord.MessageType.default
+        self.reference = None
+        self.id = 555
+        self.message_snapshots: list = []
+
+# Isolated ACCESS_FILE (CLAUDE_CONFIG_DIR was tmp'd before import): pairing on,
+# empty allowFrom → the sender is unpaired, so the pairing branch fires.
+mod.ACCESS_FILE.write_text(_json.dumps({"dmPolicy": "pairing", "allowFrom": [], "pending": {}}))
+
+_fake_client = type("_C", (), {"user": object()})()
+_dm = _FakeDM()
+_msg = _FakeMsg(_dm, _FakeAuthor())
+_deliver = AsyncMock(return_value="dm")
+with patch.object(mod, "client", _fake_client), \
+     patch.object(mod, "_deliver_pairing_prompt", _deliver), \
+     patch.object(mod, "_observe_for_mod", AsyncMock()), \
+     patch.object(mod, "_update_dm_checkpoint", lambda *a, **k: None):
+    asyncio.run(mod._handle_discord_message(_msg))
+check("on_message pairing branch invoked _deliver_pairing_prompt once",
+      _deliver.await_count == 1)
+check("pairing branch passed the DM channel + generated code to delivery",
+      _deliver.await_count == 1 and _deliver.await_args.args[0] is _dm
+      and len(_deliver.await_args.args[1]) == 6)
+check("pairing code persisted to access.pending",
+      len(_json.loads(mod.ACCESS_FILE.read_text()).get("pending", {})) == 1)
+
 print()
 if failures:
     print(f"FAIL — {len(failures)} assertion(s): {failures}")
