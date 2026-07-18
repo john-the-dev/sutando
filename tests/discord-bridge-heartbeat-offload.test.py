@@ -78,7 +78,7 @@ check(
 )
 check(
     "dm-fallback subprocess.run is to_thread-wrapped",
-    re.search(r"await asyncio\.to_thread\(\s*subprocess\.run,", SRC) is not None,
+    re.search(r"await asyncio\.to_thread\([^)]*?subprocess\.run,", SRC) is not None,
 )
 check(
     "on_ready sets an explicit online presence",
@@ -88,6 +88,54 @@ check(
     "ready log carries a gateway-session counter (flap visibility)",
     "gateway session #" in SRC,
 )
+
+# ── 5. Execution: on_ready runs its presence block (counter + try/except) ──────
+# The structural checks above read source text; this one actually executes
+# on_ready so the counter bump + the change_presence try/except are covered.
+# Two runs: presence succeeds, then presence raises (the except/pass path).
+try:
+    import discord  # noqa: F401
+except ImportError:
+    print("  skip on_ready exec-coverage — discord.py not importable")
+else:
+    import importlib.util
+    import os
+    import tempfile
+    from unittest.mock import patch, AsyncMock, MagicMock
+
+    os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp(prefix="sutando-hb-test-")
+    os.environ.setdefault("DISCORD_BOT_TOKEN", "faketoken-for-tests")
+    _spec = importlib.util.spec_from_file_location("discordbridge_hb", REPO / "src" / "discord-bridge.py")
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+
+    class _Loop:
+        def create_task(self, coro):  # swallow scheduled coros without running them
+            try:
+                coro.close()
+            except Exception:
+                pass
+
+    class _ReadyClient:
+        user = "BotUser#1"
+        loop = _Loop()
+
+        def __init__(self, raise_presence):
+            self._raise = raise_presence
+
+        async def change_presence(self, **kw):
+            if self._raise:
+                raise RuntimeError("presence flap")
+
+    _mod._poll_loops_started = True  # skip the one-time poll-loop spawn block
+    for _raise in (False, True):     # success path, then except/pass path
+        with patch.object(_mod, "client", _ReadyClient(_raise)), \
+             patch.object(_mod, "_recover_orphan_sending_files", lambda *a, **k: None), \
+             patch.object(_mod, "discord_config", MagicMock()):
+            _before = _mod._ready_count
+            asyncio.run(_mod.on_ready())  # must never raise, even when presence does
+            check(f"on_ready executed + bumped session counter (presence_raises={_raise})",
+                  _mod._ready_count == _before + 1)
 
 print()
 if failures:

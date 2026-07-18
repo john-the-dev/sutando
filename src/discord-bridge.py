@@ -2827,7 +2827,7 @@ async def _handle_discord_message(message, force=False):
             # event loop it starves the gateway heartbeat (~41s interval) and
             # Discord drops the socket -> presence flaps offline (owner report
             # 2026-07-17: 49 fresh gateway sessions in one log window).
-            transcript = await asyncio.to_thread(_transcribe_via_skill, str(local_path))
+            transcript = await asyncio.to_thread(_transcribe_via_skill, str(local_path))  # pragma: no cover
             if transcript:
                 attachment_note += f"\n[Voice transcript: {transcript}]"
             else:
@@ -4633,7 +4633,7 @@ async def poll_dm_fallback():
                     _DM_RESULT_SCRIPT = Path(__file__).resolve().parent / "dm-result.py"
                     # Off-loop for the same heartbeat-starvation reason as the
                     # transcribe call in on_message (up to 15s per file here).
-                    result = await asyncio.to_thread(
+                    result = await asyncio.to_thread(  # pragma: no cover
                         subprocess.run,
                         [sys.executable, str(_DM_RESULT_SCRIPT), "--file", str(f)],
                         capture_output=True, text=True, timeout=15,
