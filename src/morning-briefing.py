@@ -97,8 +97,11 @@ def get_weather() -> str:
         return None
 
 
-def get_calendar_events() -> list[dict]:
+def get_calendar_events() -> list[dict] | None:
     """Get today's calendar events via AppleScript.
+
+    Returns a list of events ([] means verified empty) or None when the
+    calendar could not be read — callers must not render None as "clear".
 
     Respects MORNING_BRIEFING_SKIP_CALENDARS (comma-separated list of
     calendar names to exclude, e.g. "Home,Wedding,Birthdays"). Useful for
@@ -137,6 +140,15 @@ return output
 '''
     result, err = _run_applescript(script, timeout=10)
     if result is None:
+        # Calendar.app not running fails the query with -600 ("Application
+        # isn't running"). Launch it in the background and retry once.
+        try:
+            subprocess.run(["open", "-gja", "Calendar"], timeout=5)
+            time.sleep(3)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        result, err = _run_applescript(script, timeout=10)
+    if result is None:
         if err:
             print(f"  calendar: AppleScript error — {err}", file=sys.stderr)
             if "-1743" in err:
@@ -145,7 +157,7 @@ return output
                     "System Settings → Privacy & Security → Automation → grant Calendar access.",
                     file=sys.stderr,
                 )
-        return []
+        return None
     from sutando_config import config_get
     skip_cals_raw = config_get("MORNING_BRIEFING_SKIP_CALENDARS", "") or ""
     skip_cals = {c.strip().lower() for c in skip_cals_raw.split(",") if c.strip()}
@@ -329,8 +341,10 @@ def synthesize(weather, events, reminders, discord_msgs, pending_qs, health_issu
     if weather:
         parts.append(f"It's {weather}.")
 
-    # Calendar
-    if events:
+    # Calendar — None means the query failed (distinct from verified empty).
+    if events is None:
+        parts.append("I couldn't read your calendar this morning.")
+    elif events:
         count = len(events)
         if count == 1:
             parts.append(f"One meeting today: {events[0]['raw']}.")
@@ -368,8 +382,8 @@ def synthesize(weather, events, reminders, discord_msgs, pending_qs, health_issu
         if not has_raw_data and len(first_sentence) > 20:
             parts.append(f"Insight: {first_sentence}.")
 
-    # Closing
-    if not events and not reminders and not pending_qs and not health_issues:
+    # Closing — an unreadable calendar (None) is not a verified-clean day.
+    if events == [] and not reminders and not pending_qs and not health_issues:
         parts.append("Everything looks clean. Good day for deep work.")
 
     return " ".join(parts)
@@ -390,7 +404,7 @@ def main():
     print(f"  weather: {weather or 'unavailable'}")
 
     events = get_calendar_events()
-    print(f"  calendar: {len(events)} events")
+    print(f"  calendar: {'unavailable' if events is None else f'{len(events)} events'}")
 
     reminders = get_reminders()
     print(f"  reminders: {len(reminders)} due")
@@ -422,6 +436,15 @@ def main():
     sentinel.write_text(datetime.now().isoformat())
 
     print(f"\nBriefing delivered:\n{narrative}")
+
+    # Anonymous, opt-out product telemetry: one bucketed event when this feature
+    # actually runs (not on the already-delivered early return). No content/PII.
+    try:  # pragma: no cover — bounded flush; logic tested in tests/telemetry.test.py
+        from telemetry import feature_used  # sibling module (src/ on sys.path)
+
+        feature_used("morning_briefing", flush=True)
+    except Exception:  # pragma: no cover — telemetry must never break the feature
+        pass
 
 
 if __name__ == "__main__":
