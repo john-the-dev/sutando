@@ -2290,6 +2290,18 @@ async def on_ready():
         discord_config.auto_seed_if_missing(_initial_access)
     except Exception as _seed_exc:
         print(f"  [discord-config] auto-seed failed (non-fatal): {_seed_exc}")
+    # Seed the tier-map grandfather snapshot at STARTUP, before any message is
+    # processed — otherwise a fresh (pre-migration) install where the owner
+    # adds a NEW allowFrom id would grandfather that new id as owner the first
+    # time it messages (the seed runs on-demand and captures whoever is in
+    # allowFrom at that moment). Seeding at boot pins the snapshot to the
+    # allowFrom present at upgrade, so post-upgrade additions default read-only
+    # (owner CR #2161). Idempotent: no-op once a tierMap exists, so firing on
+    # every reconnect is harmless.
+    try:
+        ensure_tier_map_seeded()
+    except Exception as _tm_exc:
+        print(f"  [tier-map] startup seed failed (non-fatal): {_tm_exc}")
     # Restart-safety: sweep orphan `.sending` files before the poll
     # loops start. See _recover_orphan_sending_files for rationale.
     _recover_orphan_sending_files()

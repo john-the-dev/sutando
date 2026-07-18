@@ -1153,6 +1153,15 @@ def main():  # pragma: no cover
     # deletions even on the very first inbound message after a restart (#899).
     load_allowed()
 
+    # Seed the tier-map grandfather snapshot at STARTUP, before the first
+    # inbound message — otherwise a fresh (pre-migration) install where the
+    # owner adds a NEW allowFrom id would grandfather that new id as owner the
+    # first time it messages (the on-demand seed captures whoever is in
+    # allowFrom at that moment). Seeding at boot pins the snapshot to the
+    # allowFrom present at upgrade, so post-upgrade additions default read-only
+    # (owner CR #2161). Idempotent: no-op once a tierMap exists.
+    _ensure_tier_map_seeded()
+
     # TOFU enrollment code: generated when access.json doesn't exist so
     # the first DM must present it before being auto-enrolled as owner.
     if not ACCESS_FILE.exists():

@@ -111,6 +111,26 @@ tofu = json.loads(_sf.read_text())
 check("slack: TOFU writes tierMap with enrollee as owner",
       tofu.get("tierMap", {}).get("U_TOFU") == "owner", str(tofu.get("tierMap")))
 
+# 4b. ORDERING (CR #2161 incomplete_fix): the grandfather snapshot must be
+# pinned at STARTUP, before a new allowFrom addition can trigger the on-demand
+# seed and grandfather *itself*. Contrast the two orderings on a fresh
+# (no-tierMap) install — this is the before/after the startup-seed call fixes.
+# BEFORE-fix ordering: the new id (U_LATE) is already in allowFrom when the
+# (lazy, on-message) seed first fires → it gets captured as owner. This is the
+# hole; the startup seed in main()/on_ready() closes it.
+_write_slack({"allowFrom": ["U_E", "U_LATE"]})   # no tierMap; U_LATE present pre-seed
+slack._ensure_tier_map_seeded()
+check("slack: BEFORE-fix ordering — a pre-seed allowFrom addition is grandfathered owner",
+      slack.load_tier_map().get("U_LATE") == "owner", str(slack.load_tier_map()))
+# AFTER-fix ordering: the startup seed pins the snapshot to [U_E]; U_LATE added
+# later is missing from tierMap and stays read-only.
+_write_slack({"allowFrom": ["U_E"]})             # fresh, no tierMap
+slack._ensure_tier_map_seeded()                  # STARTUP snapshot = {U_E: owner}
+_d = json.loads(_sf.read_text()); _d["allowFrom"].append("U_LATE"); _write_slack(_d)  # owner adds later
+slack._ensure_tier_map_seeded()                  # no-op — tierMap already present
+check("slack: AFTER-fix ordering — startup seed keeps a later allowFrom addition read-only",
+      slack.load_tier_map().get("U_LATE", "other") != "owner", str(slack.load_tier_map()))
+
 # 5. seed swallows a read failure (except Exception -> return, no write)
 class _ReadRaises:
     def read_text(self):
@@ -193,6 +213,27 @@ if _have_discord:
     resolved = tmap.get("333", "owner" if not tmap else "team")
     check("discord: newly-added allowlist user resolves to team, not owner",
           resolved == "team", f"got {resolved}")
+
+    # 6b. ORDERING (CR #2161 incomplete_fix): pin the snapshot at STARTUP so a
+    # new allowFrom id added before the first-ever (lazy) seed isn't itself
+    # grandfathered. Discord was the worse offender pre-fix (global allowFrom =
+    # unconditional owner). Before/after the on_ready() startup-seed call:
+    _dord = Path(tempfile.mkdtemp(prefix="dc-order-")) / "access.json"
+    dmod.ACCESS_FILE = _dord
+    # BEFORE-fix ordering: new id (444) already in allowFrom when the seed fires.
+    _dord.write_text(json.dumps({"allowFrom": ["111", "444"]}))  # no tierMap
+    dmod.ensure_tier_map_seeded()
+    check("discord: BEFORE-fix ordering — a pre-seed allowFrom addition is grandfathered owner",
+          dmod.load_tier_map().get("444") == "owner", str(dmod.load_tier_map()))
+    # AFTER-fix ordering: startup seed pins snapshot to [111]; 444 added later stays team.
+    _dord.write_text(json.dumps({"allowFrom": ["111"]}))         # fresh, no tierMap
+    dmod.ensure_tier_map_seeded()                                # STARTUP snapshot = {111: owner}
+    _dd = json.loads(_dord.read_text()); _dd["allowFrom"].append("444"); _dord.write_text(json.dumps(_dd))
+    dmod.ensure_tier_map_seeded()                                # no-op — tierMap present
+    _dtm = dmod.load_tier_map()
+    check("discord: AFTER-fix ordering — startup seed keeps a later allowFrom addition read-only (team)",
+          _dtm.get("444", "team" if _dtm else "owner") == "team", str(_dtm))
+    dmod.ACCESS_FILE = _df
 
     # 7. seed swallows a write failure (except OSError -> pass)
     class _DWriteRaises:
