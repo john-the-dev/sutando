@@ -124,6 +124,39 @@ with tempfile.TemporaryDirectory() as t:
     check("only fresh file advanced the counter (=1)", counter.get("count") == 1, str(counter))
 
 # ---------------------------------------------------------------------------
+# hook.main — bridge control markers must be left unstamped (PR #2125 review):
+# prepending `[task …]` would push the marker off line 1 and break delivery
+# routing (result_markers.parse_markers / discord-bridge skip+redirect).
+# ---------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as t:
+    ws = Path(t)
+    hook = _load(REPO / "hooks" / "stamp-task-id.py", "stamp_task_id_markers")
+    _point(hook, ws)
+    R = ws / "results"
+
+    markers = {
+        "no-send": "[no-send]\n",
+        "deduped": "[deduped: task-123]\n\nSee the other task.\n",
+        "replied": "[REPLIED]\n",
+        "channel": "[channel: 1512996282140987452]\n\nRouted elsewhere.\n",
+        "dm-only": "[dm-only]\nprivate.\n",
+    }
+    files = {}
+    for i, (name, body) in enumerate(markers.items()):
+        f = R / f"task-m{i}.txt"; f.write_text(body); files[name] = (f, body)
+
+    try:
+        hook.main()
+    except SystemExit:
+        pass
+
+    for name, (f, body) in files.items():
+        check(f"bridge marker [{name}] left unstamped (verbatim)", f.read_text() == body,
+              f.read_text()[:50])
+    check("no bridge-marker file consumed a counter id",
+          not hook.COUNTER.exists() or json.load(open(hook.COUNTER)).get("count", 0) == 0)
+
+# ---------------------------------------------------------------------------
 # report — load_history + render
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as t:

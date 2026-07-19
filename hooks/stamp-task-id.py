@@ -49,6 +49,13 @@ HISTORY = WS / "state" / "task-completions-daily.json"
 RESULTS = WS / "results"
 # Match an already-present marker: [task 20260715-001] or ...-001-extend-...
 _STAMPED = re.compile(r"^\s*\[task \d{8}-\d{3}")
+# Bridge control markers that MUST be the first non-empty line to be honored
+# (result_markers.parse_markers / discord-bridge skip+redirect). Prepending a
+# `[task …]` line would push them off line 1 and silently break delivery
+# routing, so leave these bodies unstamped entirely (PR #2125 review).
+_BRIDGE_MARKER = re.compile(
+    r"^\s*\[(?:no-send\]|deduped:|REPLIED\]|channel:|dm-only\])", re.IGNORECASE
+)
 
 
 def _record_history(day: str, count: int) -> None:
@@ -108,6 +115,8 @@ def main() -> None:
                 continue  # empty/placeholder — leave it
             if _STAMPED.match(body):
                 continue  # already carries an ID (agent remembered) — don't double-count
+            if _BRIDGE_MARKER.match(body):
+                continue  # body-start bridge control marker — prepending would break its first-line parsing
             p.write_text(f"[task {_alloc()}]\n\n{body}")
     except Exception:
         pass
