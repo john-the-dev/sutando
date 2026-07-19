@@ -89,7 +89,12 @@ case "$cmd" in
         # $CLAUDE_CONFIG_DIR when set, else ~/.claude/ — the same value the wrapper
         # would resolve interactively, so classic installs are unchanged.
         CLAUDE_CFG="$(SUTANDO_SUPPRESS_CCD_FALLBACK_BANNER=1 bash "$REPO/scripts/sutando-config.sh" claude-home-path 2>/dev/null)"
-        [ -n "$CLAUDE_CFG" ] || CLAUDE_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+        # Belt-and-suspenders only if the helper is entirely unavailable — mirror
+        # its resolution WITHOUT the inline ${CLAUDE_CONFIG_DIR:-...} anti-pattern
+        # (banned by scripts/lint-claude-home-path.sh; claude-home-path is the
+        # single source of truth and already covers the normal path).
+        [ -n "$CLAUDE_CFG" ] || CLAUDE_CFG="$CLAUDE_CONFIG_DIR"
+        [ -n "$CLAUDE_CFG" ] || CLAUDE_CFG="$HOME/.claude"
         echo "Installing $LABEL"
         echo "  repo:      $REPO"
         echo "  workspace: $WORKSPACE"
