@@ -133,9 +133,14 @@ def cron_matches(expr: str, t: time.struct_time) -> bool:
     dom_restricted = dom != "*"
     dow_restricted = dow != "*"
     dom_ok = t.tm_mday in _parse_field(dom, 1, 31)
-    # Normalize 7→0 so "0 6 * * 7" (also-Sunday) matches "0 6 * * 0".
-    dow_field = re.sub(r"\b7\b", "0", dow)
-    dow_ok = cron_dow in _parse_field(dow_field, 0, 6)
+    # DOW accepts 7 as an alias for Sunday (0). Expand with 7 permitted, then
+    # fold 7→0 at the SET level. Substituting 7→0 on the raw field string would
+    # corrupt ranges: "5-7" → "5-0" (empty set — never fires) and "0-7" → "0-0"
+    # (Sundays only) — the exact silent-miss class this runner exists to kill.
+    dow_set = _parse_field(dow, 0, 7)
+    if 7 in dow_set:
+        dow_set = (dow_set - {7}) | {0}
+    dow_ok = cron_dow in dow_set
     if dom_restricted and dow_restricted:
         return dom_ok or dow_ok
     return dom_ok and dow_ok

@@ -94,6 +94,30 @@ def test_dom_dow_or_semantics():
           "dow=0 also matches Sunday")
 
 
+def test_dow_range_normalization_with_7():
+    # Regression (sonichi review 2026-07-18): 7→0 must be folded at the SET
+    # level, not substituted on the raw field string. A raw re.sub(r"\b7\b",
+    # "0", dow) corrupts ranges — "5-7"→"5-0" (empty set, NEVER fires) and
+    # "0-7"→"0-0" (Sundays only) — the exact silent-miss class this runner
+    # exists to kill.
+    # July 2026: 07-01 Wed(3), 07-02 Thu(4), 07-03 Fri(5), 07-04 Sat(6),
+    #            07-05 Sun(0/7), 07-06 Mon(1).
+    # "5-7" = Fri, Sat, Sun (7 is Sunday) → fire Fri/Sat/Sun, skip Thu/Mon.
+    check(cr.cron_matches("0 6 * * 5-7", _lt(2026, 7, 3, 6, 0)), "dow 5-7 matches Fri")
+    check(cr.cron_matches("0 6 * * 5-7", _lt(2026, 7, 4, 6, 0)), "dow 5-7 matches Sat")
+    check(cr.cron_matches("0 6 * * 5-7", _lt(2026, 7, 5, 6, 0)),
+          "dow 5-7 matches Sun (7 folds to 0)")
+    check(not cr.cron_matches("0 6 * * 5-7", _lt(2026, 7, 2, 6, 0)), "dow 5-7 skips Thu")
+    check(not cr.cron_matches("0 6 * * 5-7", _lt(2026, 7, 6, 6, 0)), "dow 5-7 skips Mon")
+    # "0-7" = every day of the week → fire on any day.
+    check(cr.cron_matches("0 6 * * 0-7", _lt(2026, 7, 2, 6, 0)), "dow 0-7 matches Thu")
+    check(cr.cron_matches("0 6 * * 0-7", _lt(2026, 7, 5, 6, 0)), "dow 0-7 matches Sun")
+    check(cr.cron_matches("0 6 * * 0-7", _lt(2026, 7, 1, 6, 0)), "dow 0-7 matches Wed")
+    # A range without 7 is unaffected by the fold.
+    check(cr.cron_matches("0 6 * * 5-6", _lt(2026, 7, 3, 6, 0)), "dow 5-6 matches Fri")
+    check(not cr.cron_matches("0 6 * * 5-6", _lt(2026, 7, 5, 6, 0)), "dow 5-6 skips Sun")
+
+
 def test_every_3_days_dom():
     # New agent-landscape schedule uses */3 day-of-month. Verify it fires on
     # the 1st, 4th, 7th... and not on the 2nd/3rd.
