@@ -27,10 +27,18 @@
       probe keep working.
 
   Placeholders substituted by install-gateway-bridge-launchd.sh:
-    __REPO__      — absolute path to the sutando repo checkout
-    __WORKSPACE__ — absolute path to the resolved workspace
-    __HOME__      — $HOME
-    __BREW_BIN__  — /opt/homebrew/bin or /usr/local/bin
+    __REPO__               — absolute path to the sutando repo checkout
+    __WORKSPACE__          — absolute path to the resolved workspace
+    __HOME__               — $HOME
+    __BREW_BIN__           — /opt/homebrew/bin or /usr/local/bin
+    __CLAUDE_CONFIG_DIR__  — resolved CLAUDE_CONFIG_DIR (sutando-config.sh
+                             claude-home-path). launchd does NOT inherit the
+                             login-shell env, so without this baked in the
+                             wrapper's claude-home-path resolution falls back to
+                             ~/.claude/ and reads the WRONG channels/ag2space/.env
+                             on claude-sutando installs → no token → clean exit →
+                             KeepAlive never restarts → the supervisor silently
+                             no-ops (the exact failure this job exists to prevent).
 -->
 <plist version="1.0">
 <dict>
@@ -70,6 +78,8 @@
         <string>__WORKSPACE__</string>
         <key>SUTANDO_REPO_DIR</key>
         <string>__REPO__</string>
+        <key>CLAUDE_CONFIG_DIR</key>
+        <string>__CLAUDE_CONFIG_DIR__</string>
     </dict>
 
     <key>StandardOutPath</key>

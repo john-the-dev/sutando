@@ -81,10 +81,20 @@ case "$cmd" in
             exit 1
         fi
         BREW_BIN="$(resolve_brew_bin)"
+        # launchd does NOT inherit the login-shell env, so CLAUDE_CONFIG_DIR must
+        # be baked into the plist — otherwise the wrapper's claude-home-path
+        # resolution falls back to ~/.claude/ and reads the wrong channel .env on
+        # claude-sutando installs (the bug #2068's review caught). Resolve via the
+        # canonical helper (matches util_paths.claude_home_path); it echoes
+        # $CLAUDE_CONFIG_DIR when set, else ~/.claude/ — the same value the wrapper
+        # would resolve interactively, so classic installs are unchanged.
+        CLAUDE_CFG="$(SUTANDO_SUPPRESS_CCD_FALLBACK_BANNER=1 bash "$REPO/scripts/sutando-config.sh" claude-home-path 2>/dev/null)"
+        [ -n "$CLAUDE_CFG" ] || CLAUDE_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
         echo "Installing $LABEL"
         echo "  repo:      $REPO"
         echo "  workspace: $WORKSPACE"
         echo "  brew bin:  $BREW_BIN"
+        echo "  claude cfg: $CLAUDE_CFG"
         mkdir -p "$HOME/Library/LaunchAgents"
         mkdir -p "$WORKSPACE/logs"
         sed \
@@ -92,6 +102,7 @@ case "$cmd" in
             -e "s|__WORKSPACE__|$WORKSPACE|g" \
             -e "s|__BREW_BIN__|$BREW_BIN|g" \
             -e "s|__HOME__|$HOME|g" \
+            -e "s|__CLAUDE_CONFIG_DIR__|$CLAUDE_CFG|g" \
             "$TEMPLATE" > "$DEST"
         bootout_if_loaded
         launchctl bootstrap "$DOMAIN" "$DEST"
