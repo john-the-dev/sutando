@@ -206,6 +206,24 @@ def emit_task(name: str, entry: dict) -> Path:
         f"task: {body_task}\n"
     )
     TASKS_DIR.mkdir(parents=True, exist_ok=True)
+    # Coalesce pending fires: if a prior emission for this same entry is still
+    # unconsumed (the core was down or busy), remove it before writing the new
+    # one, so a long outage leaves exactly ONE task per entry — the newest —
+    # instead of one file per missed slot (a */30 entry over a 6h outage would
+    # otherwise queue 12). Design converged with Chi + Sutando-Pro in #dev
+    # 2026-07-18. We keep the per-fire timestamped id (rather than a literally
+    # stable filename) so the orphan-check completion-marker contract
+    # (results/<id>.txt) is untouched — a consumed+archived result can never
+    # collide with a future fire's unique id. The suffix.isdigit() guard keeps
+    # the sweep from matching a different entry whose slug shares this prefix
+    # (e.g. cleaning "sync" must not delete "sync-workspace"'s pending task).
+    prefix = f"task-cron-{safe_name}-"
+    for stale in TASKS_DIR.glob(f"{prefix}*.txt"):
+        if stale.name[len(prefix):-4].isdigit():
+            try:
+                stale.unlink()
+            except OSError:
+                pass
     path = TASKS_DIR / f"{task_id}.txt"
     path.write_text(body)
     return path

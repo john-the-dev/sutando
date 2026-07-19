@@ -190,6 +190,34 @@ def test_emit_task_prompt_skill():
         check("task: /morning-briefing" in body, "prompt_skill rendered as slash command")
 
 
+def test_emit_task_coalesces_pending_fires():
+    # A prior unconsumed fire for the SAME entry is removed before the new one
+    # is written, so a long outage leaves exactly one (newest) task per entry
+    # instead of one per missed slot (#dev design 2026-07-18).
+    with tempfile.TemporaryDirectory() as d:
+        cr.TASKS_DIR = Path(d)
+        p1 = cr.emit_task("digest", {"prompt": "fire 1"})
+        time.sleep(0.002)  # distinct millisecond id for the second fire
+        p2 = cr.emit_task("digest", {"prompt": "fire 2"})
+        files = list(Path(d).glob("task-cron-digest-*.txt"))
+        check(len(files) == 1, "same-entry pending fires coalesce to one file")
+        check(files[0].name == p2.name, "the surviving file is the newest fire")
+        check("task: fire 2" in files[0].read_text(), "surviving file carries newest body")
+        check(not p1.exists() or p1.name == p2.name, "prior pending fire removed")
+
+
+def test_emit_task_coalesce_respects_entry_boundary():
+    # The coalesce sweep must not delete a DIFFERENT entry whose slug shares a
+    # prefix — cleaning "sync" must leave "sync-workspace"'s pending task alone.
+    with tempfile.TemporaryDirectory() as d:
+        cr.TASKS_DIR = Path(d)
+        other = cr.emit_task("sync-workspace", {"prompt": "keep me"})
+        cr.emit_task("sync", {"prompt": "new sync fire"})
+        check(other.exists(), "prefix-sharing sibling entry's pending task is preserved")
+        check(len(list(Path(d).glob("task-cron-sync-workspace-*.txt"))) == 1,
+              "sync-workspace file untouched by 'sync' emit")
+
+
 # --- 3b. _load_json fallback -------------------------------------------------
 def test_load_json_fallback():
     # Lines 141-142: _load_json returns the default when the file is missing or
