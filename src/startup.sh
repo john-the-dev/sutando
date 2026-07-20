@@ -912,11 +912,41 @@ _vault_scanner_check() {
   fi
 }
 
+# Prefer one launchd job per configured channel bridge. A loaded job is not
+# necessarily a running bridge: when a token is removed, the wrapper stays as
+# an idle launchd sentinel. Kickstart that state after credentials return, and
+# only report success once the actual bridge process exists.
+channel_bridge_supervised() {
+  local channel="$1"
+  local label="com.sutando.$channel-bridge"
+  local service="gui/$(id -u)/$label"
+  local installer="$REPO/src/install-channel-bridge-launchd.sh"
+  local template="$REPO/src/launchd/com.sutando.channel-bridge.plist"
+  local pattern="src/$channel-bridge\\.py$"
+
+  [ -f "$installer" ] && [ -f "$template" ] || return 1
+  if launchctl print "$service" >/dev/null 2>&1; then
+    if pgrep -f "$pattern" >/dev/null 2>&1; then
+      return 0
+    fi
+    launchctl kickstart -k "$service" >/dev/null 2>&1 || return 1
+  else
+    bash "$installer" "$channel" >/dev/null 2>&1 || return 1
+  fi
+  for _ in $(seq 1 12); do
+    pgrep -f "$pattern" >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  return 1
+}
+
 # 6. Telegram bridge (optional — needs TELEGRAM_BOT_TOKEN, skip with SKIP_TELEGRAM=1)
 if [ "${SKIP_TELEGRAM:-}" = "1" ]; then
   echo "  ~ telegram bridge (skipped via SKIP_TELEGRAM)"
 elif _TG_ENV="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path channels/telegram/.env)"; [ -f "$_TG_ENV" ] && grep -q "TELEGRAM_BOT_TOKEN=" "$_TG_ENV" 2>/dev/null; then
-  if ! pgrep -f "telegram-bridge" > /dev/null 2>&1; then
+  if channel_bridge_supervised telegram; then
+    echo "  ✓ telegram bridge (launchd-supervised)"
+  elif ! pgrep -f "telegram-bridge" > /dev/null 2>&1; then
     echo "  Starting Telegram bridge..."
     # Pick an interpreter that can actually verify TLS. A cert-less framework
     # python (e.g. /Library/Frameworks/.../3.13 without certifi) resolves first
@@ -974,8 +1004,23 @@ if _RELAY_ENV="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path channel
   _GW_INSTALLER="$REPO/src/install-gateway-bridge-launchd.sh"
   if [ -f "$_GW_INSTALLER" ] && [ -f "$REPO/src/launchd/$_GW_LABEL.plist" ]; then
     if launchctl print "gui/$(id -u)/$_GW_LABEL" > /dev/null 2>&1; then
-      echo "  ✓ gateway bridge (launchd-supervised, already loaded)"
-      _gw_supervised=1
+      if pgrep -f "remote-gateway-bridge\\.py$" > /dev/null 2>&1; then
+        echo "  ✓ gateway bridge (launchd-supervised)"
+        _gw_supervised=1
+      else
+        # Loaded is not the same as running: the wrapper exits 0 when the token
+        # is removed, leaving an idle job. Bring it back when credentials return.
+        launchctl kickstart -k "gui/$(id -u)/$_GW_LABEL" > /dev/null 2>&1 || true
+        for _ in $(seq 1 12); do
+          pgrep -f "remote-gateway-bridge\\.py$" > /dev/null 2>&1 && { _gw_supervised=1; break; }
+          sleep 1
+        done
+        if [ "$_gw_supervised" = "1" ]; then
+          echo "  ✓ gateway bridge (launchd-supervised, recovered idle job)"
+        else
+          echo "  ⚠ gateway-bridge launchd job is loaded but idle — falling back to bare launch"
+        fi
+      fi
     else
       echo "  Installing launchd-supervised gateway bridge..."
       if bash "$_GW_INSTALLER" install > /dev/null 2>&1; then
@@ -1028,6 +1073,8 @@ elif _DC_ENV="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path channels
   fi
   if [ -z "$PYTHON_WITH_DISCORD" ]; then
     echo "  ~ discord bridge (no python with discord.py — run: /opt/homebrew/bin/pip3 install discord.py)"
+  elif channel_bridge_supervised discord; then
+    echo "  ✓ discord bridge (launchd-supervised)"
   elif ! pgrep -f "discord-bridge" > /dev/null 2>&1; then
     echo "  Starting Discord bridge with $PYTHON_WITH_DISCORD..."
     PYTHONUNBUFFERED=1 "$PYTHON_WITH_DISCORD" src/discord-bridge.py > "$LOGS_DIR/discord-bridge.log" 2>&1 &
@@ -1055,6 +1102,8 @@ elif _SL_ENV="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path channels
   done
   if [ -z "$PYTHON_WITH_SLACK" ]; then
     echo "  ~ slack bridge (no python with slack_bolt — run: /opt/homebrew/bin/pip3 install slack_bolt)"
+  elif channel_bridge_supervised slack; then
+    echo "  ✓ slack bridge (launchd-supervised)"
   elif ! pgrep -f "slack-bridge" > /dev/null 2>&1; then
     echo "  Starting Slack bridge with $PYTHON_WITH_SLACK..."
     # Source the env file so SLACK_BOT_TOKEN / SLACK_APP_TOKEN reach the child.
