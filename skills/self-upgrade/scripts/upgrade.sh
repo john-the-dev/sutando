@@ -85,7 +85,8 @@ disown
 echo "self-upgrade: restart.sh launched DETACHED (log: $LOG)"
 
 # 6. Verify a bridge comes back (best-effort, bounded).
-for _ in $(seq 1 45); do
+#    SUTANDO_UPGRADE_VERIFY_TRIES caps the wait (each try = ~2s); default 45.
+for _ in $(seq 1 "${SUTANDO_UPGRADE_VERIFY_TRIES:-45}"); do
   if pgrep -f "$REPO/src/discord-bridge.py" >/dev/null 2>&1; then break; fi
   sleep 2
 done
