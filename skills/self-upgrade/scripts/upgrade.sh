@@ -76,6 +76,12 @@ if [ "$DO_RESTART" = "0" ]; then
   exit 0
 fi
 
+# Capture a timestamp before launching the restart. The always-on core heartbeat
+# should advance past it even on hosts where no optional channel bridge is
+# configured.
+WORKSPACE="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null || true)"
+VERIFY_STAMP="$(mktemp -t sutando-upgrade-verify.XXXXXX 2>/dev/null || true)"
+
 # 5. THE LOAD-BEARING STEP — restart services DETACHED so startup.sh's
 #    foreground work can't block us. restart.sh explicitly does NOT touch the
 #    Claude Code CLI (core agent); look for "sutando-core already running".
@@ -84,17 +90,25 @@ nohup bash "$REPO/src/restart.sh" > "$LOG" 2>&1 &
 disown
 echo "self-upgrade: restart.sh launched DETACHED (log: $LOG)"
 
-# 6. Verify a bridge comes back (best-effort, bounded).
+# 6. Verify the core heartbeat advances while services restart (best-effort,
+#    bounded). Do not key this on a specific channel bridge: every bridge is
+#    optional and may be intentionally unconfigured on this host.
 #    SUTANDO_UPGRADE_VERIFY_TRIES caps the wait (each try = ~2s); default 45.
+CORE_ALIVE_DIR="$WORKSPACE/state/cores"
+heartbeat_advanced() {
+  [ -n "$VERIFY_STAMP" ] && [ -d "$CORE_ALIVE_DIR" ] &&
+    find "$CORE_ALIVE_DIR" -type f -name '*.alive' -newer "$VERIFY_STAMP" -print -quit 2>/dev/null | grep -q .
+}
 for _ in $(seq 1 "${SUTANDO_UPGRADE_VERIFY_TRIES:-45}"); do
-  if pgrep -f "$REPO/src/discord-bridge.py" >/dev/null 2>&1; then break; fi
+  if heartbeat_advanced; then break; fi
   sleep 2
 done
-if pgrep -f "$REPO/src/discord-bridge.py" >/dev/null 2>&1; then
-  echo "self-upgrade: ✓ services restarting on new code (discord-bridge back up)"
+if heartbeat_advanced; then
+  echo "self-upgrade: ✓ core heartbeat advancing while services restart"
 else
-  echo "self-upgrade: ⚠ discord-bridge not yet visible — startup.sh may still be building; check $LOG"
+  echo "self-upgrade: ⚠ core heartbeat has not advanced yet — startup.sh may still be building; check $LOG"
 fi
+[ -z "$VERIFY_STAMP" ] || rm -f "$VERIFY_STAMP"
 
 cat <<'NEXT'
 self-upgrade: mechanical steps done. AGENT MUST NOW:

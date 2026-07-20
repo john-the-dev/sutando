@@ -32,14 +32,20 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER
 make_fixture() {
   local root="$1"
   local remote="$root.remote.git"
-  mkdir -p "$root/skills/self-upgrade/scripts" "$root/src"
+  mkdir -p "$root/skills/self-upgrade/scripts" "$root/src" "$root/scripts" "$root/workspace/state/cores"
   cp "$SRC_SCRIPT" "$root/skills/self-upgrade/scripts/upgrade.sh"
+  cat > "$root/scripts/sutando-config.sh" <<EOF
+#!/bin/bash
+[ "\${1:-}" = workspace ] && printf '%s\n' "$root/workspace"
+EOF
+  chmod +x "$root/scripts/sutando-config.sh"
   # stub restart.sh: record that it ran, then BLOCK 15s (mimics startup.sh's
   # foreground hang). REPO is exported to it by upgrade.sh's cwd; write marker
   # into the fixture root via an absolute path passed through the env.
   cat > "$root/src/restart.sh" <<EOF
 #!/bin/bash
 echo "restart invoked" > "$root/restart-marker"
+touch "$root/workspace/state/cores/test.alive"
 sleep 15
 EOF
   chmod +x "$root/src/restart.sh"
@@ -95,6 +101,7 @@ after="$(cd "$C" && git rev-parse --short HEAD)"
 [ "$RC" -eq 0 ] || fail "upgrade: expected exit 0, got $RC (out: $OUT)"
 [ "$after" != "$before" ] || fail "upgrade: HEAD did not advance ($before -> $after); pull didn't happen"
 [ -f "$C/restart-marker" ] || fail "upgrade: restart.sh was never invoked (marker missing)"
+case "$OUT" in *"core heartbeat advancing"*) : ;; *) fail "upgrade: heartbeat verification did not pass: $OUT" ;; esac
 # The detach proof: restart.sh blocks 15s. Detached => upgrade returns in a few
 # seconds. Inline (the bug) => >= 15s. Generous threshold of 10s.
 [ "$elapsed" -lt 10 ] || fail "upgrade: took ${elapsed}s — restart.sh was NOT detached (would hang the core)"
