@@ -442,6 +442,42 @@ def run():
         assert calls == [], f"opt-out MUST silence token_usage, got {calls}"
         passed += 1
         print("ok   token_usage honors opt-out (zero sends)")
+    # 19) bandaid_generalize (#2147): the opt-out marker is honored at the
+    #     DURABLE data dir too, not just <workspace>/state.
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        durable = td / "appsupport" / "telemetry-id"
+        durable.parent.mkdir(parents=True)
+        (durable.parent / "telemetry-disabled").write_text("")  # opt-out in the durable dir
+        m = _load(td / "ws-any", key="phc_live", env={"SUTANDO_TELEMETRY_ID_FILE": str(durable)})
+        assert m.opted_out() is True, "durable-dir telemetry-disabled must opt out"
+        assert m.enabled() is False
+        passed += 1
+        print("ok   opt-out honored at the durable data dir (#2147 generalize)")
+
+    # 20) BEFORE/AFTER: an opt-out survives workspace churn ONLY when it lives in
+    #     the durable dir. BEFORE (marker in <workspace>/state) → a churn to a
+    #     new state dir drops it and telemetry re-enables. AFTER (marker in the
+    #     durable dir) → the same churn keeps opted_out True.
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        durable = td / "appsupport" / "telemetry-id"
+        durable.parent.mkdir(parents=True)
+        # BEFORE: opt-out written only to boot #1's legacy state dir.
+        ws1 = td / "ws1"; ws1.mkdir()
+        (ws1 / "telemetry-disabled").write_text("")
+        before_boot1 = _load(ws1, key="phc_live", env={"SUTANDO_TELEMETRY_ID_FILE": str(durable)}).opted_out()
+        before_boot2 = _load(td / "ws2-CHURNED", key="phc_live",
+                             env={"SUTANDO_TELEMETRY_ID_FILE": str(durable)}).opted_out()
+        # AFTER: opt-out written to the durable dir (survives the same churn).
+        (durable.parent / "telemetry-disabled").write_text("")
+        after = _load(td / "ws3-CHURNED-AGAIN", key="phc_live",
+                      env={"SUTANDO_TELEMETRY_ID_FILE": str(durable)}).opted_out()
+        assert before_boot1 is True and before_boot2 is False, \
+            f"legacy-only opt-out should be lost on churn: boot1={before_boot1} boot2={before_boot2}"
+        assert after is True, "durable opt-out must survive churn"
+        passed += 1
+        print("ok   BEFORE legacy opt-out lost on churn / AFTER durable opt-out survives (#2147)")
 
     print(f"\nALL PASS ({passed} checks)")
     return 0
