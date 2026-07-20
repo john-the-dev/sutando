@@ -626,11 +626,11 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
     # Inject skill instructions so the agent follows the notify-before-work and
     # transcription protocol even after conversation compaction wipes context.
     # Only injected for owner tasks when the referenced skills are installed.
-    # CCD-resolved (PR #1525 pattern): never hardcode ~/.claude — nodes may relocate
-    # the config dir via $CLAUDE_CONFIG_DIR.
-    _claude_config = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
-    _notify_py = _claude_config / "skills/task-progress/scripts/notify.py"
-    _transcribe_py = _claude_config / "skills/audio-transcribe/scripts/transcribe.py"
+    # Use claude_home_path() — honours $CLAUDE_CONFIG_DIR → $CLAUDE_HOME → ~/.claude
+    # resolution order (inline os.environ.get misses the $CLAUDE_HOME fallback).
+    # Behaviorally covered by tests/bridge-skill-path-resolution.test.py (CLAUDE_CONFIG_DIR resolution).
+    _notify_py = claude_home_path("skills", "task-progress", "scripts", "notify.py")
+    _transcribe_py = claude_home_path("skills", "audio-transcribe", "scripts", "transcribe.py")
     skill_hints = ""
     if access_tier == "owner" and (_notify_py.exists() or _transcribe_py.exists()):
         hints_lines = ["===SKILL INSTRUCTIONS (follow before any other action)==="]
