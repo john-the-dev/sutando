@@ -32,13 +32,16 @@ Marker spec (matches CLAUDE.md → "Result-body protocol markers"):
 
   DM-ONLY marker — anywhere in the body:
     [dm-only]
-  Privacy guard: when present, the body MUST go to the owner's DM and any
-  [channel:] redirect on the same body is suppressed (no redirect action is
-  emitted). For content that carries private data — the morning briefing's
-  calendar + email, etc. — which must never land in a shared channel. The
-  marker is stripped from the delivered text. dm-only overrides redirect
-  regardless of marker order; it does NOT override a SKIP (a skipped body is
-  delivered nowhere anyway).
+  Privacy guard: suppresses any [channel:] redirect on the same body (no
+  redirect action is emitted), so a body carrying private data can never be
+  redirected out to a shared channel. It emits a dm-only action but does NOT
+  by itself route to the owner's DM — that stays the consumer's job. In
+  practice the private producer (the morning briefing's calendar + email) is
+  emitted as a proactive result (results/proactive-*.txt), which every bridge
+  already delivers to the owner's DM; dm-only reinforces that by guaranteeing
+  no stray [channel:] redirect can override it. The marker is stripped from
+  the delivered text. dm-only overrides redirect regardless of marker order;
+  it does NOT override a SKIP (a skipped body is delivered nowhere anyway).
 
   ATTACH markers — anywhere in the body:
     [file: /path]
@@ -141,7 +144,7 @@ def parse_markers(text: str) -> ParseResult:
          (The bridge archives the task and delivers nothing.)
       2. DM-ONLY next. If `[dm-only]` appears anywhere, add a dm-only action,
          strip it, and suppress any `[channel:]` redirect (privacy guard —
-         the body stays in the owner's DM).
+         the body can't be redirected out to a shared channel).
       3. REDIRECT next. If the body starts with `[channel: <id>]`, strip
          that line and add a redirect action — UNLESS dm-only suppressed it.
       4. ATTACH last. Scan the remaining body for `[file:|send:|attach:]`
