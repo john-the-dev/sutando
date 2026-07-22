@@ -2,6 +2,8 @@
 """Tests for the room-ops collection — shared gate, the read/media/react modules,
 and the unified room_ops CLI dispatcher. No network."""
 import base64
+import contextlib
+import io
 import json
 import os
 import sys
@@ -16,6 +18,7 @@ import read as rd  # noqa: E402
 import media as md  # noqa: E402
 import react as rc  # noqa: E402
 import join as jn  # noqa: E402
+import doc as dc  # noqa: E402
 import room_ops  # noqa: E402
 
 HS = "@agent.a:hs"
@@ -241,6 +244,68 @@ class JoinTests(EnvCase):
             self.assertIn("not a joined member", jn.join_room(ROOM, HS, gate=None)["reason"])
 
 
+class DocTests(EnvCase):
+    def test_missing_room(self):
+        self.assertFalse(dc.doc_get("", HS)["ok"])
+
+    def test_gate_deny(self):
+        os.environ["RELAY_URL"] = "https://r"
+        self.assertIn("gate denied", dc.doc_put(ROOM, "x", agent_mxid=HS, gate={})["reason"])
+
+    def test_no_relay(self):
+        self.assertIn("no gateway", dc.doc_get(ROOM, agent_mxid=HS, gate=None)["reason"])
+
+    def test_get_envelope(self):
+        os.environ["RELAY_URL"] = "https://r"
+        cap = {}
+        fake = {"ok": True, "file": "TODO.md", "folder": "room-todo", "content": "# T"}
+        with mock.patch.object(dc, "http_json",
+                               side_effect=lambda m, u, h, p: (cap.update(url=u, payload=p), (200, fake))[1]):
+            res = dc.doc_get(ROOM, folder="room-todo", name="TODO.md", agent_mxid=HS, gate=None)
+        self.assertTrue(res["ok"])
+        self.assertTrue(cap["url"].endswith("/v1/room"))
+        self.assertEqual(cap["payload"]["op"], "prep_get")
+        self.assertEqual(cap["payload"]["folder"], "room-todo")
+        self.assertEqual(res["content"], "# T")
+
+    def test_put_envelope_b64(self):
+        os.environ["RELAY_URL"] = "https://r"
+        cap = {}
+        fake = {"ok": True, "file": "notes.md", "sha": "abc123"}
+        with mock.patch.object(dc, "http_json",
+                               side_effect=lambda m, u, h, p: (cap.update(payload=p), (200, fake))[1]):
+            res = dc.doc_put(ROOM, "hello", folder="scratch", name="notes.md",
+                             message="m", agent_mxid=HS, gate=None)
+        self.assertTrue(res["ok"] and res["sha"] == "abc123")
+        self.assertEqual(cap["payload"]["op"], "prep_put")
+        self.assertEqual(base64.b64decode(cap["payload"]["content_b64"]).decode(), "hello")
+        self.assertEqual(cap["payload"]["message"], "m")
+
+    def test_rm_envelope(self):
+        os.environ["RELAY_URL"] = "https://r"
+        cap = {}
+        with mock.patch.object(dc, "http_json",
+                               side_effect=lambda m, u, h, p: (cap.update(payload=p), (200, {"ok": True}))[1]):
+            res = dc.doc_rm(ROOM, "old.md", folder="room-memo", agent_mxid=HS, gate=None)
+        self.assertTrue(res["ok"])
+        self.assertEqual(cap["payload"]["op"], "prep_delete")
+        self.assertEqual(cap["payload"]["filename"], "old.md")
+
+    def test_gateway_error_degrades(self):
+        os.environ["RELAY_URL"] = "https://r"
+        with mock.patch.object(dc, "http_json",
+                               return_value=(200, {"error": "bad folder (1-3 safe path segments, no leading dots)"})):
+            res = dc.doc_put(ROOM, "x", folder="../etc", agent_mxid=HS, gate=None)
+        self.assertFalse(res["ok"])
+        self.assertIn("bad folder", res["reason"])
+
+    def test_403_degrades(self):
+        os.environ["RELAY_URL"] = "https://r"
+        err = urllib.error.HTTPError("u", 403, "no", {}, None)
+        with mock.patch.object(dc, "http_json", side_effect=err):
+            self.assertIn("not a joined member", dc.doc_get(ROOM, agent_mxid=HS, gate=None)["reason"])
+
+
 # ----- unified CLI ----- #
 class CliTests(EnvCase):
     def test_read_exits_zero(self):
@@ -263,6 +328,17 @@ class CliTests(EnvCase):
 
     def test_join_exits_zero_on_no_gateway(self):
         self.assertEqual(room_ops._main(["join", ROOM, "--agent", HS]), 0)
+
+    def test_doc_put_missing_file_structured_error(self):
+        # P2 (PR #2050 review): --file read failure must yield the structured
+        # ok:false envelope, not a traceback.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc_ = room_ops._main(["doc", "put", ROOM, "--file", "/nope/missing.md", "--agent", HS])
+        self.assertEqual(rc_, 0)
+        res = json.loads(buf.getvalue())
+        self.assertFalse(res["ok"])
+        self.assertIn("cannot read --file", res["reason"])
 
 
 class GatewayTokenOnboardingTests(EnvCase):
@@ -365,6 +441,111 @@ class ContentLengthTests(EnvCase):
             res = md.fetch_media("mxc://x/y", HS, ROOM, gate=None)
         self.assertFalse(res["ok"])
         self.assertIn("exceeds", res["reason"])
+
+
+class NormalizeReactionsTests(unittest.TestCase):
+    """_normalize must carry the gateway's per-message `reactions` annotation —
+    it's the ONLY surface for the 👀 delivery-ack (reactions never arrive as tasks).
+    Regression: the field was silently dropped, so a worker saw zero reactions."""
+
+    def test_reactions_preserved(self):
+        out = rd._normalize([{"event_id": "$e", "sender": "@a:hs", "body": "hi",
+                              "reactions": [{"key": "\U0001F440", "sender": "@b:hs"}]}])
+        self.assertEqual(out[0]["reactions"], [{"key": "\U0001F440", "sender": "@b:hs"}])
+
+    def test_reactions_default_empty_list(self):
+        out = rd._normalize([{"event_id": "$e", "sender": "@a:hs", "body": "hi"}])
+        self.assertEqual(out[0]["reactions"], [])
+
+
+import resolve as rs  # noqa: E402
+import mention as mn  # noqa: E402
+
+_AGENTS = [
+    {"id": "@sutando-qingyun-001:ag2.space", "label": "Air MBP"},
+    {"id": "@sutando-qingyun-mini:ag2.space", "label": "Mini"},
+    {"id": "@qingyun-air.agent:ag2.space", "label": "core"},
+]
+
+
+class ResolveTests(unittest.TestCase):
+    def test_exact_localpart(self):
+        r = rs.match_agent("sutando-qingyun-001", _AGENTS)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["mxid"], "@sutando-qingyun-001:ag2.space")
+
+    def test_substring_unique(self):
+        r = rs.match_agent("001", _AGENTS)  # only qingyun-001's localpart contains it
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["mxid"], "@sutando-qingyun-001:ag2.space")
+
+    def test_full_mxid_passthrough(self):
+        r = rs.match_agent("@whoever:ag2.space", _AGENTS)  # already an mxid → trust it
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["mxid"], "@whoever:ag2.space")
+
+    def test_ambiguous_reports_candidates_and_does_not_resolve(self):
+        r = rs.match_agent("sutando-qingyun", _AGENTS)  # substring of BOTH 001 and mini
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(r["candidates"]), 2)
+        self.assertIsNone(r["mxid"])
+
+    def test_no_match(self):
+        r = rs.match_agent("nobody", _AGENTS)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["candidates"], [])
+
+    def test_exact_beats_substring(self):
+        agents = [{"id": "@mini:hs", "label": ""}, {"id": "@mini-helper:hs", "label": ""}]
+        r = rs.match_agent("mini", agents)  # exact localpart wins over the substring one
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["mxid"], "@mini:hs")
+
+    def test_label_exact_match(self):
+        r = rs.match_agent("Mini", _AGENTS)  # case-insensitive label hit
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["mxid"], "@sutando-qingyun-mini:ag2.space")
+
+    def test_empty_query(self):
+        self.assertFalse(rs.match_agent("", _AGENTS)["ok"])
+
+
+class MentionBodyTests(unittest.TestCase):
+    def test_leads_with_mxid(self):
+        b = mn.build_body("@sutando-qingyun-001:ag2.space", "review #149")
+        self.assertTrue(b.startswith("@sutando-qingyun-001:ag2.space"))
+        self.assertIn("review #149", b)
+
+    def test_empty_message_is_bare_mxid(self):
+        self.assertEqual(mn.build_body("@x:hs", ""), "@x:hs")
+
+    def test_ambiguous_handle_does_not_post(self):
+        # mention() must refuse to post on an ambiguous handle (never mention the
+        # wrong agent) — returns ok:false + candidates, no network touched.
+        res = mn.mention("sutando-qingyun", "hi", ROOM, HS, gate=None, agents=_AGENTS)
+        self.assertFalse(res["ok"])
+        self.assertEqual(len(res["candidates"]), 2)
+
+    def test_post_payload_leads_with_mxid_and_carries_mentions(self):
+        # A resolved mention posts op:message to /v1/room with the mxid LEADING
+        # the body (text trigger) AND a forward-compat `mentions:[mxid]` (activates
+        # structured push once the broker honors it). Both pinned so neither regresses.
+        cap = {}
+
+        def _fake_http_json(method, url, headers, payload):
+            cap["url"], cap["payload"] = url, payload
+            return 200, {"event_id": "$posted"}
+
+        with mock.patch.object(mn, "gateway", return_value=("https://gw/relay", {})), \
+             mock.patch.object(mn, "http_json", side_effect=_fake_http_json):
+            res = mn.mention("qingyun-001", "review #149", ROOM, HS, gate=None, agents=_AGENTS)
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["event_id"], "$posted")
+        self.assertTrue(cap["url"].endswith("/v1/room"))
+        p = cap["payload"]
+        self.assertEqual(p["op"], "message")
+        self.assertEqual(p["mentions"], ["@sutando-qingyun-001:ag2.space"])
+        self.assertTrue(p["body"].startswith("@sutando-qingyun-001:ag2.space"))
 
 
 if __name__ == "__main__":
