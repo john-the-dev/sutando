@@ -16,11 +16,12 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 HOOK = Path(__file__).resolve().parent.parent / "hooks" / "skill-usage-telemetry.py"
 
 
-def _run(payload_obj, *, stub_root: Path, stdin: str | None = None) -> tuple[int, list]:
+def _run(payload_obj, *, stub_root: Path, stdin: Optional[str] = None) -> tuple[int, list]:
     """Invoke the hook subprocess with a stub telemetry on its src/ path.
     Returns (exit_code, recorded_feature_used_calls)."""
     rec = stub_root / "rec.jsonl"

@@ -24,9 +24,9 @@ Fail-OPEN, ALWAYS. Telemetry must never break a tool: any error (bad stdin,
 missing telemetry module, network) is swallowed and the hook exits 0 with no
 output. A PostToolUse observability hook has no decision to make — it observes.
 
-Deploy: copy to ~/.claude/hooks/ and register under PostToolUse for the "Skill"
-matcher in ~/.claude/settings.json (skills/install.sh does this). Repo root is
-found from this file's location, or via $SUTANDO_REPO_ROOT for tests.
+Registration: ``build-hook-settings.mjs`` registers this repo file's absolute
+path under PostToolUse for the ``Skill`` matcher. Repo root is found from this
+file's location, or via ``$SUTANDO_REPO_ROOT`` for tests.
 """
 import sys
 import os
@@ -72,7 +72,7 @@ def main() -> int:
             return 0
         # flush=True: the hook process is short-lived (exits immediately), so the
         # background sender thread would be killed before it POSTs. The bounded
-        # synchronous path (<=1s) guarantees the event actually leaves.
+        # synchronous path guarantees the event actually leaves.
         feature_used(f"skill:{skill}", flush=True)
     except Exception:
         # Swallow — observability must never surface an error to the tool run.
