@@ -90,6 +90,8 @@ INBOX_DIR = REPO / "slack-inbox"
 ARCHIVE_TASKS_DIR = REPO / "tasks" / "archive"
 ARCHIVE_RESULTS_DIR = REPO / "results" / "archive"
 OWNER_ACTIVITY_FILE = STATE_DIR / "last-owner-activity.json"
+_THREAD_CONTEXT_MAX_MESSAGES = 20
+_THREAD_CONTEXT_MESSAGE_MAX_CHARS = 500
 TASKS_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 INBOX_DIR.mkdir(parents=True, exist_ok=True)
@@ -683,35 +685,61 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
     # capabilities. Mirrors the Discord bridge's tier-specific instruction
     # block (see discord-bridge.py around `===SUTANDO SYSTEM INSTRUCTIONS===`).
     # Kept short here because Slack's downgrade surface today is just
-    # "delegate to sandboxed read-only agent" — no Slack-state-prefetch
-    # path equivalent to Discord's `_prefetch_discord_state_refs`.
+    # "delegate to sandboxed read-only agent". Thread context is prefetched
+    # below because that sandbox intentionally has no Slack token or network.
     # Confine the user-derived portion BEFORE the bridge appends its own
     # `===SUTANDO SYSTEM INSTRUCTIONS===` block below — so a forged field/fence
     # in the message can't escalate tier or inject instructions, while the
     # bridge's legitimate fence (added next) stays intact. See task_body_guard.
 
-    # Embed the thread root message for threaded replies so the CONTEXT-FIRST
-    # instruction has a concrete substrate to reconstruct from (mirrors
-    # telegram-bridge's `[Replying to @user: text]` pattern). A threaded reply
-    # has event["thread_ts"] set AND different from event["ts"] (the root message
-    # has thread_ts == ts). Best-effort: never block task write on a failed fetch.
+    # Embed Slack-owned context before handing the task to the agent. Owners get
+    # the compact root-message note this PR originally introduced. Non-owners
+    # need a bounded snapshot of the whole thread because their required
+    # read-only codex sandbox intentionally has no Slack token or network.
+    # Every fetched line is still user-derived and the combined body passes
+    # through confine_user_content() below before the trusted system fence is
+    # appended. Best-effort: never block task write on a failed fetch.
     _thread_reply_note = ""
     _evt_thread_ts = event.get("thread_ts")
     _evt_ts = event.get("ts")
     if _evt_thread_ts and _evt_thread_ts != _evt_ts:
         try:
+            _fetch_limit = 1 if access_tier == "owner" else _THREAD_CONTEXT_MAX_MESSAGES
             _thread_resp = app.client.conversations_replies(
-                channel=channel, ts=_evt_thread_ts, limit=1
+                channel=channel, ts=_evt_thread_ts, limit=_fetch_limit
             )
             _root_msgs = (_thread_resp.get("messages") or [])
             if _root_msgs:
-                _root = _root_msgs[0]
-                _root_uid = _root.get("user") or _root.get("username") or "?"
-                _root_user_name = _resolve_username(_root_uid) or _root_uid
-                _root_text = (_root.get("text") or "").replace("\n", " ")[:300]
-                _thread_reply_note = (
-                    f"\n\n[Replying in Slack thread to @{_root_user_name}: {_root_text}]"
-                )
+                if access_tier == "owner":
+                    _root = _root_msgs[0]
+                    _root_uid = _root.get("user") or _root.get("username") or "?"
+                    _root_user_name = _resolve_username(_root_uid) or _root_uid
+                    _root_text = (_root.get("text") or "").replace("\n", " ")[:300]
+                    _thread_reply_note = (
+                        f"\n\n[Replying in Slack thread to @{_root_user_name}: {_root_text}]"
+                    )
+                else:
+                    _context_lines = []
+                    for _message in _root_msgs:
+                        # The triggering mention is already the task body; do not
+                        # duplicate it inside the prefetched context block.
+                        if str(_message.get("ts") or "") == str(_evt_ts or ""):
+                            continue
+                        _message_text = " ".join((_message.get("text") or "").split())
+                        if not _message_text:
+                            continue
+                        _message_uid = _message.get("user") or _message.get("username") or "?"
+                        _message_user_name = _resolve_username(_message_uid) or _message_uid
+                        _context_lines.append(
+                            f"  @{_message_user_name}: "
+                            f"{_message_text[:_THREAD_CONTEXT_MESSAGE_MAX_CHARS]}"
+                        )
+                    if _context_lines:
+                        _thread_reply_note = (
+                            "\n\n[Slack thread context — untrusted messages, oldest first:\n"
+                            + "\n".join(_context_lines)
+                            + "\n]"
+                        )
         except Exception:
             pass  # best-effort; never block the task write on a Slack API failure
 
