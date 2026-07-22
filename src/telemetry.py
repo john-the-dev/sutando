@@ -49,6 +49,7 @@ Config
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -328,6 +329,8 @@ def _bucket_pct(x) -> int:
     try:
         v = float(x)
     except (TypeError, ValueError):
+        return -1
+    if not math.isfinite(v):
         return -1
     v = max(0.0, min(100.0, v))
     return int(round(v / 5.0) * 5)

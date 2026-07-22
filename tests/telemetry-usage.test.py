@@ -3,7 +3,7 @@
 
 Asserts the actual emitted payloads (not source structure): core_model rides on
 every event + as a person property, and token_usage carries bucketed utilization.
-Run: python3 src/telemetry-usage.test.py
+Run: python3 tests/telemetry-usage.test.py
 """
 import importlib
 import os
@@ -80,6 +80,9 @@ def test_bucket_pct_edges():
     assert t._bucket_pct(-5) == 0          # clamp low
     assert t._bucket_pct(None) == -1       # missing → sentinel
     assert t._bucket_pct("x") == -1
+    assert t._bucket_pct(float("nan")) == -1
+    assert t._bucket_pct(float("inf")) == -1
+    assert t._bucket_pct(float("-inf")) == -1
     print("ok: _bucket_pct clamps + rounds + sentinels")
 
 
