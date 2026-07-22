@@ -271,15 +271,21 @@ def capture(event: str, properties: dict | None = None, *, flush: bool = False) 
     _dispatch(event, properties, flush=flush)
 
 
-def task_processed(source: str) -> None:
+def task_processed(source: str, *, flush: bool = False) -> None:
     """One anonymous event per task the core accepts, tagged only with the
-    inbound surface (``discord`` / ``slack`` / ``telegram`` / ``voice`` / …).
+    inbound surface (``discord`` / ``slack`` / ``telegram`` / ``voice`` /
+    ``chat`` / ``phone`` / …).
 
     This is the activation signal that ``core_started`` alone can't give:
     whether an install does anything after launching. It carries ONLY the
     coarse source bucket — never the task text, ids, user, or channel.
+
+    ``flush=True`` is for short-lived callers (the CLI entrypoint below, spawned
+    by the TypeScript task-delegation/phone paths) that exit immediately: the
+    default daemon-thread sender would be killed before the request completes.
+    Long-running services (the Python bridges) keep the default async path.
     """
-    capture("task_processed", {"source": str(source)})
+    capture("task_processed", {"source": str(source)}, flush=flush)
 
 
 def feature_used(feature: str, *, flush: bool = False) -> None:
@@ -321,3 +327,30 @@ def _dispatch(event: str, properties: dict | None, *, flush: bool = False) -> No
         _post(payload, timeout=1)
     else:
         threading.Thread(target=_post, args=(payload,), daemon=True).start()
+
+
+# ── CLI entrypoint ─────────────────────────────────────────────────────────
+# Lets non-Python task creators (the TypeScript task-delegation and phone
+# paths) emit an event without a duplicate emitter in TS. Fire-and-forget from
+# the caller: `python3 src/telemetry.py task_processed <source>`. Always uses
+# the flush path — this process exits the instant it returns, so a daemon-thread
+# send would be killed mid-flight. No-op (exit 0) when telemetry is opted out /
+# unconfigured, exactly like the in-process calls. Never prints task content.
+def _cli_main(argv: list[str]) -> int:
+    """Dispatch a one-shot CLI emit. Returns the process exit code. Kept a plain
+    function (not inlined under ``__main__``) so every branch is unit-testable
+    in-process — subprocess-only code escapes the coverage gate."""
+    if len(argv) == 2 and argv[0] == "task_processed":
+        task_processed(argv[1], flush=True)
+        return 0
+    if len(argv) == 2 and argv[0] == "feature_used":
+        feature_used(argv[1], flush=True)
+        return 0
+    sys.stderr.write(
+        "usage: python3 src/telemetry.py {task_processed|feature_used} <value>\n"
+    )
+    return 2
+
+
+if __name__ == "__main__":  # pragma: no cover — thin subprocess shim; _cli_main is tested
+    sys.exit(_cli_main(sys.argv[1:]))
