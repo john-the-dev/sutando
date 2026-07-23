@@ -46,7 +46,8 @@ EOF
 #!/bin/bash
 echo "restart invoked" > "$root/restart-marker"
 touch "$root/workspace/state/cores/test.alive"
-sleep 15
+printf '%s\n' "\$\$" > "$root/restart-pid"
+exec sleep 15
 EOF
   chmod +x "$root/src/restart.sh"
 
@@ -105,8 +106,12 @@ case "$OUT" in *"core heartbeat advancing"*) : ;; *) fail "upgrade: heartbeat ve
 # The detach proof: restart.sh blocks 15s. Detached => upgrade returns in a few
 # seconds. Inline (the bug) => >= 15s. Generous threshold of 10s.
 [ "$elapsed" -lt 10 ] || fail "upgrade: took ${elapsed}s — restart.sh was NOT detached (would hang the core)"
-# the detached stub's `sleep 15` is still running; note its pgid for cleanup
-MARKER_SLEEP_PID="$(pgrep -f "sleep 15" | head -1 || true)"
+# The detached fixture records its own PID immediately before exec'ing sleep.
+# Read only that fixture-owned PID: a host-wide pgrep could select and kill an
+# unrelated developer/CI process that happens to be running `sleep 15`.
+MARKER_SLEEP_PID="$(cat "$C/restart-pid")"
+case "$MARKER_SLEEP_PID" in *[!0-9]*|'') fail "upgrade: invalid fixture restart PID" ;; esac
+kill -0 "$MARKER_SLEEP_PID" 2>/dev/null || fail "upgrade: fixture restart PID is not running"
 ok "C: pulls to latest + runs restart DETACHED (${elapsed}s < 10s, marker present)"
 
 echo "PASS — self-upgrade behavioral suite (3/3)"
