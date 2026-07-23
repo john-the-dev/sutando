@@ -49,6 +49,14 @@ spec = importlib.util.spec_from_file_location("discordbridge_pair", REPO / "src"
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
+# HARD-isolate ACCESS_FILE (#2158 CR). Setting CLAUDE_CONFIG_DIR is NOT enough:
+# channel_access_path() prefers the canonical path but FALLS BACK to the real
+# legacy ~/.claude/channels/discord/access.json when the (fresh tmp) canonical
+# doesn't exist at import — so mod.ACCESS_FILE can resolve to the developer's
+# REAL allowlist, and Case 4's pairing write would clobber it. Pin it to a
+# throwaway temp file so no case can ever touch a real access.json.
+mod.ACCESS_FILE = Path(tempfile.mkdtemp(prefix="pair-acl-")) / "channels" / "discord" / "access.json"
+
 failures: list[str] = []
 
 
@@ -95,15 +103,19 @@ check("channel got exactly one message", len(channel.sent) == 1)
 check("channel message does NOT contain the code",
       all(CODE not in m for m in channel.sent), f"leaked: {channel.sent}")
 
-# ── Case 2: owner unreachable → legacy in-channel fallback ───────────────────
+# ── Case 2: owner unreachable → fail-SAFE fallback, code NOT leaked ──────────
+# #2158 CR: the fallback must NOT recreate the leak. When no owner DM is
+# reachable, the channel gets a generic, code-free notice; the code stays in
+# access.json `pending` + the owner-only bridge log for retrieval.
 channel2 = FakeMessageable(name="pr-review")
 with patch.object(mod, "client", FakeClient(None)):
     route2 = asyncio.run(
         mod._deliver_pairing_prompt(channel2, CODE, "newuser", "42", {"777"})
     )
 check("route reported as channel fallback", route2 == "channel")
-check("fallback channel message contains the code (pairing still completable)",
-      any(CODE in m for m in channel2.sent))
+check("fallback still notifies the channel (one message)", len(channel2.sent) == 1)
+check("fallback channel message does NOT contain the code (no leak in the fallback)",
+      all(CODE not in m for m in channel2.sent), f"leaked: {channel2.sent}")
 
 # ── Case 3: empty allowFrom (pre-TOFU) → fallback without fetch attempts ─────
 channel3 = FakeMessageable(name="pr-review")
