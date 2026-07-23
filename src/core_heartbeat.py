@@ -184,9 +184,16 @@ def _emit_token_usage() -> None:  # pragma: no cover — network + optional-skil
     """
     try:
         import subprocess
-        from telemetry import token_usage
+        from telemetry import enabled, token_usage
         from util_paths import claude_home_path
 
+        # Opt-out (DO_NOT_TRACK / SUTANDO_TELEMETRY=0) or no key configured: do NO
+        # telemetry-only local work. Skipping here — before launching read-quota.py
+        # — matters because that reader calls _update_burn_rate() and writes
+        # state/quota-burn-history.json, so running it would break the documented
+        # silent no-op/opt-out contract (not just suppress the upload). See #2148 CR.
+        if not enabled():
+            return
         script = claude_home_path("skills", "quota-tracker", "scripts", "read-quota.py")
         if not script.exists():
             return

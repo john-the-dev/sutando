@@ -204,5 +204,42 @@ class TestHeartbeatCli(unittest.TestCase):
         self.assertFalse(alive.exists(), ".alive should have been unlinked on SIGTERM")
 
 
+class TestTokenUsageOptOutGate(unittest.TestCase):
+    """The token-usage boot hook must do NO telemetry-only local work when
+    telemetry is opted out (#2148 CR): opting out is a silent no-op, so
+    read-quota.py — which mutates state/quota-burn-history.json — must not run.
+    """
+
+    def setUp(self):
+        sys.modules.pop("core_heartbeat", None)
+        import core_heartbeat
+        self.mod = core_heartbeat
+
+    def tearDown(self):
+        sys.modules.pop("core_heartbeat", None)
+
+    def test_opted_out_does_not_launch_quota_reader(self):
+        import telemetry
+        from unittest import mock
+        with mock.patch.object(telemetry, "enabled", return_value=False), \
+                mock.patch("subprocess.run") as run:
+            self.mod._emit_token_usage()
+        run.assert_not_called()  # opt-out => no subprocess, no burn-history write
+
+    def test_enabled_launches_quota_reader(self):
+        import telemetry
+        import util_paths
+        from unittest import mock
+        # enabled + a present script => the reader IS invoked (contrast case).
+        fake = mock.Mock()
+        fake.exists.return_value = True
+        completed = mock.Mock(returncode=1, stdout="")  # non-zero => early return, no token_usage
+        with mock.patch.object(telemetry, "enabled", return_value=True), \
+                mock.patch.object(util_paths, "claude_home_path", return_value=fake), \
+                mock.patch("subprocess.run", return_value=completed) as run:
+            self.mod._emit_token_usage()
+        run.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
