@@ -170,6 +170,108 @@ def test_multiple_referenced_users():
     assert names == ["a.mp4", "c.mp4"], names
 
 
+# --- _process_sibling_attachment: the download + OFFLOADED transcription -------
+# (CR #2126 — the transcription subprocess must run off the gateway event loop.)
+import asyncio
+import threading
+
+
+class _FakeAtt:
+    def __init__(self, filename, content_type="", data=b"x"):
+        self.filename = filename
+        self.content_type = content_type
+        self.size = len(data)
+        self._data = data
+
+    async def save(self, path):
+        Path(path).write_bytes(self._data)
+
+
+class _FailAtt:
+    filename = "bad.mp3"
+    content_type = "audio/mpeg"
+    size = 1
+
+    async def save(self, path):
+        raise RuntimeError("network error")
+
+
+def _reset_patches():
+    bridge._push_vision_image = lambda *a, **k: None
+
+
+def test_sibling_attachment_offloads_transcription():
+    # The load-bearing assertion for CR #2126: _transcribe_via_skill (blocking,
+    # long timeout) must run OFF the event-loop thread via asyncio.to_thread.
+    _reset_patches()
+    main_thread = threading.current_thread()
+    seen = {}
+
+    def fake_transcribe(p):
+        seen["thread"] = threading.current_thread()
+        seen["path"] = p
+        return "hello world"
+
+    orig = bridge._transcribe_via_skill
+    bridge._transcribe_via_skill = fake_transcribe
+    try:
+        att = _FakeAtt("note.ogg", "audio/ogg")
+        ref, note = asyncio.run(bridge._process_sibling_attachment(att, "Alice"))
+    finally:
+        bridge._transcribe_via_skill = orig
+    assert ref is not None, "an attachment ref must be returned on success"
+    assert "Voice transcript (from Alice's recent message): hello world" in note, note
+    assert seen["thread"] is not main_thread, "transcription must run off the event-loop thread"
+
+
+def test_sibling_attachment_file_note_when_no_transcript():
+    _reset_patches()
+    orig = bridge._transcribe_via_skill
+    bridge._transcribe_via_skill = lambda p: None
+    try:
+        ref, note = asyncio.run(bridge._process_sibling_attachment(_FakeAtt("doc.pdf", "application/pdf"), "Bob"))
+    finally:
+        bridge._transcribe_via_skill = orig
+    assert ref is not None and "File attached (from Bob's recent message)" in note, note
+
+
+def test_sibling_attachment_download_failure_returns_none():
+    _reset_patches()
+    ref, note = asyncio.run(bridge._process_sibling_attachment(_FailAtt(), "Cara"))
+    assert ref is None and note == "", (ref, note)
+
+
+def test_sibling_attachment_image_pushed_to_vision():
+    orig = bridge._transcribe_via_skill
+    bridge._transcribe_via_skill = lambda p: None
+    pushed = []
+    bridge._push_vision_image = lambda path, source="discord": pushed.append((path, source))
+    try:
+        ref, note = asyncio.run(bridge._process_sibling_attachment(_FakeAtt("pic.png", "image/png"), "Dan"))
+    finally:
+        bridge._transcribe_via_skill = orig
+        _reset_patches()
+    assert ref is not None, "image attachment must still produce a ref"
+    assert len(pushed) == 1 and pushed[0][1] == "discord", pushed
+
+
+def test_sibling_attachment_vision_error_swallowed():
+    # A vision-push failure must not break note-building or the return value.
+    orig = bridge._transcribe_via_skill
+    bridge._transcribe_via_skill = lambda p: None
+
+    def boom(*a, **k):
+        raise RuntimeError("vision service down")
+
+    bridge._push_vision_image = boom
+    try:
+        ref, note = asyncio.run(bridge._process_sibling_attachment(_FakeAtt("pic.png", "image/png"), "Ed"))
+    finally:
+        bridge._transcribe_via_skill = orig
+        _reset_patches()
+    assert ref is not None and "File attached (from Ed's recent message)" in note, note
+
+
 def main():
     failures = []
     for fn in (
@@ -182,6 +284,11 @@ def main():
         test_empty_history_returns_empty,
         test_empty_referenced_ids_returns_empty,
         test_multiple_referenced_users,
+        test_sibling_attachment_offloads_transcription,
+        test_sibling_attachment_file_note_when_no_transcript,
+        test_sibling_attachment_download_failure_returns_none,
+        test_sibling_attachment_image_pushed_to_vision,
+        test_sibling_attachment_vision_error_swallowed,
     ):
         try:
             fn()
@@ -194,7 +301,7 @@ def main():
         for f in failures:
             print(f"  {f}")
         sys.exit(1)
-    print("All 9 sibling-attachment selection tests passed.")
+    print("All 14 sibling-attachment tests passed (selection + offloaded processing).")
 
 
 if __name__ == "__main__":

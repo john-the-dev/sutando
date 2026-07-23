@@ -417,6 +417,42 @@ def _transcribe_via_skill(local_path: str) -> str | None:
     return None
 
 
+async def _process_sibling_attachment(att, author_str: str):
+    """Download one referenced-user (sibling) attachment and build its task note.
+
+    Returns ``(attachment_ref, note_fragment)``, or ``(None, "")`` if the
+    download failed. The transcription subprocess is synchronous with a long
+    timeout, so it is offloaded with ``asyncio.to_thread`` — scanning up to five
+    sibling attachments must never block the gateway event loop and starve
+    heartbeats (CR #2126, qingyun-wu; same offload as #2159). A voice attachment
+    yields a transcript note, anything else a file note; image attachments are
+    additionally pushed for the core's multimodal context. Kept a module-level
+    helper (out of the un-coverable I/O handler) so the offload is unit-testable.
+    """
+    s_path = INBOX_DIR / f"{int(time.time()*1000)}_{_safe_attachment_basename(att.filename)}"
+    try:
+        await att.save(s_path)
+    except Exception as e:
+        print(f"  [sibling-attach] download failed: {e}", flush=True)
+        return None, ""
+    ref = _ref_from_attachment(att, s_path)
+    # Offload the blocking, long-timeout transcription off the event loop.
+    transcript = await asyncio.to_thread(_transcribe_via_skill, str(s_path))
+    if transcript:
+        note = f"\n[Voice transcript (from {author_str}'s recent message): {transcript}]"
+    else:
+        note = f"\n[File attached (from {author_str}'s recent message): {s_path}]"
+    try:
+        ct = (getattr(att, "content_type", "") or "").lower()
+        if ct.startswith("image/") or str(s_path).lower().endswith(
+            (".jpg", ".jpeg", ".png", ".webp", ".gif")
+        ):
+            _push_vision_image(str(s_path), source="discord")
+    except Exception:
+        pass
+    return ref, note
+
+
 def _safe_attachment_basename(filename: str) -> str:
     """Sanitize a Discord attachment filename for safe filesystem +
     downstream-shell use.
@@ -2938,25 +2974,10 @@ async def _handle_discord_message(message, force=False):
                 cutoff = message.created_at - timedelta(minutes=15)
                 history = [m async for m in message.channel.history(limit=15, before=message)]
                 for author_str, att in _select_sibling_attachments(history, referenced_ids, cutoff):
-                    s_path = INBOX_DIR / f"{int(time.time()*1000)}_{_safe_attachment_basename(att.filename)}"
-                    try:
-                        await att.save(s_path)
-                        attachment_refs.append(_ref_from_attachment(att, s_path))
-                        transcript = _transcribe_via_skill(str(s_path))
-                        if transcript:
-                            attachment_note += f"\n[Voice transcript (from {author_str}'s recent message): {transcript}]"
-                        else:
-                            attachment_note += f"\n[File attached (from {author_str}'s recent message): {s_path}]"
-                        try:
-                            ct = (getattr(att, "content_type", "") or "").lower()
-                            if ct.startswith("image/") or str(s_path).lower().endswith(
-                                (".jpg", ".jpeg", ".png", ".webp", ".gif")
-                            ):
-                                _push_vision_image(str(s_path), source="discord")
-                        except Exception:
-                            pass
-                    except Exception as e:
-                        print(f"  [sibling-attach] download failed: {e}", flush=True)
+                    ref, note = await _process_sibling_attachment(att, author_str)
+                    if ref is not None:
+                        attachment_refs.append(ref)
+                        attachment_note += note
             except Exception as e:
                 print(f"  [sibling-attach] history scan failed: {e}", flush=True)
 
