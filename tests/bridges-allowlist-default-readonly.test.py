@@ -142,7 +142,10 @@ slack._ensure_tier_map_seeded()  # must swallow and return without writing
 check("slack: seed swallows a read failure", True)
 slack.ACCESS_FILE = _sf
 
-# 6. seed swallows a write failure (except OSError -> pass)
+# 6. seed WRITE failure: swallow the OSError, return False, and the resolution
+#    must fail CLOSED — an allowlisted user resolves read-only ("other"), NOT
+#    owner (#2161 CR: "assert the resolved TIER after a seed write failure",
+#    not merely that no exception escapes).
 class _WriteRaises:
     def __init__(self, payload):
         self._p = payload
@@ -151,9 +154,23 @@ class _WriteRaises:
     def write_text(self, *a, **k):
         raise OSError("disk full")
 slack.ACCESS_FILE = _WriteRaises(json.dumps({"allowFrom": ["U_W"]}))  # no tierMap -> attempts the write
-slack._ensure_tier_map_seeded()  # must swallow the OSError
-check("slack: seed swallows a write failure", True)
+seeded_ok = slack._ensure_tier_map_seeded()  # must swallow the OSError, return False
+check("slack: seed write failure returns False (explicit, not silent)", seeded_ok is False, f"got {seeded_ok!r}")
+# After the failed persist, on-disk state still has NO tierMap. Point ACCESS_FILE
+# at a real file reflecting that post-failure state (clearing the mtime cache) and
+# confirm the resolution fails CLOSED via the source's membership-only rule.
+_pf = Path(tempfile.mkdtemp(prefix="sl-postfail-")) / "access.json"
+_pf.write_text(json.dumps({"allowFrom": ["U_W"]}))  # tierMap never persisted
+slack.ACCESS_FILE = _pf
+if hasattr(slack, "_access_cache"):
+    slack._access_cache = None
+_tm = slack.load_tier_map()  # {} — no tierMap on disk
+_resolved = _tm["U_W"] if "U_W" in _tm else "other"  # mirror: owner only via membership
+check("slack: seed WRITE failure resolves allowlisted user read-only, NOT owner",
+      _resolved != "owner" and _resolved == "other", f"got {_resolved!r}")
 slack.ACCESS_FILE = _sf
+if hasattr(slack, "_access_cache"):
+    slack._access_cache = None
 
 # 7. _write_task runs the tier-map seed call + resolution (covers the seed call
 #    site) for a non-owner sender, and writes the task to a redirected TASKS_DIR.
@@ -235,7 +252,10 @@ if _have_discord:
           _dtm.get("444", "team" if _dtm else "owner") == "team", str(_dtm))
     dmod.ACCESS_FILE = _df
 
-    # 7. seed swallows a write failure (except OSError -> pass)
+    # 7. seed WRITE failure: swallow the OSError, return False, and the
+    #    resolution must fail CLOSED — an allowlisted sender resolves "team",
+    #    NOT owner (#2161 CR: assert the resolved TIER after a seed write
+    #    failure, not merely that no exception escapes).
     class _DWriteRaises:
         def __init__(self, payload):
             self._p = payload
@@ -244,8 +264,13 @@ if _have_discord:
         def write_text(self, *a, **k):
             raise OSError("disk full")
     dmod.ACCESS_FILE = _DWriteRaises(json.dumps({"allowFrom": ["999"]}))  # no tierMap -> attempts write
-    dmod.ensure_tier_map_seeded()  # must swallow the OSError
-    check("discord: seed swallows a write failure", True)
+    seeded_ok = dmod.ensure_tier_map_seeded()  # must swallow the OSError, return False
+    check("discord: seed write failure returns False (explicit, not silent)", seeded_ok is False, f"got {seeded_ok!r}")
+    _dtm = dmod.load_tier_map()  # {} — the write failed, tierMap never persisted
+    # Mirror the source resolution (owner strictly via membership; empty → team):
+    _dres = _dtm["999"] if "999" in _dtm else "team"
+    check("discord: seed WRITE failure resolves allowlisted sender read-only (team), NOT owner",
+          _dres != "owner" and _dres == "team", f"got {_dres!r}")
     dmod.ACCESS_FILE = _df
 
     # 8. load_tier_map / seed swallow a read failure (except -> {} / return)
