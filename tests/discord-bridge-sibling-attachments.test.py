@@ -179,6 +179,12 @@ def test_sibling_history_fetch_is_time_bounded():
     src = (REPO / "src" / "discord-bridge.py").read_text()
     assert "after=cutoff" in src, "sibling history scan must be time-bounded (after=cutoff)"
     assert "limit=15, before=message" not in src, "bare 15-message count fetch must be gone"
+    # CR #2126 (round 4): any message-count cap re-introduces truncation — the
+    # scan must use limit=None (pure time bound), not limit=15/200/etc.
+    import re as _re
+    m = _re.search(r"channel\.history\(\s*limit=(\w+),\s*after=cutoff", src)
+    assert m is not None, "sibling history call not found in expected shape"
+    assert m.group(1) == "None", f"sibling history must use limit=None, got limit={m.group(1)}"
 
 
 def test_single_message_preserves_attachment_order():
