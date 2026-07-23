@@ -170,6 +170,17 @@ def test_multiple_referenced_users():
     assert names == ["a.mp4", "c.mp4"], names
 
 
+def test_sibling_history_fetch_is_time_bounded():
+    # CR #2126: the sibling-attachment history scan must fetch by the 15-minute
+    # TIME window (after=cutoff), not a fixed small message count that can
+    # truncate a busy channel before reaching an in-window attachment. (The scan
+    # itself lives in the un-coverable async handler, so this pins the query shape
+    # structurally.)
+    src = (REPO / "src" / "discord-bridge.py").read_text()
+    assert "after=cutoff" in src, "sibling history scan must be time-bounded (after=cutoff)"
+    assert "limit=15, before=message" not in src, "bare 15-message count fetch must be gone"
+
+
 def test_single_message_preserves_attachment_order():
     # CR #2126: one message with several attachments must keep UPLOAD order —
     # the prior flat-list reverse inverted attachments within each message.
@@ -318,6 +329,7 @@ def main():
         test_empty_history_returns_empty,
         test_empty_referenced_ids_returns_empty,
         test_multiple_referenced_users,
+        test_sibling_history_fetch_is_time_bounded,
         test_single_message_preserves_attachment_order,
         test_multi_message_multi_attachment_ordering,
         test_cap_across_messages_keeps_nearest_in_order,
@@ -338,7 +350,7 @@ def main():
         for f in failures:
             print(f"  {f}")
         sys.exit(1)
-    print("All 17 sibling-attachment tests passed (selection + offloaded processing).")
+    print("All 18 sibling-attachment tests passed (selection + offloaded processing).")
 
 
 if __name__ == "__main__":

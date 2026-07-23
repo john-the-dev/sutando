@@ -2983,7 +2983,17 @@ async def _handle_discord_message(message, force=False):
             try:
                 from datetime import timedelta
                 cutoff = message.created_at - timedelta(minutes=15)
-                history = [m async for m in message.channel.history(limit=15, before=message)]
+                # Fetch by the 15-minute TIME window (after=cutoff), newest-first —
+                # not a fixed 15-message count. In a busy channel a referenced
+                # attachment inside the promised window can sit past a small count
+                # cap and be silently dropped (CR #2126, qingyun-wu). A generous
+                # 200-message ceiling bounds a firehose while covering any realistic
+                # window (_select_sibling_attachments still caps kept attachments).
+                history = [
+                    m async for m in message.channel.history(
+                        limit=200, after=cutoff, before=message, oldest_first=False
+                    )
+                ]
                 for author_str, att in _select_sibling_attachments(history, referenced_ids, cutoff):
                     ref, note = await _process_sibling_attachment(att, author_str)
                     if ref is not None:
