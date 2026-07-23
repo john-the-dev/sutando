@@ -46,8 +46,35 @@ check("_crons_path ends with hosts/<host>/crons.json",
 # ── validation ────────────────────────────────────────────────────────────────
 check("valid job passes", dash._validate_job(
     {"name": "x", "cron": "*/10 * * * *", "prompt_skill": "morning-briefing"}) is None)
+check("non-dict job rejected", dash._validate_job("not a dict") == "job must be an object")
 check("missing name rejected", dash._validate_job({"name": "", "cron": "* * * * *", "prompt": "y"}))
 check("bad cron (4 fields) rejected", dash._validate_job({"name": "x", "cron": "* * * *", "prompt": "y"}))
+# CR #2164: a malformed 5-field cron (right token count, garbage fields) must be
+# rejected — _cron_next_run returns None (not raises), so it can't be the gate.
+check("malformed 5-field cron rejected", dash._validate_job(
+    {"name": "x", "cron": "foo bar baz qux quux", "prompt": "y"}))
+check("out-of-range minute rejected", dash._validate_job(
+    {"name": "x", "cron": "99 * * * *", "prompt": "y"}))
+check("out-of-range month rejected", dash._validate_job(
+    {"name": "x", "cron": "0 0 1 13 *", "prompt": "y"}))
+check("inverted range rejected", dash._validate_job(
+    {"name": "x", "cron": "0 0 1 * 5-1", "prompt": "y"}))
+check("bad step rejected", dash._validate_job(
+    {"name": "x", "cron": "*/0 * * * *", "prompt": "y"}))
+# A syntactically-valid but rare cron (Feb 29 — no run for years) must still be
+# ACCEPTED — validity is per-field syntax/range, not presence in the scan horizon.
+check("valid-but-rare cron accepted (Feb 29)", dash._validate_job(
+    {"name": "x", "cron": "0 0 29 2 *", "prompt": "y"}) is None)
+check("valid ranges/lists/steps accepted", dash._validate_job(
+    {"name": "x", "cron": "0,30 9-17 * * 1-5", "prompt_skill": "s"}) is None)
+# The bad cron is also rejected end-to-end through the persisting handler.
+_bad_code, _bad_obj = dash.upsert_schedule({"name": "bad", "cron": "foo bar baz qux quux", "prompt": "y"})
+check("upsert rejects a malformed 5-field cron (not persisted)", _bad_code == 400, str(_bad_obj))
+# Direct helper unit — the accepted/rejected token forms.
+check("_cron_field_valid accepts *, */N, A-B, N, lists",
+      all(dash._cron_field_valid(s, 0, 59) for s in ("*", "*/5", "0-59", "30", "0,15,30,45")))
+check("_cron_field_valid rejects garbage / OOR / empty",
+      not any(dash._cron_field_valid(s, 0, 59) for s in ("foo", "60", "*/x", "", "10-5")))
 check("both prompt+skill rejected", dash._validate_job(
     {"name": "x", "cron": "* * * * *", "prompt": "y", "prompt_skill": "z"}))
 check("neither prompt nor skill rejected", dash._validate_job({"name": "x", "cron": "* * * * *"}))

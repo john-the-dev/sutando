@@ -350,6 +350,41 @@ def _cron_field_match(spec: str, value: int) -> bool:
     return False
 
 
+# Per-field value bounds (minute, hour, day-of-month, month, day-of-week).
+# dow allows 0-7 (0 and 7 both = Sunday, per cron convention).
+_CRON_BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+
+
+def _cron_field_valid(spec: str, lo: int, hi: int) -> bool:
+    """True iff every comma-token of a cron field is syntactically valid and in
+    range: ``*``, ``*/N`` (N>0), ``A-B`` (lo<=A<=B<=hi), or a plain integer in
+    [lo, hi]. Used to reject a malformed field (e.g. ``foo``) or an out-of-range
+    one (e.g. minute ``99``) up front — ``_cron_next_run`` can't distinguish
+    those from a valid-but-rare cron with no run in the scan horizon (both →
+    None), so it must not be the validator (CR #2164, qingyun-wu)."""
+    spec = spec.strip()
+    if not spec:
+        return False
+    for token in spec.split(","):
+        token = token.strip()
+        if token == "*":
+            continue
+        if token.startswith("*/"):
+            step = token[2:]
+            if step.isdigit() and int(step) > 0:
+                continue
+            return False
+        if "-" in token:
+            a, _, b = token.partition("-")
+            if a.isdigit() and b.isdigit() and lo <= int(a) <= int(b) <= hi:
+                continue
+            return False
+        if token.isdigit() and lo <= int(token) <= hi:
+            continue
+        return False
+    return True
+
+
 def _cron_next_run(expr: str, now: datetime, horizon_days: int = 8):
     """Next datetime matching a 5-field cron expr (minute hour dom month dow),
     scanning minute-by-minute up to horizon_days. Returns datetime or None.
@@ -420,11 +455,14 @@ def _validate_job(job: dict) -> str | None:
     if not name:
         return "name is required"
     expr = (job.get("cron") or "").strip()
-    if len(expr.split()) != 5:
+    fields = expr.split()
+    if len(fields) != 5:
         return "cron must be a 5-field expression (min hour dom month dow)"
-    try:
-        _cron_next_run(expr, datetime.now())
-    except Exception:  # pragma: no cover — defensive; _cron_next_run doesn't raise on bad fields
+    # Validate each field's SYNTAX + range directly. _cron_next_run returns None
+    # for a malformed cron AND for a valid-but-no-run-in-horizon one, so it can't
+    # be the gate — a garbage expr like "foo bar baz qux quux" would slip through
+    # and be persisted as an uncomputable schedule (CR #2164, qingyun-wu).
+    if not all(_cron_field_valid(f, lo, hi) for f, (lo, hi) in zip(fields, _CRON_BOUNDS)):
         return f"invalid cron expression: {expr!r}"
     has_prompt = bool((job.get("prompt") or "").strip())
     has_skill = bool((job.get("prompt_skill") or "").strip())
