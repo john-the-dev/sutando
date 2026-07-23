@@ -169,6 +169,22 @@ class TestSendDiscord(unittest.TestCase):
             result = self.mod.send_discord("111", "hello")
         self.assertFalse(result)
 
+    def test_discord_request_api_error_returns_none(self):
+        with patch("urllib.request.urlopen", side_effect=Exception("timeout")), \
+             patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            result = self.mod._discord_request(
+                "https://discord.com/api/v10/users/123",
+                "Bot-fake",
+            )
+        self.assertIsNone(result)
+        self.assertIn("Discord request failed: timeout", stderr.getvalue())
+
+    def test_post_failure_returns_false(self):
+        with patch.object(self.mod, "_token", return_value="Bot-fake"), \
+             patch.object(self.mod, "_discord_request", return_value=None):
+            result = self.mod.send_discord("111", "hello")
+        self.assertFalse(result)
+
     def test_plain_at_handle_is_rejected_before_post(self):
         with patch.object(self.mod, "_token", return_value="Bot-fake"), \
              patch.object(self.mod, "_discord_request") as request, \
