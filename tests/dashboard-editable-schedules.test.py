@@ -131,6 +131,22 @@ code, obj = dash.upsert_schedule({"name": "bad", "cron": "nope", "prompt": "x"})
 check("upsert bad cron → 400", code == 400)
 code, obj = dash.upsert_schedule("not a dict")
 check("upsert non-dict → 400", code == 400)
+# CR #2164: non-string scalar fields must be rejected with a 400, not crash on
+# `.strip()`. A JSON like {"name": 123} previously raised AttributeError and
+# closed the request with no response.
+for bad in (
+    {"name": 123, "cron": "0 9 * * *", "prompt": "x"},
+    {"name": "x", "cron": True, "prompt": "x"},
+    {"name": "x", "cron": "0 9 * * *", "prompt": 5},
+    {"name": "x", "cron": "0 9 * * *", "prompt_skill": ["a"]},
+    {"name": "x", "cron": "0 9 * * *", "description": {"a": 1}, "prompt": "x"},
+):
+    c, o = dash.upsert_schedule(bad)
+    check(f"upsert rejects non-string field → 400 ({list(bad)})", c == 400 and "must be a string" in o.get("error", ""), str((c, o)))
+# A valid all-string body still passes.
+c, o = dash.upsert_schedule({"name": "okjob", "cron": "0 9 * * *", "prompt": "Run: echo hi"})
+check("upsert accepts all-string body", c == 200, str((c, o)))
+dash.delete_schedule("okjob")
 code, obj = dash.delete_schedule("n1")
 check("delete existing → 200", code == 200 and obj.get("deleted") == "n1")
 code, obj = dash.delete_schedule("ghost")

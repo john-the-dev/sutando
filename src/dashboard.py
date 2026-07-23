@@ -478,6 +478,15 @@ def upsert_schedule(body: dict) -> tuple[int, dict]:
     do_POST handler is a thin wrapper around this."""
     if not isinstance(body, dict):
         return 400, {"error": "malformed JSON body"}
+    # Reject a non-string scalar in any text field before calling a string method
+    # on it. `{"name": 123}` (or a non-string cron/prompt/…) would otherwise raise
+    # AttributeError on `.strip()` and close the request with no JSON 400
+    # (CR #2164, qingyun-wu). `null` is allowed here — it's handled downstream as
+    # "field absent".
+    for _k in ("name", "cron", "prompt", "prompt_skill", "description"):
+        _v = body.get(_k)
+        if _v is not None and not isinstance(_v, str):
+            return 400, {"error": f"{_k} must be a string"}
     name = (body.get("name") or "").strip()
     if not name:
         return 400, {"error": "name is required"}
