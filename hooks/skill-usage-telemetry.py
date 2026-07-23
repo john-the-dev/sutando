@@ -65,15 +65,25 @@ def main() -> int:
         if not skill:
             return 0
 
-        sys.path.insert(0, _repo_src())
-        try:
-            from telemetry import feature_used  # type: ignore
-        except Exception:
+        # Emit via a DETACHED subprocess, never in-process. This hook is
+        # registered for EVERY Skill call, so it must return promptly: doing the
+        # send here — even the bounded 1s flush path — would add a network RTT to
+        # the tool run and compound across skill-heavy loops (CR #2254,
+        # qingyun-wu). Instead we spawn `telemetry.py feature_used skill:<name>`
+        # in its own session and DO NOT wait for it. The child (which the CLI
+        # runs on the flush path, since it exits immediately) does the POST off
+        # this hook's critical path; the hook forks-and-returns in ~ms.
+        telemetry_py = os.path.join(_repo_src(), "telemetry.py")
+        if not os.path.isfile(telemetry_py):
             return 0
-        # flush=True: the hook process is short-lived (exits immediately), so the
-        # background sender thread would be killed before it POSTs. The bounded
-        # synchronous path guarantees the event actually leaves.
-        feature_used(f"skill:{skill}", flush=True)
+        import subprocess
+        subprocess.Popen(
+            [sys.executable, telemetry_py, "feature_used", f"skill:{skill}"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,  # detach: outlive this hook, don't get reaped with it
+        )
     except Exception:
         # Swallow — observability must never surface an error to the tool run.
         pass
