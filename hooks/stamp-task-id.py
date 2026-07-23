@@ -22,6 +22,7 @@ the completions report.
 Idempotent (skips already-stamped files) and fail-open (never blocks a tool).
 """
 import datetime
+import fcntl
 import glob
 import json
 import re
@@ -82,22 +83,55 @@ def _record_history(day: str, count: int) -> None:
 def _alloc() -> str:
     """Next YYYYMMDD-NNN from the persistent counter, resetting on a new day.
 
-    Also records the day's new running total in the durable history file."""
+    Also records the day's new running total in the durable history file.
+
+    The read-modify-write is serialized under an exclusive ``flock`` on the
+    counter file so two concurrent PostToolUse invocations (or another writer of
+    the same counter) can't both read the same count and mint a duplicate ID or
+    lose a count (CR #2125). ``_record_history`` runs inside the held lock, so the
+    history upsert is serialized too. Fail-open — any lock/IO error degrades to
+    the unlocked path rather than breaking stamping or the tool."""
     today = datetime.date.today().strftime("%Y%m%d")
+    COUNTER.parent.mkdir(parents=True, exist_ok=True)
+    lockf = None
     try:
-        s = json.load(open(COUNTER))
+        lockf = open(COUNTER, "a+")  # create-if-missing, never truncate on open
+        fcntl.flock(lockf, fcntl.LOCK_EX)
     except Exception:
-        s = {"date": today, "count": 0}
-    if s.get("date") != today:  # daily reset — NNN is the Nth task *today*
-        s = {"date": today, "count": 0}
-    s["count"] += 1
+        lockf = None
     try:
-        COUNTER.parent.mkdir(parents=True, exist_ok=True)
-        json.dump(s, open(COUNTER, "w"))
-    except Exception:
-        pass
-    _record_history(today, s["count"])
-    return f"{today}-{s['count']:03d}"
+        try:
+            if lockf is not None:
+                lockf.seek(0)
+                s = json.loads(lockf.read() or "{}")
+            else:
+                s = json.load(open(COUNTER))
+            if not isinstance(s, dict):
+                s = {}
+        except Exception:
+            s = {"date": today, "count": 0}
+        if s.get("date") != today:  # daily reset — NNN is the Nth task *today*
+            s = {"date": today, "count": 0}
+        s["count"] += 1
+        try:
+            if lockf is not None:
+                lockf.seek(0)
+                lockf.truncate()
+                lockf.write(json.dumps(s))
+                lockf.flush()
+            else:
+                json.dump(s, open(COUNTER, "w"))
+        except Exception:
+            pass
+        _record_history(today, s["count"])
+        return f"{today}-{s['count']:03d}"
+    finally:
+        if lockf is not None:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+                lockf.close()
+            except Exception:
+                pass
 
 
 def main() -> None:

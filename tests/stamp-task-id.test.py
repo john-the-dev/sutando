@@ -91,6 +91,34 @@ with tempfile.TemporaryDirectory() as t:
     check("alloc recovers from a corrupt counter", got == f"{TODAY}-001", got)
     check("history rebuilt after corruption", json.load(open(hook.HISTORY)).get(TODAY) == 1)
 
+# CR #2125: concurrent _alloc must never mint a duplicate id or lose a count.
+# Each _alloc opens its own fd and takes an exclusive flock, so the RMW is
+# serialized even across threads (separate open-file-descriptions → flock
+# serializes). Without the lock, interleaved read-increment-write would collide.
+import threading as _threading
+with tempfile.TemporaryDirectory() as t:
+    ws = Path(t)
+    hookc = _load(REPO / "hooks" / "stamp-task-id.py", "stamp_task_id_conc")
+    _point(hookc, ws)
+    _ids: list[str] = []
+    _ids_lock = _threading.Lock()
+
+    def _spin():
+        for _ in range(10):
+            got = hookc._alloc()
+            with _ids_lock:
+                _ids.append(got)
+
+    _threads = [_threading.Thread(target=_spin) for _ in range(10)]
+    for _th in _threads:
+        _th.start()
+    for _th in _threads:
+        _th.join()
+    check("concurrent _alloc mints no duplicate ids (locked RMW)",
+          len(set(_ids)) == len(_ids) == 100, f"{len(set(_ids))} unique of {len(_ids)}")
+    check("concurrent _alloc final counter == total allocations",
+          json.load(open(hookc.COUNTER)).get("count") == 100, str(json.load(open(hookc.COUNTER))))
+
 # ---------------------------------------------------------------------------
 # hook.main — stamping behavior
 # ---------------------------------------------------------------------------
@@ -171,10 +199,23 @@ with tempfile.TemporaryDirectory() as t:
     check("load_history reads recorded days", hist.get("20260102") == 49, str(hist))
     check("load_history folds today's live counter", hist.get(TODAY) == 3, str(hist))
 
-    out = rep.render(hist, days=14)
-    check("render lists a recorded day", "2026-01-02" in out and ": 49" in out, out)
-    check("render marks today", "today: 3" in out, out)
-    check("render shows a total line", "total" in out, out)
+    # --all (days=None) shows every recorded day, including months-old ones.
+    out_all = rep.render(hist, days=None)
+    check("render --all lists an old recorded day", "2026-01-02" in out_all and ": 49" in out_all, out_all)
+    check("render marks today", "today: 3" in out_all, out_all)
+    check("render shows a total line", "total" in out_all, out_all)
+
+    # CR #2125: a bounded --days window is CALENDAR days, not the newest N
+    # recorded entries. The Jan fixtures are months old, so a 14-day window
+    # excludes them — the old `ordered[:14]` wrongly included them whenever few
+    # days were recorded.
+    out14 = rep.render(hist, days=14)
+    check("render --days 14 excludes months-old days (calendar window)",
+          "2026-01-02" not in out14 and "2026-01-01" not in out14, out14)
+    # A window wide enough to reach the Jan fixtures includes them again.
+    span = (datetime.date.today() - datetime.date(2026, 1, 1)).days + 1
+    out_wide = rep.render(hist, days=span)
+    check("render --days <wide> reaches the Jan fixtures", "2026-01-02" in out_wide, out_wide)
 
     # counter ahead of a stale history entry wins (mid-day report reflects live count)
     json.dump({TODAY: 1}, open(rep.HISTORY, "w"))

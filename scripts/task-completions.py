@@ -70,14 +70,22 @@ def render(hist: dict[str, int], days: int | None) -> str:
     if not hist:
         return "No task completions recorded yet."
     ordered = sorted(hist.items(), reverse=True)  # newest first
-    shown = ordered if days is None else ordered[:days]
+    if days is None:
+        shown = ordered
+    else:
+        # Last N CALENDAR days, not the newest N recorded entries. Days with no
+        # tasks aren't in the history, so `ordered[:days]` would reach further
+        # back than N calendar days whenever there are gaps (CR #2125). Filter by
+        # a date cutoff instead: today and the N-1 days before it.
+        cutoff = (datetime.date.today() - datetime.timedelta(days=days - 1)).strftime("%Y%m%d")
+        shown = [(ymd, n) for ymd, n in ordered if ymd >= cutoff]
     today = datetime.date.today().strftime("%Y%m%d")
     lines = ["Task completions by day:"]
     for ymd, n in shown:
         mark = "  <- today" if ymd == today else ""
         lines.append(f"  {_fmt_day(ymd)}: {n}{mark}")
     total = sum(n for _, n in shown)
-    label = "all recorded days" if days is None else f"last {len(shown)} day(s)"
+    label = "all recorded days" if days is None else f"last {days} day(s)"
     lines.append(f"  ── total ({label}): {total}")
     lines.append(f"  today: {hist.get(today, 0)}")
     return "\n".join(lines)
