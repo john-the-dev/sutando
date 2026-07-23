@@ -60,10 +60,16 @@ emit_restart_alert() {
 if [ -f "$MARKER" ]; then emit_restart_alert; fi
 date +%s > "$MARKER"
 
-# Remove a legacy bare process before exec; the anchored pattern cannot match
-# this wrapper. All three bridges also have single-instance protection, but
-# eviction makes the launchd ownership transition immediate and deterministic.
-pkill -f "src/$CHANNEL-bridge\\.py$" 2>/dev/null || true
+# Remove a pre-existing bare process for this channel before exec — but ONLY one
+# belonging to THIS checkout. A plain `pkill -f src/<channel>-bridge.py$` matches
+# the same bridge launched from ANY checkout on the host, so starting/upgrading
+# one install could kill another install's live bridge (CR #2068). evict_own_bridge
+# validates each candidate's identity (command path under $REPO, or cwd == $REPO).
+# All three bridges also have single-instance protection, but eviction makes the
+# launchd ownership transition immediate and deterministic.
+# shellcheck source=evict-own-bridge.sh
+. "$REPO/src/launchd/evict-own-bridge.sh"
+evict_own_bridge "$CHANNEL" "$REPO"
 sleep 0.3
 
 # Keep this wrapper resident and supervise the bridge as its child. launchd's
