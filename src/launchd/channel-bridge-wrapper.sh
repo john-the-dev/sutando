@@ -66,10 +66,16 @@ date +%s > "$MARKER"
 # one install could kill another install's live bridge (CR #2068). evict_own_bridge
 # validates each candidate's identity (command path under $REPO, or cwd == $REPO).
 # All three bridges also have single-instance protection, but eviction makes the
-# launchd ownership transition immediate and deterministic.
-# shellcheck source=evict-own-bridge.sh
-. "$REPO/src/launchd/evict-own-bridge.sh"
-evict_own_bridge "$CHANNEL" "$REPO"
+# launchd ownership transition immediate and deterministic. The helper is sourced
+# only if present, so a partial deploy (or a test fixture that copies just this
+# wrapper) degrades to no-eviction instead of `set -e`-aborting before the child
+# is launched (CR #2068 round 2, qingyun-wu).
+_EVICT_HELPER="$REPO/src/launchd/evict-own-bridge.sh"
+if [ -f "$_EVICT_HELPER" ]; then
+  # shellcheck source=evict-own-bridge.sh
+  . "$_EVICT_HELPER"
+  evict_own_bridge "$CHANNEL" "$REPO"
+fi
 sleep 0.3
 
 # Keep this wrapper resident and supervise the bridge as its child. launchd's
