@@ -256,11 +256,29 @@ def _update_access_cache(data: dict) -> None:
     _backup_access_to_disk(data)
 
 
+def _is_valid_access_doc(data) -> bool:
+    """A structurally valid access-control document worth backing up / restoring.
+
+    The core schema is an ``allowFrom`` list. Three states qualify and MUST be
+    protected, none of which ``tofuOwner`` alone covers (CR #2163, qingyun-wu):
+      - a TOFU-enrolled allowlist (has ``tofuOwner``);
+      - a legacy populated allowlist enrolled before ``tofuOwner`` existed;
+      - the intentional locked-down state ``allowFrom: []``.
+    Only a transient/partial wipe — a non-dict, a parse failure, or a
+    missing/non-list ``allowFrom`` — is rejected, so it can't overwrite a good
+    backup. (A slack wipe deletes access.json rather than rewriting it to empty,
+    so an empty allowlist reaches this path only when it was written on purpose.)
+    """
+    return isinstance(data, dict) and isinstance(data.get("allowFrom"), list)
+
+
 def _backup_access_to_disk(data: dict) -> None:
-    """Persist a copy of a VALID enrolled allowlist to the durable backup.
-    Only backs up a real enrolled state (has tofuOwner) — never an empty or
-    TOFU-pending state, so a transient wipe can't overwrite the good backup."""
-    if not data or not data.get("tofuOwner"):
+    """Persist a copy of a VALID access-control document to the durable backup.
+    Backs up any structurally valid state (see ``_is_valid_access_doc``) —
+    including a legacy populated allowlist or an intentional empty lockdown —
+    but never a transient/partial wipe, so a wipe can't overwrite the good
+    backup."""
+    if not _is_valid_access_doc(data):
         return
     try:
         ACCESS_BACKUP_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -278,7 +296,7 @@ def _restore_access_from_disk() -> bool:
         backup = json.loads(ACCESS_BACKUP_FILE.read_text())
     except Exception:
         return False
-    if not backup.get("tofuOwner"):
+    if not _is_valid_access_doc(backup):
         return False
     try:
         ACCESS_FILE.parent.mkdir(parents=True, exist_ok=True)

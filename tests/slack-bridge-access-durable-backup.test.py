@@ -83,9 +83,14 @@ slack._update_access_cache(good)
 check("valid state is backed up to disk", slack.ACCESS_BACKUP_FILE.exists())
 check("backup content matches", json.loads(slack.ACCESS_BACKUP_FILE.read_text()).get("tofuOwner") == "U_OWNER")
 
-# 2. empty / TOFU-pending state does NOT overwrite the good backup
-slack._update_access_cache({"allowFrom": [], "pending": {}})  # no tofuOwner
-check("empty state does not clobber the backup",
+# 2. a transient/partial wipe (schema-INVALID: no allowFrom list) does NOT
+#    overwrite the good backup. (An intentional empty allowlist IS valid and IS
+#    backed up — that's covered in the migration-state tests below. CR #2163.)
+slack._update_access_cache({"pending": {}})  # no allowFrom key → partial wipe
+check("partial-wipe (no allowFrom) does not clobber the backup",
+      json.loads(slack.ACCESS_BACKUP_FILE.read_text()).get("tofuOwner") == "U_OWNER")
+slack._backup_access_to_disk("not-a-dict")  # type: ignore[arg-type]  — malformed
+check("non-dict does not clobber the backup",
       json.loads(slack.ACCESS_BACKUP_FILE.read_text()).get("tofuOwner") == "U_OWNER")
 
 # 3. wipe + fresh process: access.json gone, in-memory cache cleared → restore from disk
@@ -144,24 +149,58 @@ with _mock.patch.object(slack.ACCESS_BACKUP_FILE.__class__, "write_text", side_e
     slack._backup_access_to_disk({"tofuOwner": "U", "allowFrom": ["U"]})  # must not raise
 check("backup swallows OSError (best-effort)", True)
 
-# backup: no tofuOwner → early return, no file written
+# backup: schema-invalid doc (no allowFrom list) → early return, no file written
 slack.ACCESS_BACKUP_FILE.unlink(missing_ok=True)
-slack._backup_access_to_disk({"allowFrom": []})
-check("backup skips a non-enrolled state", not slack.ACCESS_BACKUP_FILE.exists())
+slack._backup_access_to_disk({"pending": {}})
+check("backup skips a schema-invalid (no-allowFrom) doc", not slack.ACCESS_BACKUP_FILE.exists())
 
 # restore: missing backup file → False
 slack.ACCESS_BACKUP_FILE.unlink(missing_ok=True)
 check("restore returns False when backup absent", slack._restore_access_from_disk() is False)
 
-# restore: backup present but no tofuOwner → False
+# restore: backup present but schema-invalid (no allowFrom list) → False
 slack.ACCESS_BACKUP_FILE.parent.mkdir(parents=True, exist_ok=True)
-slack.ACCESS_BACKUP_FILE.write_text('{"allowFrom": []}')
-check("restore returns False when backup lacks tofuOwner", slack._restore_access_from_disk() is False)
+slack.ACCESS_BACKUP_FILE.write_text('{"pending": {}}')
+check("restore returns False when backup is schema-invalid", slack._restore_access_from_disk() is False)
 
 # restore: valid backup but ACCESS_FILE write fails → False (exception branch)
 slack.ACCESS_BACKUP_FILE.write_text('{"tofuOwner": "U", "allowFrom": ["U"]}')
 with _mock.patch.object(slack.ACCESS_FILE.__class__, "write_text", side_effect=OSError("readonly")):
     check("restore returns False when access.json write fails", slack._restore_access_from_disk() is False)
+
+# ── migration states the old tofuOwner predicate left unprotected (CR #2163) ──
+# (A) legacy populated allowlist enrolled BEFORE tofuOwner existed: must be
+#     backed up AND restored, or a wipe+restart re-opens TOFU.
+slack.ACCESS_FILE.unlink(missing_ok=True)
+slack.ACCESS_BACKUP_FILE.unlink(missing_ok=True)
+_reset_cache()
+legacy = {"allowFrom": ["U_LEGACY"], "tierMap": {"U_LEGACY": "owner"}}  # no tofuOwner
+slack._update_access_cache(legacy)
+check("legacy populated allowlist (no tofuOwner) is backed up", slack.ACCESS_BACKUP_FILE.exists())
+slack.ACCESS_FILE.unlink(missing_ok=True)
+_reset_cache()
+slack.tofu_onboard("U_STRANGER", "stranger")
+restored_legacy = json.loads(slack.ACCESS_FILE.read_text())
+check("legacy allowlist restored on wipe+restart, stranger not enrolled",
+      restored_legacy.get("allowFrom") == ["U_LEGACY"] and "U_STRANGER" not in restored_legacy.get("allowFrom", []),
+      str(restored_legacy))
+
+# (B) intentional locked-down state allowFrom: [] : must be backed up AND
+#     restored, so a wipe+restart preserves the lockdown (no TOFU re-opening).
+slack.ACCESS_FILE.unlink(missing_ok=True)
+slack.ACCESS_BACKUP_FILE.unlink(missing_ok=True)
+_reset_cache()
+slack._update_access_cache({"allowFrom": []})  # deliberate lockdown
+check("intentional empty lockdown is backed up",
+      slack.ACCESS_BACKUP_FILE.exists()
+      and json.loads(slack.ACCESS_BACKUP_FILE.read_text()).get("allowFrom") == [])
+slack.ACCESS_FILE.unlink(missing_ok=True)
+_reset_cache()
+slack.tofu_onboard("U_STRANGER2", "stranger2")
+restored_lockdown = json.loads(slack.ACCESS_FILE.read_text())
+check("empty lockdown restored on wipe+restart, stranger not enrolled",
+      restored_lockdown.get("allowFrom") == [] and "U_STRANGER2" not in restored_lockdown.get("allowFrom", []),
+      str(restored_lockdown))
 
 print()
 if failures:
