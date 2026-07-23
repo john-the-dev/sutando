@@ -140,6 +140,40 @@ print("DELETE before:", _json.dumps(before_del), "→ after:", _json.dumps(after
 check("DELETE: crons.json goes one job → []",
       len(before_del) == 1 and after_del == [])
 
+# ── scheduler-specific fields survive an edit (CR #2164 — the field-drop bug) ──
+# A job configured directly in crons.json with scheduler-specific keys, then
+# edited via the dashboard (cron-only), must KEEP those keys — a prior version
+# rebuilt a name/cron/prompt/description whitelist and silently dropped them,
+# which could disable a Codex job or detach its room.
+dash._write_crons([{
+    "name": "codexjob", "cron": "0 6 * * *", "prompt_skill": "morning-briefing",
+    "execution": "codex-task", "delivery": "proactive", "retry_minutes": 20,
+    "timezone": "America/Los_Angeles", "room": "!room:ag2.space", "room_id": "!room:ag2.space",
+    "launchd": True,
+}])
+code, _ = dash.upsert_schedule({"name": "codexjob", "cron": "30 6 * * *"})  # cron-only edit
+saved = dash._read_crons()[0]
+check("edit → 200", code == 200)
+check("edit applied the cron change", saved.get("cron") == "30 6 * * *")
+check("edit preserves execution (Codex job not disabled)", saved.get("execution") == "codex-task")
+check("edit preserves delivery", saved.get("delivery") == "proactive")
+check("edit preserves retry_minutes", saved.get("retry_minutes") == 20)
+check("edit preserves timezone", saved.get("timezone") == "America/Los_Angeles")
+check("edit preserves room + room_id (not detached)",
+      saved.get("room") == "!room:ag2.space" and saved.get("room_id") == "!room:ag2.space")
+check("edit preserves launchd flag", saved.get("launchd") is True)
+check("edit still preserves prompt_skill", saved.get("prompt_skill") == "morning-briefing")
+
+# ── no wildcard CORS on the dashboard handler (CR #2164) ──────────────────────
+# The dashboard is same-origin; a wildcard Access-Control-Allow-Origin while
+# advertising POST/DELETE let a cross-origin tab mutate loopback schedules.
+_dash_src = (REPO / "src" / "dashboard.py").read_text()
+check("no Access-Control-Allow-Origin header is emitted (send_header call absent)",
+      'send_header("Access-Control-Allow-Origin"' not in _dash_src
+      and "send_header('Access-Control-Allow-Origin'" not in _dash_src)
+check("handler no longer advertises cross-origin write methods via CORS",
+      "Access-Control-Allow-Methods" not in _dash_src)
+
 print()
 if failures:
     print(f"FAIL — {len(failures)}: {failures}")

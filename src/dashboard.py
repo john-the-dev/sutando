@@ -457,15 +457,15 @@ def upsert_schedule(body: dict) -> tuple[int, dict]:
     err = _validate_job(merged)
     if err:
         return 400, {"error": err}
-    clean = {"name": merged["name"], "cron": merged["cron"]}
-    if merged.get("prompt_skill"):
-        clean["prompt_skill"] = merged["prompt_skill"]
-    else:
-        clean["prompt"] = merged["prompt"]
-    if merged.get("description"):
-        clean["description"] = merged["description"]
+    # Persist the MERGED job — it starts from the existing on-disk entry, so
+    # scheduler-specific fields (execution, delivery, retry_minutes, timezone,
+    # launchd, room, room_id, …) are preserved. A prior version rebuilt a
+    # name/cron/prompt/description whitelist here, silently dropping those on any
+    # edit — saving a cron change could disable a Codex job or detach its room
+    # (CR #2164, qingyun-wu). The prompt/prompt_skill exclusivity was already
+    # applied to `merged` above, so it's write-ready.
     jobs = [j for j in jobs if j.get("name") != name]
-    jobs.append(clean)
+    jobs.append(merged)
     _write_crons(jobs)
     return 200, {"ok": True, "name": name, "count": len(jobs),
                  "note": "Saved. Takes effect on the next /schedule-crons run (restart)."}
@@ -714,14 +714,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args): pass
 
-    def end_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        super().end_headers()
-
-    def do_OPTIONS(self):
+    # No wildcard CORS. The dashboard UI is same-origin (served from this same
+    # loopback origin), so it needs no Access-Control-Allow-Origin. Sending
+    # `*` on every response — while advertising POST/DELETE — let a cross-origin
+    # browser tab mutate loopback schedules in browsers without Private Network
+    # Access enforcement (CR #2164, qingyun-wu). Omitting the header makes the
+    # browser block any cross-origin read or state-changing request; same-origin
+    # calls are unaffected.
+    def do_OPTIONS(self):  # pragma: no cover — HTTP preflight; no cross-origin grant
+        # Same-origin requests never preflight; answer without granting cross-
+        # origin access (no Access-Control-Allow-Origin → browser denies).
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Allow", "GET, POST, DELETE, OPTIONS")
         self.end_headers()
 
     def _json_body(self):  # pragma: no cover — reads the HTTP request body
