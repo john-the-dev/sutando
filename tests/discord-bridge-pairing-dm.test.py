@@ -6,8 +6,10 @@ leaks it to every member (owner catch 2026-07-17). Guards:
 
   1. Owner reachable  -> code goes to the owner DM; the channel message is
      generic and does NOT contain the code.
-  2. No owner reachable (fetch_user raises / empty allowFrom) -> falls back
-     to the legacy in-channel prompt (pairing must remain completable).
+  2. No owner reachable (fetch_user raises / empty allowFrom) -> fail-SAFE
+     fallback: a generic, code-free channel notice (the code is NOT posted to
+     the shared channel even here — #2158 CR). Pairing stays completable via
+     the code persisted to access.json `pending` + the owner-only bridge log.
 
 Run: python3 tests/discord-bridge-pairing-dm.test.py   (exit 0 pass / 1 fail)
 """
@@ -102,6 +104,24 @@ check("owner DM names the requester and channel",
 check("channel got exactly one message", len(channel.sent) == 1)
 check("channel message does NOT contain the code",
       all(CODE not in m for m in channel.sent), f"leaked: {channel.sent}")
+
+# ── Case 1b: explicit BEFORE/AFTER channel-leak contrast (CR #2158) ───────────
+# BEFORE (the pre-fix behavior this PR replaced): the pairing branch posted the
+# code straight into the originating channel, leaking the approval credential
+# to every member. Reconstruct that exact call to show the leak concretely.
+_before_ch = FakeMessageable(name="pr-review")
+asyncio.run(_before_ch.send(f"Pairing required. Ask the owner to run:\n`/discord:access pair {CODE}`"))
+before_leaked = any(CODE in m for m in _before_ch.sent)
+# AFTER (this PR): same pairing event, owner reachable → the channel post is
+# generic; the code travels only via the owner DM (reuse Case 1's results).
+after_channel_leaked = any(CODE in m for m in channel.sent)
+after_dm_has_code = any(CODE in m for m in owner.sent)
+check("BEFORE-fix: the in-channel pairing post leaked the code to the channel",
+      before_leaked, f"{_before_ch.sent}")
+check("AFTER-fix: the channel post no longer carries the code",
+      not after_channel_leaked, f"{channel.sent}")
+check("AFTER-fix: the code is delivered only via the owner DM",
+      after_dm_has_code and not after_channel_leaked)
 
 # ── Case 2: owner unreachable → fail-SAFE fallback, code NOT leaked ──────────
 # #2158 CR: the fallback must NOT recreate the leak. When no owner DM is
