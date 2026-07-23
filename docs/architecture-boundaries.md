@@ -150,6 +150,11 @@ look cleaner without making it real.
 
 ## Decision guide for new code
 
+This section explains the architectural categories. The repository-specific
+placement checklist in `AGENTS.md` / `CLAUDE.md` remains authoritative for
+current file locations; update both documents together if the placement rules
+change.
+
 Walk this list top to bottom:
 
 1. Is it a provider-neutral task, policy, workspace, lifecycle, or plugin
