@@ -430,6 +430,46 @@ def run():
         passed += 1
         print("ok   token_usage bucketed (5%) + status + model; _bucket_pct clamps/sentinels")
 
+    # 17b) core_model enforces the categorical/no-PII contract. Env vars and
+    #      settings.json are user/tenant-controlled, so a custom alias carrying a
+    #      tenant name, path, endpoint, or secret must collapse to 'unknown' —
+    #      never reach PostHog as an unbounded/sensitive property (CR #2148).
+    with tempfile.TemporaryDirectory() as td:
+        mod = _load(Path(td), key="phc_live")
+        # Safe categorical ids pass (lowercased); PII/high-cardinality → unknown.
+        assert mod._coarse_model("claude-opus-4-8") == "claude-opus-4-8"
+        assert mod._coarse_model("  Claude-Sonnet-5 ") == "claude-sonnet-5"   # trim + lower
+        assert mod._coarse_model("acme-tenant/prod-model") == "unknown"       # path sep
+        assert mod._coarse_model("https://ep.acme.com/v1") == "unknown"       # endpoint
+        assert mod._coarse_model("user@acme.com") == "unknown"                # email
+        assert mod._coarse_model("model with spaces") == "unknown"
+        assert mod._coarse_model("x" * 60) == "unknown"                       # over length cap
+        assert mod._coarse_model("") == "unknown"
+        # End-to-end: a hostile $SUTANDO_CORE_MODEL never leaves the allowlist.
+        m2 = _load(Path(td), key="phc_live", env={"SUTANDO_CORE_MODEL": "acme/prod:secret-key"})
+        assert m2._core_model() == "unknown", m2._core_model()
+        passed += 1
+        print("ok   core_model collapses PII/high-cardinality alias to 'unknown'")
+
+    # 17c) token_usage status is constrained to the four documented categories;
+    #      arbitrary quota-script output becomes 'unknown', not telemetry.
+    with tempfile.TemporaryDirectory() as td:
+        mod = _load(Path(td), key="phc_live")
+        for ok in ("allowed", "allowed_warning", "rejected", "unknown"):
+            assert mod._coarse_status(ok) == ok, ok
+        assert mod._coarse_status("ALLOWED") == "allowed"                     # normalized
+        assert mod._coarse_status("rate limited: 429 for tenant acme") == "unknown"
+        assert mod._coarse_status("") == "unknown"
+        calls = []
+        mod._post = lambda payload: calls.append(payload)  # type: ignore
+        before = set(threading.enumerate())
+        mod.token_usage(10, 10, status="surprise-error-string")
+        for t in set(threading.enumerate()) - before:
+            t.join(timeout=2)
+        assert calls[0]["properties"]["status"] == "unknown", calls[0]["properties"]
+        passed += 1
+        print("ok   token_usage status constrained to allowlist ('unknown' otherwise)")
+
     # 18) token_usage honors opt-out (no path around capture()).
     with tempfile.TemporaryDirectory() as td:
         mod = _load(Path(td), key="phc_live", env={"DO_NOT_TRACK": "1"})
