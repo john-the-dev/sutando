@@ -102,13 +102,36 @@ case "$cmd" in
         echo "  claude cfg: $CLAUDE_CFG"
         mkdir -p "$HOME/Library/LaunchAgents"
         mkdir -p "$WORKSPACE/logs"
-        sed \
-            -e "s|__REPO__|$REPO|g" \
-            -e "s|__WORKSPACE__|$WORKSPACE|g" \
-            -e "s|__BREW_BIN__|$BREW_BIN|g" \
-            -e "s|__HOME__|$HOME|g" \
-            -e "s|__CLAUDE_CONFIG_DIR__|$CLAUDE_CFG|g" \
-            "$TEMPLATE" > "$DEST"
+        # Substitute placeholders via plistlib, NOT sed: plistlib.dump XML-escapes
+        # every value, so a repo / workspace / config path containing &, <, >, |,
+        # or a backslash can't corrupt the substitution or the resulting plist and
+        # break bootstrap. Mirrors install-channel-bridge-launchd.sh (CR #2068,
+        # qingyun-wu).
+        export REPO WORKSPACE BREW_BIN CLAUDE_CFG
+        python3 - "$TEMPLATE" "$DEST" <<'PY'
+import os, plistlib, sys
+src, dst = sys.argv[1:]
+with open(src, "rb") as fh:
+    data = plistlib.load(fh)
+replacements = {
+    "__REPO__": os.environ["REPO"],
+    "__WORKSPACE__": os.environ["WORKSPACE"],
+    "__BREW_BIN__": os.environ["BREW_BIN"],
+    "__HOME__": os.environ["HOME"],
+    "__CLAUDE_CONFIG_DIR__": os.environ["CLAUDE_CFG"],
+}
+def replace(value):
+    if isinstance(value, str):
+        for old, new in replacements.items():
+            value = value.replace(old, new)
+    elif isinstance(value, list):
+        value = [replace(v) for v in value]
+    elif isinstance(value, dict):
+        value = {k: replace(v) for k, v in value.items()}
+    return value
+with open(dst, "wb") as fh:
+    plistlib.dump(replace(data), fh, sort_keys=False)
+PY
         bootout_if_loaded
         launchctl bootstrap "$DOMAIN" "$DEST"
         echo "  Loaded via $SERVICE"
