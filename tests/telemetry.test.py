@@ -216,6 +216,32 @@ def run():
         passed += 1
         print("ok   task_processed/feature_used send correct bucketed events")
 
+    # 6b) task_processed sanitizes its source against a fixed allowlist. The
+    # value can come from a caller-supplied task `source:` header (local web/API
+    # path), so an unknown / hostile value must collapse to "unknown" — no
+    # unbounded cardinality, no accidental identifier/secret reaching PostHog
+    # (CR #2274, qingyun-wu). Known surfaces pass through unchanged.
+    with tempfile.TemporaryDirectory() as td:
+        mod = _load(Path(td), key="phc_live")
+        # Direct unit on the collapse helper.
+        assert mod._coarse_source("discord") == "discord"
+        assert mod._coarse_source("  Phone ") == "phone"  # normalized (case/space)
+        assert mod._coarse_source("sk-secret-abc123") == "unknown"
+        assert mod._coarse_source("api; DROP TABLE") == "unknown"
+        assert mod._coarse_source("") == "unknown"
+        # End-to-end: a hostile source never leaves the allowlist on the wire.
+        calls = []
+        mod._post = lambda payload: calls.append(payload)  # type: ignore
+        before = set(threading.enumerate())
+        mod.task_processed("s3cr3t-token-leak")
+        for t in set(threading.enumerate()) - before:
+            t.join(timeout=2)
+        tp = next(c for c in calls if c["event"] == "task_processed")
+        assert tp["properties"]["source"] == "unknown", \
+            f"hostile source must collapse to 'unknown', got {tp['properties']['source']!r}"
+        passed += 1
+        print("ok   task_processed collapses unknown/hostile source to 'unknown'")
+
     # 7) Short-lived callers can select the bounded synchronous path.
     with tempfile.TemporaryDirectory() as td:
         mod = _load(Path(td), key="phc_live")

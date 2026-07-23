@@ -271,6 +271,31 @@ def capture(event: str, properties: dict | None = None, *, flush: bool = False) 
     _dispatch(event, properties, flush=flush)
 
 
+# Coarse inbound surfaces `task_processed` is allowed to tag. The value can
+# originate from a task file's ``source:`` header, which on the local web/API
+# path is caller-supplied — so it is validated against this fixed allowlist
+# before it reaches PostHog. Anything unrecognized collapses to ``unknown``:
+# telemetry stays coarse and bounded-cardinality, and a caller cannot leak an
+# accidentally-supplied identifier/secret or inflate the property space through
+# the ``source:`` field (CR #2274, qingyun-wu). Keep in sync with the surfaces
+# that writers actually emit (`src/task_priority.py:default_priority_for_source`).
+_KNOWN_SOURCES = frozenset({
+    "voice", "phone", "chat", "api", "context-drop",
+    "discord", "slack", "telegram", "whatsapp",
+    "twilio_voice", "twilio_sms", "twilio_voicemail",
+    "cron", "health-check", "sync-memory", "sync-workspace",
+    "github", "web", "push", "remote",
+})
+
+
+def _coarse_source(source: str) -> str:
+    """Collapse an inbound ``source:`` value to a known coarse bucket, or
+    ``unknown``. Guards the caller-supplied web/API path against unbounded
+    cardinality and accidental identifier/secret leakage (CR #2274)."""
+    s = (source or "").strip().lower()
+    return s if s in _KNOWN_SOURCES else "unknown"
+
+
 def task_processed(source: str, *, flush: bool = False) -> None:
     """One anonymous event per task the core accepts, tagged only with the
     inbound surface (``discord`` / ``slack`` / ``telegram`` / ``voice`` /
@@ -278,14 +303,17 @@ def task_processed(source: str, *, flush: bool = False) -> None:
 
     This is the activation signal that ``core_started`` alone can't give:
     whether an install does anything after launching. It carries ONLY the
-    coarse source bucket — never the task text, ids, user, or channel.
+    coarse source bucket — never the task text, ids, user, or channel. The
+    bucket is validated against a fixed allowlist (`_coarse_source`) so a
+    caller-supplied ``source:`` header cannot smuggle high-cardinality data or
+    a secret into the property.
 
     ``flush=True`` is for short-lived callers (the CLI entrypoint below, spawned
     by the TypeScript task-delegation/phone paths) that exit immediately: the
     default daemon-thread sender would be killed before the request completes.
     Long-running services (the Python bridges) keep the default async path.
     """
-    capture("task_processed", {"source": str(source)}, flush=flush)
+    capture("task_processed", {"source": _coarse_source(source)}, flush=flush)
 
 
 def feature_used(feature: str, *, flush: bool = False) -> None:
