@@ -74,6 +74,12 @@ In the order a reviewer reads them. Say "N/A" if a question doesn't apply, so th
 - What changed, and why?
 - What files / sections should reviewers look at first?
 - What user behavior or bug does this prove?
+- **Feature/documentation consistency.** If the PR adds, changes, or removes a
+  user-visible feature, capability, or behavior, update the corresponding
+  canonical document under `docs/` in the same PR. Use `docs/catalog.json` to
+  identify the canonical document, update its `last_verified` date, and update
+  `docs/README.md` when navigation changes. If no documentation change is
+  needed, say `N/A` and explain why.
 - What tests did you run? Include commands and results.
 - **For voice / phone / audio PRs: include a manual test result.** A transcript excerpt (from `data/conversation.sqlite`) showing the live turn/`[Tool]` flow, or a voice recording demonstrating the change. Voice paths are weakly covered by unit tests, so a maintainer needs observable evidence the live session behaves — not just that the code compiles. See the gold-standard example below.
 
