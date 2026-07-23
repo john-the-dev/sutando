@@ -518,6 +518,8 @@ def _select_sibling_attachments(history, referenced_ids, cutoff, cap=5):
     and capped at ``cap`` attachments (nearest-to-the-trigger kept).
     """
     picked = []
+    groups = []  # (author_str, [attachments]) per qualifying message, newest-first
+    total = 0
     for msg in history:  # newest-first
         # Stop scanning once we fall outside the time window — history is
         # ordered, so everything past this point is older still.
@@ -525,13 +527,22 @@ def _select_sibling_attachments(history, referenced_ids, cutoff, cap=5):
             break
         if msg.author.id not in referenced_ids:
             continue
-        for att in (getattr(msg, "attachments", None) or []):
-            picked.append((str(msg.author), att))
-            if len(picked) >= cap:
-                break
-        if len(picked) >= cap:
+        atts = list(getattr(msg, "attachments", None) or [])
+        if not atts:
+            continue
+        # The bottom break keeps total < cap on entry, so cap - total >= 1 here;
+        # take at most that many (nearest-to-the-trigger, upload order within a msg).
+        atts = atts[:cap - total]
+        groups.append((str(msg.author), atts))
+        total += len(atts)
+        if total >= cap:
             break
-    picked.reverse()  # oldest-first
+    # Oldest MESSAGE first (reverse the group order), but keep each message's own
+    # attachments in upload order — reversing the flat list, as before, also
+    # inverted the attachments within each message (CR #2126, qingyun-wu).
+    picked = []
+    for author_str, atts in reversed(groups):
+        picked.extend((author_str, att) for att in atts)
     return picked
 
 

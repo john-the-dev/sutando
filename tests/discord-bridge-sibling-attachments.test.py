@@ -170,6 +170,40 @@ def test_multiple_referenced_users():
     assert names == ["a.mp4", "c.mp4"], names
 
 
+def test_single_message_preserves_attachment_order():
+    # CR #2126: one message with several attachments must keep UPLOAD order —
+    # the prior flat-list reverse inverted attachments within each message.
+    history = _hist(
+        _Msg(999, "Alice", _NOW - timedelta(minutes=1), ["first.png", "second.png", "third.png"]),
+    )
+    picked = select(history, {999}, _CUTOFF)
+    names = [a.filename for _, a in picked]
+    assert names == ["first.png", "second.png", "third.png"], names
+
+
+def test_multi_message_multi_attachment_ordering():
+    # Oldest MESSAGE first, but each message's own attachments in upload order.
+    history = _hist(
+        _Msg(999, "Alice", _NOW - timedelta(minutes=1), ["new1.mp4", "new2.mp4"]),  # newest
+        _Msg(999, "Alice", _NOW - timedelta(minutes=3), ["old1.mp4", "old2.mp4"]),  # older
+    )
+    picked = select(history, {999}, _CUTOFF)
+    names = [a.filename for _, a in picked]
+    assert names == ["old1.mp4", "old2.mp4", "new1.mp4", "new2.mp4"], names
+
+
+def test_cap_across_messages_keeps_nearest_in_order():
+    # cap spans two messages: keep all of the nearest (newest) message + the
+    # first of the older, still emitted oldest-message-first, upload order intact.
+    history = _hist(
+        _Msg(999, "Alice", _NOW - timedelta(minutes=1), ["n1.png", "n2.png", "n3.png"]),  # newest
+        _Msg(999, "Alice", _NOW - timedelta(minutes=3), ["o1.png", "o2.png"]),            # older
+    )
+    picked = select(history, {999}, _CUTOFF, cap=4)
+    names = [a.filename for _, a in picked]
+    assert names == ["o1.png", "n1.png", "n2.png", "n3.png"], names
+
+
 # --- _process_sibling_attachment: the download + OFFLOADED transcription -------
 # (CR #2126 — the transcription subprocess must run off the gateway event loop.)
 import asyncio
@@ -284,6 +318,9 @@ def main():
         test_empty_history_returns_empty,
         test_empty_referenced_ids_returns_empty,
         test_multiple_referenced_users,
+        test_single_message_preserves_attachment_order,
+        test_multi_message_multi_attachment_ordering,
+        test_cap_across_messages_keeps_nearest_in_order,
         test_sibling_attachment_offloads_transcription,
         test_sibling_attachment_file_note_when_no_transcript,
         test_sibling_attachment_download_failure_returns_none,
@@ -301,7 +338,7 @@ def main():
         for f in failures:
             print(f"  {f}")
         sys.exit(1)
-    print("All 14 sibling-attachment tests passed (selection + offloaded processing).")
+    print("All 17 sibling-attachment tests passed (selection + offloaded processing).")
 
 
 if __name__ == "__main__":
