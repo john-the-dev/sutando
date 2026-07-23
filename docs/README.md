@@ -36,6 +36,7 @@ Machine-readable ownership and lifecycle metadata lives in
 - [Host CLI bindings](host-cli-bindings.md)
 - [Remote gateway protocol](remote-gateway-protocol.md)
 - [Slack bridge](slack-bridge.md)
+- [Generated `src/` module map](src-map.md)
 - [Workspace operational contract](workspace-contract.md)
 
 ## Architecture and decisions

@@ -85,6 +85,13 @@
       "canonical_for": "Slack bridge setup and behavior",
       "last_verified": null
     },
+    "docs/src-map.md": {
+      "title": "src/ module map",
+      "audience": ["contributors", "maintainers", "agents"],
+      "status": "active",
+      "canonical_for": "generated source-module inventory",
+      "last_verified": "2026-07-23"
+    },
     "docs/state-sync-allowlist.md": {
       "title": "State sync allowlist design",
       "audience": ["contributors", "maintainers"],
