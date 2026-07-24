@@ -87,6 +87,8 @@ was needed, and that the core stayed up.
 
 ## Iteration log
 
+- v0.2.0 — 2026-07-23 — replace plain `nohup` with a durable
+  `sutando-services` tmux handoff that outlives task executors.
 - v0.1.0 — 2026-07-20 — initial. Distilled from a live self-upgrade (8 commits
   behind → 0) where the naive inline restart hung on startup.sh's foreground
   Swift build + credential-proxy hold. Encodes: `--ff-only` pull, **detached**
