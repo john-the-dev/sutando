@@ -20,6 +20,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 import urllib.parse
@@ -435,14 +437,34 @@ def _read_crons() -> list:
         return []
 
 
+# Serializes the full read-merge-write transaction for schedule mutations.
+# dashboard runs under ThreadingHTTPServer, so two overlapping POST/DELETE
+# requests would otherwise both read the old list, and the later os.replace
+# could clobber the earlier acknowledged write (or raise FileNotFoundError off a
+# shared temp path). Every upsert/delete holds this lock across read→merge→write
+# so mutations are linearizable (CR #2164, qingyun-wu). A module-level Lock is
+# process-wide; the dashboard is single-process, so it fully covers the server.
+_CRONS_LOCK = threading.Lock()
+
+
 def _write_crons(jobs: list) -> None:
     """Persist the cron list atomically (tmp + os.replace) so a crash mid-write
-    can't leave a truncated crons.json."""
+    can't leave a truncated crons.json. Callers MUST hold _CRONS_LOCK for the
+    surrounding read-modify-write; the per-writer temp name (pid+uuid) is only
+    defense in depth so two writers can never collide on one .tmp path."""
     p = _crons_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(jobs, indent=2) + "\n")
-    os.replace(tmp, p)
+    tmp = p.with_suffix(f".json.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(json.dumps(jobs, indent=2) + "\n")
+        os.replace(tmp, p)
+    except OSError:
+        # Never leave an orphan temp behind on a failed write.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _validate_job(job: dict) -> str | None:
@@ -490,43 +512,53 @@ def upsert_schedule(body: dict) -> tuple[int, dict]:
     name = (body.get("name") or "").strip()
     if not name:
         return 400, {"error": "name is required"}
-    jobs = _read_crons()
-    existing = next((j for j in jobs if j.get("name") == name), None)
-    merged = dict(existing) if existing else {}
-    merged["name"] = name
-    for k in ("cron", "prompt", "prompt_skill", "description"):
-        if k in body and str(body.get(k)).strip():
-            merged[k] = str(body[k]).strip()
-    if (body.get("prompt_skill") or "").strip():
-        merged.pop("prompt", None)
-    elif (body.get("prompt") or "").strip():
-        merged.pop("prompt_skill", None)
-    err = _validate_job(merged)
-    if err:
-        return 400, {"error": err}
-    # Persist the MERGED job — it starts from the existing on-disk entry, so
-    # scheduler-specific fields (execution, delivery, retry_minutes, timezone,
-    # launchd, room, room_id, …) are preserved. A prior version rebuilt a
-    # name/cron/prompt/description whitelist here, silently dropping those on any
-    # edit — saving a cron change could disable a Codex job or detach its room
-    # (CR #2164, qingyun-wu). The prompt/prompt_skill exclusivity was already
-    # applied to `merged` above, so it's write-ready.
-    jobs = [j for j in jobs if j.get("name") != name]
-    jobs.append(merged)
-    _write_crons(jobs)
-    return 200, {"ok": True, "name": name, "count": len(jobs),
-                 "note": "Saved. Takes effect on the next /schedule-crons run (restart)."}
+    # Serialize the whole read→merge→validate→write transaction. Under
+    # ThreadingHTTPServer two overlapping upserts (or an upsert racing a delete)
+    # would both read the pre-mutation list and the second write would silently
+    # clobber the first acknowledged update (CR #2164). The lock makes the
+    # transaction linearizable; delete_schedule takes the same lock.
+    with _CRONS_LOCK:
+        jobs = _read_crons()
+        existing = next((j for j in jobs if j.get("name") == name), None)
+        merged = dict(existing) if existing else {}
+        merged["name"] = name
+        for k in ("cron", "prompt", "prompt_skill", "description"):
+            if k in body and str(body.get(k)).strip():
+                merged[k] = str(body[k]).strip()
+        if (body.get("prompt_skill") or "").strip():
+            merged.pop("prompt", None)
+        elif (body.get("prompt") or "").strip():
+            merged.pop("prompt_skill", None)
+        err = _validate_job(merged)
+        if err:
+            return 400, {"error": err}
+        # Persist the MERGED job — it starts from the existing on-disk entry, so
+        # scheduler-specific fields (execution, delivery, retry_minutes, timezone,
+        # launchd, room, room_id, …) are preserved. A prior version rebuilt a
+        # name/cron/prompt/description whitelist here, silently dropping those on any
+        # edit — saving a cron change could disable a Codex job or detach its room
+        # (CR #2164, qingyun-wu). The prompt/prompt_skill exclusivity was already
+        # applied to `merged` above, so it's write-ready.
+        jobs = [j for j in jobs if j.get("name") != name]
+        jobs.append(merged)
+        _write_crons(jobs)
+        return 200, {"ok": True, "name": name, "count": len(jobs),
+                     "note": "Saved. Takes effect on the next /schedule-crons run (restart)."}
 
 
 def delete_schedule(name: str) -> tuple[int, dict]:
     """Pure delete-by-name. Returns (http_status, response_obj)."""
-    jobs = _read_crons()
-    remaining = [j for j in jobs if j.get("name") != name]
-    if len(remaining) == len(jobs):
-        return 404, {"error": "not found", "name": name}
-    _write_crons(remaining)
-    return 200, {"deleted": name, "count": len(remaining),
-                 "note": "Removed. Takes effect on the next /schedule-crons run (restart)."}
+    # Same transaction lock as upsert_schedule — a delete racing an upsert must
+    # not read a stale list and re-persist a job the upsert just removed, or vice
+    # versa (CR #2164).
+    with _CRONS_LOCK:
+        jobs = _read_crons()
+        remaining = [j for j in jobs if j.get("name") != name]
+        if len(remaining) == len(jobs):
+            return 404, {"error": "not found", "name": name}
+        _write_crons(remaining)
+        return 200, {"deleted": name, "count": len(remaining),
+                     "note": "Removed. Takes effect on the next /schedule-crons run (restart)."}
 
 
 def get_schedules() -> list[dict]:

@@ -217,6 +217,138 @@ check("no Access-Control-Allow-Origin header is emitted (send_header call absent
 check("handler no longer advertises cross-origin write methods via CORS",
       "Access-Control-Allow-Methods" not in _dash_src)
 
+# ── concurrent mutations are linearizable (CR #2164) ──────────────────────────
+# dashboard runs under ThreadingHTTPServer, so overlapping upsert/delete requests
+# must not lose an acknowledged update or crash on a shared temp path. Fire N
+# distinct upserts concurrently (barrier-synchronized, with a widened read→write
+# window) and assert every acknowledged job survives. Pre-fix (unlocked
+# read-modify-write + shared crons.json.tmp) this dropped updates and could raise
+# FileNotFoundError off the shared .tmp; the transaction lock serializes them.
+import threading as _threading
+import time as _time
+
+dash._write_crons([])
+_N = 24
+_barrier = _threading.Barrier(_N)
+_codes: dict[str, int] = {}
+_errs: list[str] = []
+
+# Widen the read→write window so an unlocked implementation reliably races; under
+# the real lock this sleep simply runs inside the critical section (still serial).
+_orig_read = dash._read_crons
+
+
+def _slow_read():
+    r = _orig_read()
+    _time.sleep(0.003)
+    return r
+
+
+dash._read_crons = _slow_read
+
+
+def _worker(i):
+    name = f"job{i:02d}"
+    try:
+        _barrier.wait(timeout=10)
+        code, _ = dash.upsert_schedule(
+            {"name": name, "cron": "*/5 * * * *", "prompt_skill": "morning-briefing"})
+        _codes[name] = code
+    except Exception as e:  # e.g. a shared-temp FileNotFoundError
+        _errs.append(f"{name}: {type(e).__name__}: {e}")
+
+
+_threads = [_threading.Thread(target=_worker, args=(i,)) for i in range(_N)]
+for _t in _threads:
+    _t.start()
+for _t in _threads:
+    _t.join(timeout=15)
+dash._read_crons = _orig_read
+
+_final = {j["name"] for j in dash._read_crons()}
+check("concurrent upserts: no writer raised (no shared-temp FileNotFoundError)",
+      not _errs, "; ".join(_errs))
+check("concurrent upserts: every request acknowledged 200",
+      len(_codes) == _N and all(c == 200 for c in _codes.values()), str(_codes))
+check("concurrent upserts: all N acknowledged jobs persisted (no lost update)",
+      _final == {f"job{i:02d}" for i in range(_N)},
+      f"persisted {len(_final)}/{_N}: {sorted(_final)}")
+
+# Upsert racing a delete of a different pre-existing job: both must serialize —
+# the add survives, the victim is gone, the untouched job is intact.
+dash._write_crons([
+    {"name": "keep", "cron": "*/5 * * * *", "prompt_skill": "morning-briefing"},
+    {"name": "victim", "cron": "*/5 * * * *", "prompt_skill": "morning-briefing"}])
+_b2 = _threading.Barrier(2)
+
+
+def _do_upsert():
+    _b2.wait(timeout=10)
+    dash.upsert_schedule({"name": "added", "cron": "0 9 * * *", "prompt_skill": "morning-briefing"})
+
+
+def _do_delete():
+    _b2.wait(timeout=10)
+    dash.delete_schedule("victim")
+
+
+_tu = _threading.Thread(target=_do_upsert)
+_td = _threading.Thread(target=_do_delete)
+_tu.start()
+_td.start()
+_tu.join(timeout=15)
+_td.join(timeout=15)
+_names2 = {j["name"] for j in dash._read_crons()}
+check("upsert||delete serialize: added survives, victim gone, keep intact",
+      _names2 == {"keep", "added"}, str(sorted(_names2)))
+
+# ── _write_crons write-failure cleanup (CR #2164 defense-in-depth) ────────────
+# A failed os.replace must remove the per-writer temp (no orphan) and re-raise;
+# a double-fault (temp already gone) must be swallowed by the inner except so the
+# write still raises cleanly rather than masking with a FileNotFoundError.
+dash._write_crons([{"name": "seed", "cron": "*/5 * * * *", "prompt_skill": "morning-briefing"}])
+_seed_bytes = _tmp.read_text()
+_orig_replace = dash.os.replace
+
+
+def _boom(*a, **k):
+    raise OSError("disk full")
+
+
+# (a) replace fails, temp cleanup succeeds → raises, no orphan .tmp, file intact.
+dash.os.replace = _boom
+_raised = False
+try:
+    dash._write_crons([{"name": "new", "cron": "*/5 * * * *", "prompt_skill": "morning-briefing"}])
+except OSError:
+    _raised = True
+finally:
+    dash.os.replace = _orig_replace
+check("write failure re-raises OSError", _raised)
+check("write failure leaves no orphan .tmp",
+      not list(_tmp.parent.glob("*.tmp")), str(list(_tmp.parent.glob("*.tmp"))))
+check("write failure leaves crons.json intact", _tmp.read_text() == _seed_bytes)
+
+
+# (b) double-fault: replace fails AND the temp is already gone, so the code's
+#     own tmp.unlink() raises — the inner except must swallow it and the write
+#     still re-raises the original OSError.
+def _boom_del(src, dst, *a, **k):
+    Path(src).unlink()  # remove temp so the except's tmp.unlink() raises
+    raise OSError("disk full")
+
+
+dash.os.replace = _boom_del
+_raised2 = False
+try:
+    dash._write_crons([{"name": "new2", "cron": "*/5 * * * *", "prompt_skill": "morning-briefing"}])
+except OSError:
+    _raised2 = True
+finally:
+    dash.os.replace = _orig_replace
+check("double-fault (temp already gone) still re-raises, no masking", _raised2)
+check("double-fault leaves crons.json intact", _tmp.read_text() == _seed_bytes)
+
 print()
 if failures:
     print(f"FAIL — {len(failures)}: {failures}")
