@@ -345,13 +345,26 @@ def _ensure_tier_map_seeded() -> bool:
     if not allow:
         return True  # nothing to grandfather — an empty map is legitimate here
     data["tierMap"] = {uid: "owner" for uid in allow}
+    # Atomic write: a bare ACCESS_FILE.write_text() truncates the live
+    # access-control file BEFORE writing, so a disk-full / interrupt / partial
+    # write can destroy allowFrom — and with fail-closed tier resolution that
+    # locks legitimate owners out against a corrupt file, at bridge startup.
+    # Write a sibling temp, chmod it, then os.replace() atomically. The pid+uuid
+    # suffix avoids colliding with a concurrent .tmp; on any failure the original
+    # access.json bytes are left intact and the orphan temp is removed.
+    tmp = ACCESS_FILE.with_suffix(ACCESS_FILE.suffix + f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
-        ACCESS_FILE.write_text(json.dumps(data, indent=2) + "\n")
-        os.chmod(ACCESS_FILE, 0o600)
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, ACCESS_FILE)
         _update_access_cache(data)
         print(f"  [tier-map] grandfathered {len(allow)} existing allowFrom member(s) as owner; new additions now default to read-only", flush=True)
         return True
     except OSError as e:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
         print(f"  [tier-map] WARNING: failed to persist grandfather tierMap ({e}); allowlisted users resolve read-only (other) until seeded", flush=True)
         return False
 

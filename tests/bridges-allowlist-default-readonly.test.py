@@ -142,26 +142,37 @@ slack._ensure_tier_map_seeded()  # must swallow and return without writing
 check("slack: seed swallows a read failure", True)
 slack.ACCESS_FILE = _sf
 
-# 6. seed WRITE failure: swallow the OSError, return False, and the resolution
-#    must fail CLOSED — an allowlisted user resolves read-only ("other"), NOT
-#    owner (#2161 CR: "assert the resolved TIER after a seed write failure",
-#    not merely that no exception escapes).
-class _WriteRaises:
-    def __init__(self, payload):
-        self._p = payload
-    def read_text(self):
-        return self._p
-    def write_text(self, *a, **k):
-        raise OSError("disk full")
-slack.ACCESS_FILE = _WriteRaises(json.dumps({"allowFrom": ["U_W"]}))  # no tierMap -> attempts the write
-seeded_ok = slack._ensure_tier_map_seeded()  # must swallow the OSError, return False
+# 6. seed WRITE failure is ATOMIC (#2161 CR: "add a regression proving a failed
+#    migration leaves the original access.json bytes intact"). The migration
+#    writes a sibling temp + os.replace(); when the commit fails it must (a)
+#    return False, (b) leave the original access.json BYTES INTACT (never
+#    truncated), (c) leave no orphan .tmp, and (d) fail CLOSED — an allowlisted
+#    user stays read-only ("other"), never owner. Inject the failure at the
+#    os.replace commit (the truncate-in-place bug's danger point).
+_wf = Path(tempfile.mkdtemp(prefix="sl-writefail-")) / "access.json"
+_orig_bytes = json.dumps({"allowFrom": ["U_W"]})  # no tierMap -> triggers the write
+_wf.write_text(_orig_bytes)
+slack.ACCESS_FILE = _wf
+if hasattr(slack, "_access_cache"):
+    slack._access_cache = None
+
+
+def _boom(*a, **k):
+    raise OSError("disk full during commit")
+
+
+_orig_replace = slack.os.replace
+slack.os.replace = _boom
+try:
+    seeded_ok = slack._ensure_tier_map_seeded()  # must swallow the OSError, return False
+finally:
+    slack.os.replace = _orig_replace
 check("slack: seed write failure returns False (explicit, not silent)", seeded_ok is False, f"got {seeded_ok!r}")
-# After the failed persist, on-disk state still has NO tierMap. Point ACCESS_FILE
-# at a real file reflecting that post-failure state (clearing the mtime cache) and
-# confirm the resolution fails CLOSED via the source's membership-only rule.
-_pf = Path(tempfile.mkdtemp(prefix="sl-postfail-")) / "access.json"
-_pf.write_text(json.dumps({"allowFrom": ["U_W"]}))  # tierMap never persisted
-slack.ACCESS_FILE = _pf
+check("slack: failed migration leaves access.json bytes intact (atomic — no truncation)",
+      _wf.read_text() == _orig_bytes, f"file mutated to {_wf.read_text()!r}")
+check("slack: failed migration leaves no orphan .tmp",
+      not list(_wf.parent.glob("*.tmp")), str(list(_wf.parent.glob("*.tmp"))))
+# Fail closed: with no tierMap persisted, an allowlisted user resolves read-only.
 if hasattr(slack, "_access_cache"):
     slack._access_cache = None
 _tm = slack.load_tier_map()  # {} — no tierMap on disk
@@ -252,20 +263,30 @@ if _have_discord:
           _dtm.get("444", "team" if _dtm else "owner") == "team", str(_dtm))
     dmod.ACCESS_FILE = _df
 
-    # 7. seed WRITE failure: swallow the OSError, return False, and the
-    #    resolution must fail CLOSED — an allowlisted sender resolves "team",
-    #    NOT owner (#2161 CR: assert the resolved TIER after a seed write
-    #    failure, not merely that no exception escapes).
-    class _DWriteRaises:
-        def __init__(self, payload):
-            self._p = payload
-        def read_text(self):
-            return self._p
-        def write_text(self, *a, **k):
-            raise OSError("disk full")
-    dmod.ACCESS_FILE = _DWriteRaises(json.dumps({"allowFrom": ["999"]}))  # no tierMap -> attempts write
-    seeded_ok = dmod.ensure_tier_map_seeded()  # must swallow the OSError, return False
+    # 7. seed WRITE failure is ATOMIC (#2161 CR): the migration writes a sibling
+    #    temp + os.replace(); a failed commit must (a) return False, (b) leave
+    #    the original access.json BYTES INTACT (never truncated), (c) leave no
+    #    orphan .tmp, and (d) fail CLOSED — an allowlisted sender stays "team",
+    #    never owner. Inject the failure at the os.replace commit.
+    _dwf = Path(tempfile.mkdtemp(prefix="dc-writefail-")) / "access.json"
+    _dorig = json.dumps({"allowFrom": ["999"]})  # no tierMap -> triggers the write
+    _dwf.write_text(_dorig)
+    dmod.ACCESS_FILE = _dwf
+
+    def _dboom(*a, **k):
+        raise OSError("disk full during commit")
+
+    _dorig_replace = dmod.os.replace
+    dmod.os.replace = _dboom
+    try:
+        seeded_ok = dmod.ensure_tier_map_seeded()  # must swallow the OSError, return False
+    finally:
+        dmod.os.replace = _dorig_replace
     check("discord: seed write failure returns False (explicit, not silent)", seeded_ok is False, f"got {seeded_ok!r}")
+    check("discord: failed migration leaves access.json bytes intact (atomic — no truncation)",
+          _dwf.read_text() == _dorig, f"file mutated to {_dwf.read_text()!r}")
+    check("discord: failed migration leaves no orphan .tmp",
+          not list(_dwf.parent.glob("*.tmp")), str(list(_dwf.parent.glob("*.tmp"))))
     _dtm = dmod.load_tier_map()  # {} — the write failed, tierMap never persisted
     # Mirror the source resolution (owner strictly via membership; empty → team):
     _dres = _dtm["999"] if "999" in _dtm else "team"
