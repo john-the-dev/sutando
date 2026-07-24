@@ -183,6 +183,54 @@ slack.ACCESS_FILE = _sf
 if hasattr(slack, "_access_cache"):
     slack._access_cache = None
 
+# 6a. Empty allowFrom: nothing to grandfather. The seed must return True WITHOUT
+#     writing a tierMap — an empty allowFrom is a legitimate locked-down state,
+#     not a migration target. Covers the `if not allow: return True` branch.
+_ef = Path(tempfile.mkdtemp(prefix="sl-emptyallow-")) / "access.json"
+_ef.write_text(json.dumps({"allowFrom": []}))
+slack.ACCESS_FILE = _ef
+if hasattr(slack, "_access_cache"):
+    slack._access_cache = None
+_empty_ok = slack._ensure_tier_map_seeded()
+check("slack: empty allowFrom seeds nothing and returns True",
+      _empty_ok is True, f"got {_empty_ok!r}")
+check("slack: empty allowFrom writes no tierMap",
+      "tierMap" not in json.loads(_ef.read_text()), _ef.read_text())
+slack.ACCESS_FILE = _sf
+if hasattr(slack, "_access_cache"):
+    slack._access_cache = None
+
+# 6b. Double-fault: the commit fails AND the orphan-temp cleanup ALSO fails. The
+#     inner `except OSError: pass` around tmp.unlink() must swallow the second
+#     error so the seed still returns False cleanly (never raises). Force it by
+#     deleting the temp inside the replace-boom, so the code's own tmp.unlink()
+#     then raises FileNotFoundError (an OSError).
+_wf2 = Path(tempfile.mkdtemp(prefix="sl-doublefault-")) / "access.json"
+_wf2.write_text(_orig_bytes)
+slack.ACCESS_FILE = _wf2
+if hasattr(slack, "_access_cache"):
+    slack._access_cache = None
+
+
+def _boom_del_tmp(src, dst, *a, **k):
+    Path(src).unlink()  # remove the temp so the except's tmp.unlink() raises
+    raise OSError("disk full during commit")
+
+
+_orig_replace2 = slack.os.replace
+slack.os.replace = _boom_del_tmp
+try:
+    df_ok = slack._ensure_tier_map_seeded()  # inner except must swallow the unlink error
+finally:
+    slack.os.replace = _orig_replace2
+check("slack: write failure with a failed temp-cleanup still returns False (no raise)",
+      df_ok is False, f"got {df_ok!r}")
+check("slack: double-fault leaves original access.json bytes intact",
+      _wf2.read_text() == _orig_bytes, f"file mutated to {_wf2.read_text()!r}")
+slack.ACCESS_FILE = _sf
+if hasattr(slack, "_access_cache"):
+    slack._access_cache = None
+
 # 7. _write_task runs the tier-map seed call + resolution (covers the seed call
 #    site) for a non-owner sender, and writes the task to a redirected TASKS_DIR.
 _sf.write_text(json.dumps({"allowFrom": ["U_X"], "tierMap": {"U_SEED": "owner"}}))
@@ -292,6 +340,41 @@ if _have_discord:
     _dres = _dtm["999"] if "999" in _dtm else "team"
     check("discord: seed WRITE failure resolves allowlisted sender read-only (team), NOT owner",
           _dres != "owner" and _dres == "team", f"got {_dres!r}")
+    dmod.ACCESS_FILE = _df
+
+    # 7a. Empty allowFrom: nothing to grandfather — return True without writing.
+    _defile = Path(tempfile.mkdtemp(prefix="dc-emptyallow-")) / "access.json"
+    _defile.write_text(json.dumps({"allowFrom": []}))
+    dmod.ACCESS_FILE = _defile
+    _dempty_ok = dmod.ensure_tier_map_seeded()
+    check("discord: empty allowFrom seeds nothing and returns True",
+          _dempty_ok is True, f"got {_dempty_ok!r}")
+    check("discord: empty allowFrom writes no tierMap",
+          "tierMap" not in json.loads(_defile.read_text()), _defile.read_text())
+    dmod.ACCESS_FILE = _df
+
+    # 7b. Double-fault: commit fails AND the orphan-temp cleanup ALSO fails. The
+    #     inner `except OSError: pass` around tmp.unlink() must swallow the second
+    #     error so the seed still returns False cleanly. Delete the temp inside
+    #     the replace-boom so the code's own tmp.unlink() raises FileNotFoundError.
+    _dwf2 = Path(tempfile.mkdtemp(prefix="dc-doublefault-")) / "access.json"
+    _dwf2.write_text(_dorig)
+    dmod.ACCESS_FILE = _dwf2
+
+    def _dboom_del_tmp(src, dst, *a, **k):
+        Path(src).unlink()  # remove the temp so the except's tmp.unlink() raises
+        raise OSError("disk full during commit")
+
+    _dorig_replace2 = dmod.os.replace
+    dmod.os.replace = _dboom_del_tmp
+    try:
+        _ddf_ok = dmod.ensure_tier_map_seeded()  # inner except must swallow the unlink error
+    finally:
+        dmod.os.replace = _dorig_replace2
+    check("discord: write failure with a failed temp-cleanup still returns False (no raise)",
+          _ddf_ok is False, f"got {_ddf_ok!r}")
+    check("discord: double-fault leaves original access.json bytes intact",
+          _dwf2.read_text() == _dorig, f"file mutated to {_dwf2.read_text()!r}")
     dmod.ACCESS_FILE = _df
 
     # 8. load_tier_map / seed swallow a read failure (except -> {} / return)
