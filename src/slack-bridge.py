@@ -308,13 +308,15 @@ def load_tier_map() -> dict:
     if cached is not None:
         try:
             if ACCESS_FILE.stat().st_mtime == cached_mtime:
-                return cached.get("tierMap") or {}
+                tier_map = cached.get("tierMap")
+                return tier_map if isinstance(tier_map, dict) else {}
         except OSError:
             pass  # file deleted — fall through to re-read (will return {})
     try:
         data = json.loads(ACCESS_FILE.read_text())
         _update_access_cache(data)
-        return data.get("tierMap") or {}
+        tier_map = data.get("tierMap")
+        return tier_map if isinstance(tier_map, dict) else {}
     except Exception:
         return {}
 

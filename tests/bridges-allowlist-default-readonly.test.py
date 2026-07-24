@@ -253,6 +253,21 @@ slack.ACCESS_FILE = _sf
 if hasattr(slack, "_access_cache"):
     slack._access_cache = None
 
+# 6d. A present-but-invalid tierMap must normalize to empty, not leak a
+#     list/scalar into runtime membership/index operations. Invalid config
+#     fails closed: the allowlisted user remains unmapped and therefore
+#     resolves to the read-only tier.
+_itm = Path(tempfile.mkdtemp(prefix="sl-invalidtiermap-")) / "access.json"
+_itm.write_text(json.dumps({"allowFrom": ["U_RO"], "tierMap": ["U_RO"]}))
+slack.ACCESS_FILE = _itm
+if hasattr(slack, "_access_cache"):
+    slack._access_cache = None
+check("slack: invalid tierMap normalizes to empty and fails closed",
+      slack.load_tier_map() == {}, str(slack.load_tier_map()))
+slack.ACCESS_FILE = _sf
+if hasattr(slack, "_access_cache"):
+    slack._access_cache = None
+
 # 7. _write_task runs the tier-map seed call + resolution (covers the seed call
 #    site) for a non-owner sender, and writes the task to a redirected TASKS_DIR.
 _sf.write_text(json.dumps({"allowFrom": ["U_X"], "tierMap": {"U_SEED": "owner"}}))
@@ -414,6 +429,15 @@ if _have_discord:
           _detm_after == {}, f"tierMap mutated to {_detm_after!r}")
     check("discord: allowlisted id under empty tierMap resolves read-only (not owner)",
           dmod.load_tier_map().get("555") is None, str(dmod.load_tier_map()))
+    dmod.ACCESS_FILE = _df
+
+    # 7d. Present-but-invalid maps normalize to empty instead of reaching the
+    #      async handler's dict-style membership/index operations.
+    _ditm = Path(tempfile.mkdtemp(prefix="dc-invalidtiermap-")) / "access.json"
+    _ditm.write_text(json.dumps({"allowFrom": ["555"], "tierMap": ["555"]}))
+    dmod.ACCESS_FILE = _ditm
+    check("discord: invalid tierMap normalizes to empty and fails closed",
+          dmod.load_tier_map() == {}, str(dmod.load_tier_map()))
     dmod.ACCESS_FILE = _df
 
     # 8. load_tier_map / seed swallow a read failure (except -> {} / return)

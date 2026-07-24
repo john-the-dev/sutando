@@ -573,7 +573,8 @@ def load_tier_map() -> dict:
     bridges share one access-control model."""
     try:
         data = json.loads(ACCESS_FILE.read_text())
-        return data.get("tierMap") or {}
+        tier_map = data.get("tierMap")
+        return tier_map if isinstance(tier_map, dict) else {}
     except Exception:
         return {}
 
