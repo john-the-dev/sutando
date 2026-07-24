@@ -74,6 +74,7 @@ def _load_slack():
 slack = _load_slack()
 _sf = Path(tempfile.mkdtemp(prefix="sl-acl-")) / "access.json"
 slack.ACCESS_FILE = _sf
+slack.ACCESS_BACKUP_FILE = _sf.parent / "slack-access-backup.json"
 
 
 def _write_slack(d):
@@ -104,6 +105,7 @@ check("slack: newly-added allowlist user is not owner", new_tier != "owner", f"g
 
 # 4. TOFU writes tierMap with enrollee as owner
 _sf.unlink(missing_ok=True)
+slack.ACCESS_BACKUP_FILE.unlink(missing_ok=True)
 if hasattr(slack, "_access_cache"):
     slack._access_cache = None
 slack.tofu_onboard("U_TOFU", "tofu-user")
