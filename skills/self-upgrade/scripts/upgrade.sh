@@ -2,17 +2,12 @@
 # self-upgrade — the mechanical half of a safe Sutando self-upgrade.
 #
 # Pulls the repo to latest and restarts background services WITHOUT bricking
-# the running core session. Encodes the hard-won 2026-07-20 lesson: never run
-# `src/restart.sh` inline from the core session — it ends with
-# `exec bash src/startup.sh`, and startup.sh runs FOREGROUND work (a Swift
-# rebuild of ax-read/Sutando.app, and it foreground-holds the credential-proxy)
-# so an inline call never returns and the upgrade "sticks". Handing it to a
-# durable tmux service session keeps the caller responsive and survives
-# executors that reap ordinary nohup children when a command finishes.
+# the running core session. The restart belongs to a detached tmux session:
+# unlike a plain `nohup ... &`, tmux survives teardown of the Codex executor
+# that launched this script, and the parked service pane keeps restarted
+# background bridges alive.
 #
 # What this script does NOT do (agent-side, handled by SKILL.md):
-#   - re-arm the task watcher (restart.sh kills `watch-tasks`; the Monitor-tool
-#     watcher is owned by the agent session, not by a shell script)
 #   - run the post-upgrade health check / report to the owner
 #
 # Usage:
@@ -111,22 +106,28 @@ fi
 # should advance past it even on hosts where no optional channel bridge is
 # configured.
 WORKSPACE="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null || true)"
+[ -n "$WORKSPACE" ] || {
+  echo "self-upgrade: ABORT — could not resolve the Sutando workspace" >&2
+  exit 2
+}
 VERIFY_STAMP="$(mktemp -t sutando-upgrade-verify.XXXXXX 2>/dev/null || true)"
 
-# 5. THE LOAD-BEARING STEP — hand the restart to the core's durable tmux
-#    server. Plain `nohup ... &` is not enough: Codex executors may reap that
-#    child when the command returns. restart.sh explicitly does NOT touch the
-#    core agent; look for "sutando-core already running".
-LOG="/tmp/sutando-self-upgrade-restart.log"
+# 5. THE LOAD-BEARING STEP — give the restart to a persistent tmux service pane.
+#    Plain `nohup ... &` is reaped by Codex executor teardown. The pane parks
+#    after startup so its background services keep a durable parent.
+mkdir -p "$WORKSPACE/logs" ||
+  { echo "self-upgrade: cannot create workspace log directory" >&2; exit 2; }
+LOG="$WORKSPACE/logs/self-upgrade-restart.log"
 if "$TMUX_BIN" -S "$TMUX_SOCKET" has-session -t "=$SERVICE_SESSION" 2>/dev/null; then
   "$TMUX_BIN" -S "$TMUX_SOCKET" kill-session -t "=$SERVICE_SESSION" ||
     { echo "self-upgrade: could not clear completed $SERVICE_SESSION session" >&2; exit 2; }
 fi
 : > "$LOG" || { echo "self-upgrade: cannot write restart log: $LOG" >&2; exit 2; }
 : > "$DONE_MARKER" || { echo "self-upgrade: cannot write completion marker: $DONE_MARKER" >&2; exit 2; }
+CORE_SESSION="${SUTANDO_TMUX_SESSION:-sutando-core}"
 printf -v RESTART_COMMAND \
-  'cd %q && bash %q >> %q 2>&1; rc=$?; printf "%%s\n" "$$" > %q; printf "self-upgrade: restart exit=%%s\n" "$rc" >> %q; exec sleep 2147483647' \
-  "$REPO" "$REPO/src/restart.sh" "$LOG" "$DONE_MARKER" "$LOG"
+  'export SUTANDO_TMUX_SOCKET=%q SUTANDO_TMUX_SESSION=%q; cd %q && bash %q >> %q 2>&1; rc=$?; printf "%%s\n" "$$" > %q; printf "self-upgrade: restart exit=%%s\n" "$rc" >> %q; exec sleep 2147483647' \
+  "$TMUX_SOCKET" "$CORE_SESSION" "$REPO" "$REPO/src/restart.sh" "$LOG" "$DONE_MARKER" "$LOG"
 "$TMUX_BIN" -S "$TMUX_SOCKET" new-session -d -s "$SERVICE_SESSION" "$RESTART_COMMAND" ||
   { echo "self-upgrade: durable restart handoff failed" >&2; exit 2; }
 "$TMUX_BIN" -S "$TMUX_SOCKET" has-session -t "=$SERVICE_SESSION" 2>/dev/null ||
@@ -155,9 +156,9 @@ fi
 
 cat <<'NEXT'
 self-upgrade: mechanical steps done. AGENT MUST NOW:
-  1. Re-arm the task watcher via the Monitor tool (restart.sh killed `watch-tasks`).
-  2. Run `python3 src/health-check.py` and confirm all-green.
-  3. Do NOT hand-kill the lingering startup.sh — it foreground-holds the
-     credential-proxy; killing it drops :7846 (see feedback: untidy != broken).
+  1. Run `python3 src/health-check.py` and confirm all-green.
+  2. Confirm the managed task notifier session was recreated.
+  3. Do NOT hand-kill the persistent service session; it owns the restarted
+     background processes. Inspect the restart log before taking any action.
 NEXT
 exit 0

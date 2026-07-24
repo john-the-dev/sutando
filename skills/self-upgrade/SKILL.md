@@ -18,19 +18,19 @@ A naive "pull + restart" self-upgrade gets **stuck**, because:
    the Bash call hangs forever, the task never gets a result, and from the
    owner's side you've "gone stuck."
 
-The fix is simple once you know it: **hand the restart to a durable tmux
-service session** so the core stays responsive and the restart outlives the
-task executor, then re-establish the pieces the restart tore down. Ordinary
-`nohup … &` is not sufficient under executors that reap children on return.
-This skill encodes that exact sequence.
+The fix is simple once you know it: **hand the restart to the same durable tmux
+server that owns the core**. A plain `nohup … &` is not enough: the supported
+Codex executor tears down that process tree when the tool call ends. A detached
+tmux service pane survives that boundary, remains the parent of restarted
+services, and lets startup recreate the managed task notifier.
 
 ## On activation
 
 ### Step 1 — Pull + durable restart handoff (mechanical)
 
 Run the helper. It aborts safely on a dirty tree or a non-fast-forward, pulls
-`--ff-only`, and launches `src/restart.sh` in the `sutando-services` tmux
-session on the core's configured socket:
+`--ff-only`, and launches `src/restart.sh` in the persistent
+**`sutando-services` tmux session**:
 
 ```bash
 bash skills/self-upgrade/scripts/upgrade.sh          # origin/main
@@ -45,19 +45,7 @@ If the diff touched `package*.json` / `tsconfig` / `*.swift` / `requirements`
 Swift rebuild itself; for npm deps run `npm ci` before relying on the TS
 services.
 
-### Step 2 — Re-arm the task watcher (agent-side — the script can't)
-
-`restart.sh` runs `pkill -f "watch-tasks"`, which kills the streaming task
-watcher — including the one your session streams via the **Monitor** tool
-(it dies with exit ~144; that's expected, not an error). A shell script
-cannot re-arm a Monitor-tool watcher, so **you** must:
-
-> Monitor tool → `command: 'bash src/watch-tasks-stream.sh'`, `persistent: true`,
-> `description: 'Streaming task watcher'`
-
-Without this, new task files stop reaching your session.
-
-### Step 3 — Verify + report
+### Step 2 — Verify + report
 
 ```bash
 python3 src/health-check.py
@@ -65,8 +53,9 @@ python3 src/health-check.py
 
 Expect **"All systems operational."** Confirm the core survived (the restart
 log contains `sutando-core already running` — `restart.sh` never touches the
-core CLI) and that bridges came back on **new PIDs**. `telegram-bridge` /
-`slack-bridge` warnings are fine if they were already optional/unconfigured.
+core CLI), the managed `sutando-core-watcher` tmux session exists, and bridges
+came back on **new PIDs**. `telegram-bridge` / `slack-bridge` warnings are fine
+if they were already optional/unconfigured.
 
 Report to the owner: old → new commit, how many commits, whether a rebuild
 was needed, and that the core stayed up.
@@ -94,5 +83,4 @@ was needed, and that the core stayed up.
   socket.
 - v0.1.0 — 2026-07-20 — initial. Distilled from a live self-upgrade (8 commits
   behind → 0) where the naive inline restart hung on startup.sh's foreground
-  Swift build + credential-proxy hold. Encodes: `--ff-only` pull, **detached**
-  restart, agent re-arms the watcher, don't-hand-kill-startup.sh.
+  Swift build + credential-proxy hold.

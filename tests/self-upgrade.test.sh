@@ -31,6 +31,7 @@ trap cleanup EXIT
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 ok()   { echo "  ok  $1"; }
+command -v tmux >/dev/null 2>&1 || fail "tmux is required for the durable-restart test"
 
 # git identity for the ephemeral fixture repos (CI runners have none configured)
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -136,6 +137,10 @@ tmux -S "$TEST_TMUX_SOCKET" has-session -t '=sutando-services' 2>/dev/null ||
 MARKER_SLEEP_PID="$(cat "$C/restart-pid")"
 case "$MARKER_SLEEP_PID" in *[!0-9]*|'') fail "upgrade: invalid fixture restart PID" ;; esac
 kill -0 "$MARKER_SLEEP_PID" 2>/dev/null || fail "upgrade: fixture restart PID is not running"
+pane_pid="$(tmux -S "$TEST_TMUX_SOCKET" list-panes -t '=sutando-services' -F '#{pane_pid}' | head -1)"
+marker_ppid="$(ps -o ppid= -p "$MARKER_SLEEP_PID" | tr -d ' ')"
+[ "$pane_pid" = "$marker_ppid" ] ||
+  fail "upgrade: restart PID $MARKER_SLEEP_PID is not owned by tmux pane PID $pane_pid"
 for _ in $(seq 1 10); do
   pane_pid="$(tmux -S "$TEST_TMUX_SOCKET" list-panes -t '=sutando-services' -F '#{pane_pid}' 2>/dev/null | head -1 || true)"
   completed_pid="$(cat "$TEST_DONE_MARKER" 2>/dev/null || true)"
