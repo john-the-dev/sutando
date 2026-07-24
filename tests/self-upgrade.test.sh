@@ -5,11 +5,11 @@
 # that actually matter:
 #   A. aborts (exit 2) on a dirty working tree — never clobbers uncommitted work
 #   B. no-ops (exit 0) when already at latest — nothing to pull
-#   C. runs the restart DETACHED — the load-bearing fix. Proven by TIMING: the
+#   C. runs the restart in durable tmux — the load-bearing fix. Proven by timing
+#      and ownership: the
 #      stub restart.sh blocks for 15s (simulating startup.sh's foreground hang);
-#      if upgrade.sh detached it, upgrade.sh returns in a couple seconds; if it
-#      ran it inline (the "stuck" bug) it would take ~15s+. We assert it returned
-#      fast AND that restart.sh actually ran (marker file).
+#      upgrade.sh must return in a couple seconds while the restart remains
+#      owned by a fixture-scoped, persistent tmux service pane.
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -17,10 +17,16 @@ SRC_SCRIPT="$REPO/skills/self-upgrade/scripts/upgrade.sh"
 [ -f "$SRC_SCRIPT" ] || { echo "FAIL: upgrade.sh not found at $SRC_SCRIPT" >&2; exit 1; }
 
 TMPROOT="$(mktemp -d)"
-trap 'rm -rf "$TMPROOT"; [ -n "${MARKER_SLEEP_PID:-}" ] && kill "$MARKER_SLEEP_PID" 2>/dev/null || true' EXIT
+cleanup() {
+  find "$TMPROOT" -name tmux.sock -type s -print0 2>/dev/null |
+    while IFS= read -r -d '' socket; do tmux -S "$socket" kill-server 2>/dev/null || true; done
+  rm -rf "$TMPROOT"
+}
+trap cleanup EXIT
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 ok()   { echo "  ok  $1"; }
+command -v tmux >/dev/null 2>&1 || fail "tmux is required for the durable-restart test"
 
 # git identity for the ephemeral fixture repos (CI runners have none configured)
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -36,7 +42,10 @@ make_fixture() {
   cp "$SRC_SCRIPT" "$root/skills/self-upgrade/scripts/upgrade.sh"
   cat > "$root/scripts/sutando-config.sh" <<EOF
 #!/bin/bash
-[ "\${1:-}" = workspace ] && printf '%s\n' "$root/workspace"
+case "\${1:-}" in
+  workspace) printf '%s\n' "$root/workspace" ;;
+  tmux-socket) printf '%s\n' "$root/tmux.sock" ;;
+esac
 EOF
   chmod +x "$root/scripts/sutando-config.sh"
   # stub restart.sh: record that it ran, then BLOCK 15s (mimics startup.sh's
@@ -90,7 +99,7 @@ case "$OUT" in *"already at latest"*) : ;; *) fail "already-latest: expected 'al
 [ ! -f "$B/restart-marker" ] || fail "already-latest: restart.sh must NOT run when nothing to pull"
 ok "B: no-ops when already at latest (exit 0), no restart"
 
-# --- C. real upgrade → pulls + restarts DETACHED (the core fix) ---------------
+# --- C. real upgrade → pulls + restarts in durable tmux (the core fix) --------
 C="$TMPROOT/c"; make_fixture "$C"
 advance_remote "$C"                       # remote now 1 ahead → fixture is behind
 before="$(cd "$C" && git rev-parse --short HEAD)"
@@ -103,15 +112,18 @@ after="$(cd "$C" && git rev-parse --short HEAD)"
 [ "$after" != "$before" ] || fail "upgrade: HEAD did not advance ($before -> $after); pull didn't happen"
 [ -f "$C/restart-marker" ] || fail "upgrade: restart.sh was never invoked (marker missing)"
 case "$OUT" in *"core heartbeat advancing"*) : ;; *) fail "upgrade: heartbeat verification did not pass: $OUT" ;; esac
-# The detach proof: restart.sh blocks 15s. Detached => upgrade returns in a few
-# seconds. Inline (the bug) => >= 15s. Generous threshold of 10s.
+# The detach proof: restart.sh blocks 15s. Durable tmux => upgrade returns in a
+# few seconds. Inline (the bug) => >= 15s. Generous threshold of 10s.
 [ "$elapsed" -lt 10 ] || fail "upgrade: took ${elapsed}s — restart.sh was NOT detached (would hang the core)"
-# The detached fixture records its own PID immediately before exec'ing sleep.
-# Read only that fixture-owned PID: a host-wide pgrep could select and kill an
-# unrelated developer/CI process that happens to be running `sleep 15`.
-MARKER_SLEEP_PID="$(cat "$C/restart-pid")"
-case "$MARKER_SLEEP_PID" in *[!0-9]*|'') fail "upgrade: invalid fixture restart PID" ;; esac
-kill -0 "$MARKER_SLEEP_PID" 2>/dev/null || fail "upgrade: fixture restart PID is not running"
-ok "C: pulls to latest + runs restart DETACHED (${elapsed}s < 10s, marker present)"
+session="$(printf '%s\n' "$OUT" | sed -n 's/.*persistent tmux service session \([^ ]*\).*/\1/p')"
+[ -n "$session" ] || fail "upgrade: persistent tmux service session was not reported: $OUT"
+tmux -S "$C/tmux.sock" has-session -t "=$session" 2>/dev/null ||
+  fail "upgrade: restart is not owned by the fixture tmux server"
+marker_pid="$(cat "$C/restart-pid")"
+pane_pid="$(tmux -S "$C/tmux.sock" display-message -p -t "$session:0.0" '#{pane_pid}')"
+marker_ppid="$(ps -o ppid= -p "$marker_pid" | tr -d ' ')"
+[ "$pane_pid" = "$marker_ppid" ] ||
+  fail "upgrade: restart PID $marker_pid is not owned by tmux pane PID $pane_pid"
+ok "C: pulls to latest + restart survives in durable tmux (${elapsed}s < 10s, pane $pane_pid owns restart $marker_pid)"
 
 echo "PASS — self-upgrade behavioral suite (3/3)"
