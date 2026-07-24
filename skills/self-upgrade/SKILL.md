@@ -77,8 +77,9 @@ was needed, and that the core stayed up.
   do not rely on plain `nohup … &`. Inline = stuck; an executor may reap the
   nohup child. Use the helper's durable tmux handoff.
 - **Do NOT hand-kill an active `sutando-services` session** to "tidy up."
-  While it exists, startup still owns service lifecycle work. The session exits
-  by itself when restart completes; a second upgrade aborts while it is active.
+  It deliberately parks after startup completes so background bridges keep
+  their durable parent. The helper marks the session `done` and only replaces
+  that completed session when a later upgrade actually needs another restart.
 - **Verify a process is actually yours before killing anything.** `pgrep -f
   watch-tasks-stream` also matches *other* installs (e.g. a `/tmp/…` checkout);
   match the full repo path, not a bare pattern.

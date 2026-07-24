@@ -7,9 +7,9 @@
 #   B. no-ops (exit 0) when already at latest — nothing to pull
 #   C. runs the restart in durable tmux — the load-bearing fix. Proven by TIMING
 #      and by inspecting the real tmux session: the
-#      stub restart.sh blocks for 15s (simulating startup.sh's foreground hang);
-#      if upgrade.sh detached it, upgrade.sh returns in a couple seconds; if it
-#      ran it inline (the "stuck" bug) it would take ~15s+. We assert it returned
+#      stub restart.sh blocks for 3s (simulating startup.sh's foreground hang);
+#      if upgrade.sh hands it off, upgrade.sh returns immediately; if it runs
+#      inline (the "stuck" bug) it takes 3s+. We assert it returned
 #      fast AND that restart.sh actually ran (marker file).
 set -eu
 
@@ -50,7 +50,7 @@ case "\${1:-}" in
 esac
 EOF
   chmod +x "$root/scripts/sutando-config.sh"
-  # stub restart.sh: record that it ran, then BLOCK 15s (mimics startup.sh's
+  # stub restart.sh: record that it ran, then BLOCK 3s (mimics startup.sh's
   # foreground hang). REPO is exported to it by upgrade.sh's cwd; write marker
   # into the fixture root via an absolute path passed through the env.
   cat > "$root/src/restart.sh" <<EOF
@@ -58,9 +58,14 @@ EOF
 echo "restart invoked" > "$root/restart-marker"
 touch "$root/workspace/state/cores/test.alive"
 printf '%s\n' "\$\$" > "$root/restart-pid"
-exec sleep 15
+exec sleep 3
 EOF
   chmod +x "$root/src/restart.sh"
+  cat > "$root/.gitignore" <<'EOF'
+restart-marker
+restart-pid
+workspace/
+EOF
 
   git init -q -b main "$root"
   ( cd "$root" && git add -A && git commit -qm "init" )
@@ -120,15 +125,29 @@ case "$OUT" in *"core heartbeat advancing"*) : ;; *) fail "upgrade: heartbeat ve
 case "$OUT" in *"durable tmux session sutando-services"*) : ;; *) fail "upgrade: durable handoff was not reported: $OUT" ;; esac
 tmux -S "$TEST_TMUX_SOCKET" has-session -t '=sutando-services' 2>/dev/null ||
   fail "upgrade: durable sutando-services tmux session did not survive executor return"
-# The detach proof: restart.sh blocks 15s. Detached => upgrade returns in a few
-# seconds. Inline (the bug) => >= 15s. Generous threshold of 10s.
-[ "$elapsed" -lt 10 ] || fail "upgrade: took ${elapsed}s — restart.sh was NOT detached (would hang the core)"
+# The detach proof: restart.sh blocks 3s. Durable handoff returns immediately;
+# inline (the bug) takes the full delay. Use a 2s threshold.
+[ "$elapsed" -lt 2 ] || fail "upgrade: took ${elapsed}s — restart.sh was NOT handed off (would hang the core)"
 # The detached fixture records its own PID immediately before exec'ing sleep.
 # Read only that fixture-owned PID: a host-wide pgrep could select and kill an
 # unrelated developer/CI process that happens to be running `sleep 15`.
 MARKER_SLEEP_PID="$(cat "$C/restart-pid")"
 case "$MARKER_SLEEP_PID" in *[!0-9]*|'') fail "upgrade: invalid fixture restart PID" ;; esac
 kill -0 "$MARKER_SLEEP_PID" 2>/dev/null || fail "upgrade: fixture restart PID is not running"
-ok "C: pulls to latest + hands restart to durable tmux (${elapsed}s < 10s, session + marker present)"
+for _ in $(seq 1 10); do
+  pane_pid="$(tmux -S "$TEST_TMUX_SOCKET" list-panes -t '=sutando-services' -F '#{pane_pid}' 2>/dev/null | head -1 || true)"
+  completed_pid="$(cat /tmp/sutando-self-upgrade-restart.done 2>/dev/null || true)"
+  [ -n "$pane_pid" ] && [ "$completed_pid" = "$pane_pid" ] && break
+  sleep 0.5
+done
+[ -n "$pane_pid" ] && [ "$completed_pid" = "$pane_pid" ] ||
+  fail "upgrade: durable session never reached done state"
+[ "$(tmux -S "$TEST_TMUX_SOCKET" list-panes -t '=sutando-services' -F '#{pane_current_command}' | head -1)" = "sleep" ] ||
+  fail "upgrade: completed service session is not parked"
+run_upgrade "$C"
+[ "$RC" -eq 0 ] || fail "already-latest with parked service session: expected exit 0, got $RC (out: $OUT)"
+tmux -S "$TEST_TMUX_SOCKET" has-session -t '=sutando-services' 2>/dev/null ||
+  fail "already-latest check removed the parked service session"
+ok "C: pulls to latest + hands restart to durable tmux (${elapsed}s < 2s, parked session + marker present)"
 
 echo "PASS — self-upgrade behavioral suite (3/3)"

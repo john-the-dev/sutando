@@ -25,6 +25,7 @@ REMOTE="origin"
 BRANCH="main"
 DO_RESTART=1
 SERVICE_SESSION="sutando-services"
+DONE_MARKER="/tmp/sutando-self-upgrade-restart.done"
 while [ $# -gt 0 ]; do
   case "$1" in
     --remote) REMOTE="$2"; shift 2 ;;
@@ -61,9 +62,13 @@ if [ "$DO_RESTART" = "1" ]; then
     exit 2
   fi
   if "$TMUX_BIN" -S "$TMUX_SOCKET" has-session -t "=$SERVICE_SESSION" 2>/dev/null; then
-    EXISTING_COMMAND="$("$TMUX_BIN" -S "$TMUX_SOCKET" display-message -p -t "=$SERVICE_SESSION" '#{pane_current_command}' 2>/dev/null || true)"
-    echo "self-upgrade: ABORT — $SERVICE_SESSION is still active ($EXISTING_COMMAND). Wait for that restart to finish." >&2
-    exit 2
+    EXISTING_COMMAND="$("$TMUX_BIN" -S "$TMUX_SOCKET" list-panes -t "=$SERVICE_SESSION" -F '#{pane_current_command}' 2>/dev/null | head -1 || true)"
+    EXISTING_PID="$("$TMUX_BIN" -S "$TMUX_SOCKET" list-panes -t "=$SERVICE_SESSION" -F '#{pane_pid}' 2>/dev/null | head -1 || true)"
+    COMPLETED_PID="$(cat "$DONE_MARKER" 2>/dev/null || true)"
+    if [ -z "$EXISTING_PID" ] || [ "$COMPLETED_PID" != "$EXISTING_PID" ]; then
+      echo "self-upgrade: ABORT — $SERVICE_SESSION is still active ($EXISTING_COMMAND). Wait for that restart to finish." >&2
+      exit 2
+    fi
   fi
 fi
 
@@ -111,10 +116,15 @@ VERIFY_STAMP="$(mktemp -t sutando-upgrade-verify.XXXXXX 2>/dev/null || true)"
 #    child when the command returns. restart.sh explicitly does NOT touch the
 #    core agent; look for "sutando-core already running".
 LOG="/tmp/sutando-self-upgrade-restart.log"
+if "$TMUX_BIN" -S "$TMUX_SOCKET" has-session -t "=$SERVICE_SESSION" 2>/dev/null; then
+  "$TMUX_BIN" -S "$TMUX_SOCKET" kill-session -t "=$SERVICE_SESSION" ||
+    { echo "self-upgrade: could not clear completed $SERVICE_SESSION session" >&2; exit 2; }
+fi
 : > "$LOG" || { echo "self-upgrade: cannot write restart log: $LOG" >&2; exit 2; }
+: > "$DONE_MARKER" || { echo "self-upgrade: cannot write completion marker: $DONE_MARKER" >&2; exit 2; }
 printf -v RESTART_COMMAND \
-  'cd %q && bash %q >> %q 2>&1; rc=$?; printf "self-upgrade: restart exit=%%s\n" "$rc" >> %q; exit "$rc"' \
-  "$REPO" "$REPO/src/restart.sh" "$LOG" "$LOG"
+  'cd %q && bash %q >> %q 2>&1; rc=$?; printf "%%s\n" "$$" > %q; printf "self-upgrade: restart exit=%%s\n" "$rc" >> %q; exec sleep 2147483647' \
+  "$REPO" "$REPO/src/restart.sh" "$LOG" "$DONE_MARKER" "$LOG"
 "$TMUX_BIN" -S "$TMUX_SOCKET" new-session -d -s "$SERVICE_SESSION" "$RESTART_COMMAND" ||
   { echo "self-upgrade: durable restart handoff failed" >&2; exit 2; }
 "$TMUX_BIN" -S "$TMUX_SOCKET" has-session -t "=$SERVICE_SESSION" 2>/dev/null ||
