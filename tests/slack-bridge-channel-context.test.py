@@ -134,7 +134,7 @@ top_event = {
     "channel": "C_CUSTOMER",
     "channel_type": "channel",
     "ts": "3002.000",
-    "text": "<@UAGENT> How was your use of Sutando so far?",
+    "text": "<@UAGENT> How was your use of Sutando so far? <@UAGENT>",
 }
 top_task_id, top_body = write_owner_task(
     top_event, "How was your use of Sutando so far?"
@@ -147,7 +147,7 @@ check(
 )
 check(
     "trigger identity map resolves the mentioned supporting agent",
-    "mentioned: @sutando_agent (UAGENT)" in top_body,
+    top_body.count("mentioned: @sutando_agent (UAGENT)") == 1,
 )
 check(
     "inline context mention is identity-resolved without dropping its ID",
@@ -229,6 +229,73 @@ check(
     "Slack channel context unavailable; do not assume client/support roles"
     in failure_body,
 )
+
+if hasattr(bridge, "_slack_context_note"):
+    with patch.object(bridge, "_resolve_username", lambda _user_id: None):
+        check(
+            "unresolved inline mentions retain the original Slack ID",
+            bridge._resolve_slack_mentions("<@UUNKNOWN>") == "<@UUNKNOWN>",
+        )
+
+    empty_note, empty_secret_types = bridge._format_slack_context(
+        [{"ts": "1", "user": "UCLIENT", "text": ""}], "channel"
+    )
+    check(
+        "empty fetched messages produce no fabricated context",
+        empty_note == "" and not empty_secret_types,
+    )
+    missing_note, _missing_types = bridge._slack_context_note(
+        {"channel_type": "channel", "channel": "C_CUSTOMER"}
+    )
+    check(
+        "missing event timestamp produces the explicit unavailable note",
+        "Slack channel context unavailable" in missing_note,
+    )
+
+    bridge.app.client.replies_handler = lambda **_kwargs: {
+        "ok": False,
+        "messages": [],
+    }
+    failed_reply_note, _failed_reply_types = bridge._slack_context_note(thread_event)
+    check(
+        "Slack replies ok=false produces the explicit unavailable note",
+        "Slack channel context unavailable" in failed_reply_note,
+    )
+
+    bridge.app.client.replies_handler = lambda **_kwargs: {
+        "ok": True,
+        "messages": [],
+        "response_metadata": {},
+    }
+    empty_reply_note, _empty_reply_types = bridge._slack_context_note(thread_event)
+    check(
+        "empty thread response produces the explicit unavailable note",
+        "Slack channel context unavailable" in empty_reply_note,
+    )
+
+    bridge.app.client.replies_handler = lambda **_kwargs: {
+        "ok": True,
+        "messages": page_one,
+        "response_metadata": {"next_cursor": "still-more"},
+    }
+    with patch.object(bridge, "_THREAD_CONTEXT_MAX_PAGES", 1):
+        truncated_note, _truncated_types = bridge._slack_context_note(thread_event)
+    check(
+        "page cap marks thread context as truncated",
+        "truncated before the triggering reply" in truncated_note,
+    )
+
+    bridge.app.client.history_handler = lambda **_kwargs: {
+        "ok": False,
+        "messages": [],
+    }
+    failed_history_note, _failed_history_types = bridge._slack_context_note(top_event)
+    check(
+        "Slack history ok=false produces the explicit unavailable note",
+        "Slack channel context unavailable" in failed_history_note,
+    )
+else:
+    check("context helper exists on the patched bridge", False)
 
 if failures:
     print(f"\nFAIL — {len(failures)} check(s): {', '.join(failures)}")
