@@ -57,10 +57,16 @@ def _load():
     # IMPORT time and chmod 0600's the .env when it exists — under the real
     # ~/.claude that mutates a developer's live Slack credentials. Pointing
     # CLAUDE_CONFIG_DIR at an empty temp dir makes claude_home_path() /
-    # channel_access_path() resolve inside temp (the .env won't exist there, so
-    # the import-time chmod is skipped) and keeps the suite off live config.
+    # channel_access_path() resolve inside temp and keeps the suite off live
+    # config. Create the canonical access file before import: otherwise the
+    # resolver can legitimately fall back to a legacy HOME path when that file
+    # exists on the host, defeating this isolation despite CLAUDE_CONFIG_DIR.
     ccd = Path(tempfile.mkdtemp(prefix="sl-dbak-ccd-"))
     os.environ["CLAUDE_CONFIG_DIR"] = str(ccd)
+    canonical_access = ccd / "channels" / "slack" / "access.json"
+    canonical_access.parent.mkdir(parents=True)
+    canonical_access.write_text('{"allowFrom":[]}\n')
+    canonical_access.chmod(0o600)
     spec = importlib.util.spec_from_file_location("slackbridge_dbak", REPO / "src" / "slack-bridge.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
