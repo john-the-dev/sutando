@@ -57,6 +57,9 @@ core CLI), the managed `sutando-core-watcher` tmux session exists, and bridges
 came back on **new PIDs**. `telegram-bridge` / `slack-bridge` warnings are fine
 if they were already optional/unconfigured.
 
+For live-path evidence, submit one task through `POST /task`, write its result,
+and confirm `GET /result/<id>` returns that exact body after the restart.
+
 Report to the owner: old → new commit, how many commits, whether a rebuild
 was needed, and that the core stayed up.
 
