@@ -18,16 +18,19 @@ A naive "pull + restart" self-upgrade gets **stuck**, because:
    the Bash call hangs forever, the task never gets a result, and from the
    owner's side you've "gone stuck."
 
-The fix is simple once you know it: **run the restart fully detached** so the
-core session stays responsive, then re-establish the pieces the restart tore
-down. This skill encodes that exact sequence.
+The fix is simple once you know it: **hand the restart to a durable tmux
+service session** so the core stays responsive and the restart outlives the
+task executor, then re-establish the pieces the restart tore down. Ordinary
+`nohup … &` is not sufficient under executors that reap children on return.
+This skill encodes that exact sequence.
 
 ## On activation
 
-### Step 1 — Pull + detached restart (mechanical)
+### Step 1 — Pull + durable restart handoff (mechanical)
 
 Run the helper. It aborts safely on a dirty tree or a non-fast-forward, pulls
-`--ff-only`, and launches `src/restart.sh` **detached**:
+`--ff-only`, and launches `src/restart.sh` in the `sutando-services` tmux
+session on the core's configured socket:
 
 ```bash
 bash skills/self-upgrade/scripts/upgrade.sh          # origin/main
@@ -70,12 +73,12 @@ was needed, and that the core stayed up.
 
 ## Guardrails (learned the hard way)
 
-- **Never run `restart.sh` / `startup.sh` inline** from the core session —
-  always detached (`nohup … & disown`). Inline = stuck.
-- **Do NOT hand-kill the lingering `startup.sh`** afterward to "tidy up." It
-  foreground-holds the credential-proxy; killing it drops `:7846`. The proxy's
-  launchd job may be TCC-blocked (exit 126) and unable to take over, so you'd
-  have to re-run `startup.sh` detached to recover. Untidy ≠ broken — leave it.
+- **Never run `restart.sh` / `startup.sh` inline** from the core session, and
+  do not rely on plain `nohup … &`. Inline = stuck; an executor may reap the
+  nohup child. Use the helper's durable tmux handoff.
+- **Do NOT hand-kill an active `sutando-services` session** to "tidy up."
+  While it exists, startup still owns service lifecycle work. The session exits
+  by itself when restart completes; a second upgrade aborts while it is active.
 - **Verify a process is actually yours before killing anything.** `pgrep -f
   watch-tasks-stream` also matches *other* installs (e.g. a `/tmp/…` checkout);
   match the full repo path, not a bare pattern.

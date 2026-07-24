@@ -6,8 +6,9 @@
 # `src/restart.sh` inline from the core session — it ends with
 # `exec bash src/startup.sh`, and startup.sh runs FOREGROUND work (a Swift
 # rebuild of ax-read/Sutando.app, and it foreground-holds the credential-proxy)
-# so an inline call never returns and the upgrade "sticks". Running it fully
-# detached keeps the caller responsive.
+# so an inline call never returns and the upgrade "sticks". Handing it to a
+# durable tmux service session keeps the caller responsive and survives
+# executors that reap ordinary nohup children when a command finishes.
 #
 # What this script does NOT do (agent-side, handled by SKILL.md):
 #   - re-arm the task watcher (restart.sh kills `watch-tasks`; the Monitor-tool
@@ -23,6 +24,7 @@ set -uo pipefail
 REMOTE="origin"
 BRANCH="main"
 DO_RESTART=1
+SERVICE_SESSION="sutando-services"
 while [ $# -gt 0 ]; do
   case "$1" in
     --remote) REMOTE="$2"; shift 2 ;;
@@ -41,6 +43,28 @@ echo "self-upgrade: repo=$REPO  remote=$REMOTE  branch=$BRANCH"
 if [ -n "$(git status --porcelain)" ]; then
   echo "self-upgrade: ABORT — working tree is dirty ($(git status --porcelain | wc -l | tr -d ' ') files). Commit or stash first." >&2
   exit 2
+fi
+
+# A restart is only safe if its owner outlives this executor. Preflight the
+# durable handoff before pulling so a host without tmux is left untouched.
+TMUX_BIN=""
+TMUX_SOCKET=""
+if [ "$DO_RESTART" = "1" ]; then
+  TMUX_BIN="$(command -v tmux 2>/dev/null || true)"
+  if [ -z "$TMUX_BIN" ]; then
+    echo "self-upgrade: ABORT — tmux is required for a restart that survives the task executor. Install tmux or use --no-restart." >&2
+    exit 2
+  fi
+  TMUX_SOCKET="$(bash "$REPO/scripts/sutando-config.sh" tmux-socket 2>/dev/null || true)"
+  if [ -z "$TMUX_SOCKET" ]; then
+    echo "self-upgrade: ABORT — could not resolve the Sutando tmux socket." >&2
+    exit 2
+  fi
+  if "$TMUX_BIN" -S "$TMUX_SOCKET" has-session -t "=$SERVICE_SESSION" 2>/dev/null; then
+    EXISTING_COMMAND="$("$TMUX_BIN" -S "$TMUX_SOCKET" display-message -p -t "=$SERVICE_SESSION" '#{pane_current_command}' 2>/dev/null || true)"
+    echo "self-upgrade: ABORT — $SERVICE_SESSION is still active ($EXISTING_COMMAND). Wait for that restart to finish." >&2
+    exit 2
+  fi
 fi
 
 # 2. Fetch + measure the gap.
@@ -82,13 +106,20 @@ fi
 WORKSPACE="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null || true)"
 VERIFY_STAMP="$(mktemp -t sutando-upgrade-verify.XXXXXX 2>/dev/null || true)"
 
-# 5. THE LOAD-BEARING STEP — restart services DETACHED so startup.sh's
-#    foreground work can't block us. restart.sh explicitly does NOT touch the
-#    Claude Code CLI (core agent); look for "sutando-core already running".
+# 5. THE LOAD-BEARING STEP — hand the restart to the core's durable tmux
+#    server. Plain `nohup ... &` is not enough: Codex executors may reap that
+#    child when the command returns. restart.sh explicitly does NOT touch the
+#    core agent; look for "sutando-core already running".
 LOG="/tmp/sutando-self-upgrade-restart.log"
-nohup bash "$REPO/src/restart.sh" > "$LOG" 2>&1 &
-disown
-echo "self-upgrade: restart.sh launched DETACHED (log: $LOG)"
+: > "$LOG" || { echo "self-upgrade: cannot write restart log: $LOG" >&2; exit 2; }
+printf -v RESTART_COMMAND \
+  'cd %q && bash %q >> %q 2>&1; rc=$?; printf "self-upgrade: restart exit=%%s\n" "$rc" >> %q; exit "$rc"' \
+  "$REPO" "$REPO/src/restart.sh" "$LOG" "$LOG"
+"$TMUX_BIN" -S "$TMUX_SOCKET" new-session -d -s "$SERVICE_SESSION" "$RESTART_COMMAND" ||
+  { echo "self-upgrade: durable restart handoff failed" >&2; exit 2; }
+"$TMUX_BIN" -S "$TMUX_SOCKET" has-session -t "=$SERVICE_SESSION" 2>/dev/null ||
+  { echo "self-upgrade: durable restart session disappeared immediately; check $LOG" >&2; exit 2; }
+echo "self-upgrade: restart.sh handed to durable tmux session $SERVICE_SESSION (log: $LOG)"
 
 # 6. Verify the core heartbeat advances while services restart (best-effort,
 #    bounded). Do not key this on a specific channel bridge: every bridge is

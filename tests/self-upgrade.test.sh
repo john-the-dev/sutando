@@ -5,7 +5,8 @@
 # that actually matter:
 #   A. aborts (exit 2) on a dirty working tree — never clobbers uncommitted work
 #   B. no-ops (exit 0) when already at latest — nothing to pull
-#   C. runs the restart DETACHED — the load-bearing fix. Proven by TIMING: the
+#   C. runs the restart in durable tmux — the load-bearing fix. Proven by TIMING
+#      and by inspecting the real tmux session: the
 #      stub restart.sh blocks for 15s (simulating startup.sh's foreground hang);
 #      if upgrade.sh detached it, upgrade.sh returns in a couple seconds; if it
 #      ran it inline (the "stuck" bug) it would take ~15s+. We assert it returned
@@ -13,11 +14,18 @@
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd -P)"
-SRC_SCRIPT="$REPO/skills/self-upgrade/scripts/upgrade.sh"
+SRC_SCRIPT="${SELF_UPGRADE_SCRIPT_UNDER_TEST:-$REPO/skills/self-upgrade/scripts/upgrade.sh}"
 [ -f "$SRC_SCRIPT" ] || { echo "FAIL: upgrade.sh not found at $SRC_SCRIPT" >&2; exit 1; }
+command -v tmux >/dev/null 2>&1 || { echo "FAIL: tmux is required for the self-upgrade handoff test" >&2; exit 1; }
 
 TMPROOT="$(mktemp -d)"
-trap 'rm -rf "$TMPROOT"; [ -n "${MARKER_SLEEP_PID:-}" ] && kill "$MARKER_SLEEP_PID" 2>/dev/null || true' EXIT
+TEST_TMUX_SOCKET="$TMPROOT/tmux.sock"
+cleanup() {
+  [ -n "${MARKER_SLEEP_PID:-}" ] && kill "$MARKER_SLEEP_PID" 2>/dev/null || true
+  tmux -S "$TEST_TMUX_SOCKET" kill-server 2>/dev/null || true
+  rm -rf "$TMPROOT"
+}
+trap cleanup EXIT
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 ok()   { echo "  ok  $1"; }
@@ -36,7 +44,10 @@ make_fixture() {
   cp "$SRC_SCRIPT" "$root/skills/self-upgrade/scripts/upgrade.sh"
   cat > "$root/scripts/sutando-config.sh" <<EOF
 #!/bin/bash
-[ "\${1:-}" = workspace ] && printf '%s\n' "$root/workspace"
+case "\${1:-}" in
+  workspace) printf '%s\n' "$root/workspace" ;;
+  tmux-socket) printf '%s\n' "$TEST_TMUX_SOCKET" ;;
+esac
 EOF
   chmod +x "$root/scripts/sutando-config.sh"
   # stub restart.sh: record that it ran, then BLOCK 15s (mimics startup.sh's
@@ -90,9 +101,12 @@ case "$OUT" in *"already at latest"*) : ;; *) fail "already-latest: expected 'al
 [ ! -f "$B/restart-marker" ] || fail "already-latest: restart.sh must NOT run when nothing to pull"
 ok "B: no-ops when already at latest (exit 0), no restart"
 
-# --- C. real upgrade → pulls + restarts DETACHED (the core fix) ---------------
+# --- C. real upgrade → pulls + hands restart to durable tmux ------------------
 C="$TMPROOT/c"; make_fixture "$C"
 advance_remote "$C"                       # remote now 1 ahead → fixture is behind
+# Start the tmux server before the simulated executor runs, just as sutando-core
+# owns the production server before an upgrade task begins.
+tmux -S "$TEST_TMUX_SOCKET" new-session -d -s fixture-core 'exec sleep 120'
 before="$(cd "$C" && git rev-parse --short HEAD)"
 start=$(date +%s)
 run_upgrade "$C"
@@ -103,6 +117,9 @@ after="$(cd "$C" && git rev-parse --short HEAD)"
 [ "$after" != "$before" ] || fail "upgrade: HEAD did not advance ($before -> $after); pull didn't happen"
 [ -f "$C/restart-marker" ] || fail "upgrade: restart.sh was never invoked (marker missing)"
 case "$OUT" in *"core heartbeat advancing"*) : ;; *) fail "upgrade: heartbeat verification did not pass: $OUT" ;; esac
+case "$OUT" in *"durable tmux session sutando-services"*) : ;; *) fail "upgrade: durable handoff was not reported: $OUT" ;; esac
+tmux -S "$TEST_TMUX_SOCKET" has-session -t '=sutando-services' 2>/dev/null ||
+  fail "upgrade: durable sutando-services tmux session did not survive executor return"
 # The detach proof: restart.sh blocks 15s. Detached => upgrade returns in a few
 # seconds. Inline (the bug) => >= 15s. Generous threshold of 10s.
 [ "$elapsed" -lt 10 ] || fail "upgrade: took ${elapsed}s — restart.sh was NOT detached (would hang the core)"
@@ -112,6 +129,6 @@ case "$OUT" in *"core heartbeat advancing"*) : ;; *) fail "upgrade: heartbeat ve
 MARKER_SLEEP_PID="$(cat "$C/restart-pid")"
 case "$MARKER_SLEEP_PID" in *[!0-9]*|'') fail "upgrade: invalid fixture restart PID" ;; esac
 kill -0 "$MARKER_SLEEP_PID" 2>/dev/null || fail "upgrade: fixture restart PID is not running"
-ok "C: pulls to latest + runs restart DETACHED (${elapsed}s < 10s, marker present)"
+ok "C: pulls to latest + hands restart to durable tmux (${elapsed}s < 10s, session + marker present)"
 
 echo "PASS — self-upgrade behavioral suite (3/3)"
