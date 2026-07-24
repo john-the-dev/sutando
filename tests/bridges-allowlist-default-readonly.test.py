@@ -231,6 +231,28 @@ slack.ACCESS_FILE = _sf
 if hasattr(slack, "_access_cache"):
     slack._access_cache = None
 
+# 6c. Explicit empty tierMap ({}) is PRESERVED, not re-seeded (#2161 CR). A
+#     present-but-empty map is a deliberate "nobody is owner via tierMap" state;
+#     the seed keys on truthiness before this fix, so {} looked identical to a
+#     missing key and re-grandfathered every allowFrom member as owner. Repro:
+#     {"allowFrom":["U_RO"],"tierMap":{}} must stay {} — U_RO resolves read-only.
+_etm = Path(tempfile.mkdtemp(prefix="sl-emptytiermap-")) / "access.json"
+_etm.write_text(json.dumps({"allowFrom": ["U_RO"], "tierMap": {}}))
+slack.ACCESS_FILE = _etm
+if hasattr(slack, "_access_cache"):
+    slack._access_cache = None
+_etm_ok = slack._ensure_tier_map_seeded()
+_etm_after = json.loads(_etm.read_text()).get("tierMap")
+check("slack: explicit empty tierMap returns True (already-configured, no seed)",
+      _etm_ok is True, f"got {_etm_ok!r}")
+check("slack: explicit empty tierMap is NOT re-seeded to owner",
+      _etm_after == {}, f"tierMap mutated to {_etm_after!r}")
+check("slack: allowlisted user under empty tierMap resolves read-only (not owner)",
+      slack.load_tier_map().get("U_RO") is None, str(slack.load_tier_map()))
+slack.ACCESS_FILE = _sf
+if hasattr(slack, "_access_cache"):
+    slack._access_cache = None
+
 # 7. _write_task runs the tier-map seed call + resolution (covers the seed call
 #    site) for a non-owner sender, and writes the task to a redirected TASKS_DIR.
 _sf.write_text(json.dumps({"allowFrom": ["U_X"], "tierMap": {"U_SEED": "owner"}}))
@@ -375,6 +397,23 @@ if _have_discord:
           _ddf_ok is False, f"got {_ddf_ok!r}")
     check("discord: double-fault leaves original access.json bytes intact",
           _dwf2.read_text() == _dorig, f"file mutated to {_dwf2.read_text()!r}")
+    dmod.ACCESS_FILE = _df
+
+    # 7c. Explicit empty tierMap ({}) is PRESERVED, not re-seeded (#2161 CR).
+    #     Discord was the worse offender: a present-but-empty map read as falsy
+    #     re-grandfathered every allowFrom id as owner. Repro:
+    #     {"allowFrom":["555"],"tierMap":{}} must stay {} — 555 resolves team.
+    _detm = Path(tempfile.mkdtemp(prefix="dc-emptytiermap-")) / "access.json"
+    _detm.write_text(json.dumps({"allowFrom": ["555"], "tierMap": {}}))
+    dmod.ACCESS_FILE = _detm
+    _detm_ok = dmod.ensure_tier_map_seeded()
+    _detm_after = json.loads(_detm.read_text()).get("tierMap")
+    check("discord: explicit empty tierMap returns True (already-configured, no seed)",
+          _detm_ok is True, f"got {_detm_ok!r}")
+    check("discord: explicit empty tierMap is NOT re-seeded to owner",
+          _detm_after == {}, f"tierMap mutated to {_detm_after!r}")
+    check("discord: allowlisted id under empty tierMap resolves read-only (not owner)",
+          dmod.load_tier_map().get("555") is None, str(dmod.load_tier_map()))
     dmod.ACCESS_FILE = _df
 
     # 8. load_tier_map / seed swallow a read failure (except -> {} / return)

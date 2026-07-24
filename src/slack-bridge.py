@@ -340,7 +340,14 @@ def _ensure_tier_map_seeded() -> bool:
         print(f"  [tier-map] WARNING: access.json unreadable ({e}); allowlisted users resolve read-only (other) until the tierMap can be read", flush=True)
         return False
     allow = data.get("allowFrom") or []
-    if data.get("tierMap"):
+    # Test key PRESENCE, not truthiness. An explicitly-empty tierMap ({}) is a
+    # deliberate "nobody is owner via tierMap" state — treating it as falsy
+    # here would re-seed every allowFrom member as owner, escalating read-only
+    # users (#2161 CR: {"allowFrom":["U"],"tierMap":{}} must NOT become
+    # {"U":"owner"}). Only a genuinely ABSENT key (never-seeded legacy file)
+    # triggers first-run grandfathering below. A present-but-empty map returns
+    # here, so the allowlisted user is missing from the map and resolves other.
+    if "tierMap" in data:
         return True
     if not allow:
         return True  # nothing to grandfather — an empty map is legitimate here
