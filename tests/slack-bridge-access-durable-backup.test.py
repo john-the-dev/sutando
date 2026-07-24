@@ -52,13 +52,26 @@ def _load():
     os.environ["SUTANDO_TEST_MODE"] = "1"
     os.environ["SLACK_BOT_TOKEN"] = "xoxb-test"
     os.environ["SLACK_APP_TOKEN"] = "xapp-test"
+    # Hermeticity (#2163 CR): isolate CLAUDE_CONFIG_DIR to a temp root BEFORE
+    # exec_module. slack-bridge.py resolves its channel .env + access.json at
+    # IMPORT time and chmod 0600's the .env when it exists — under the real
+    # ~/.claude that mutates a developer's live Slack credentials. Pointing
+    # CLAUDE_CONFIG_DIR at an empty temp dir makes claude_home_path() /
+    # channel_access_path() resolve inside temp (the .env won't exist there, so
+    # the import-time chmod is skipped) and keeps the suite off live config.
+    ccd = Path(tempfile.mkdtemp(prefix="sl-dbak-ccd-"))
+    os.environ["CLAUDE_CONFIG_DIR"] = str(ccd)
     spec = importlib.util.spec_from_file_location("slackbridge_dbak", REPO / "src" / "slack-bridge.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    return m
+    return m, ccd
 
 
-slack = _load()
+slack, _ccd = _load()
+# Capture the IMPORT-time path resolution before the test reassigns ACCESS_FILE,
+# so we can assert nothing resolved to the real ~/.claude channel config.
+_import_access = slack.ACCESS_FILE
+_import_env = slack.channels_env
 _tmp = Path(tempfile.mkdtemp(prefix="sl-dbak-"))
 slack.ACCESS_FILE = _tmp / "access.json"
 slack.ACCESS_BACKUP_FILE = _tmp / "auth" / "slack-access-backup.json"
@@ -70,6 +83,16 @@ def check(name, cond, detail=""):
     print(("  ok  " if cond else "  FAIL ") + name + ((" — " + detail) if detail and not cond else ""))
     if not cond:
         failures.append(name)
+
+
+# 0. Hermeticity gate: the import above must have resolved every channel path
+#    inside the isolated temp CLAUDE_CONFIG_DIR — never the developer's live
+#    ~/.claude/channels/slack config (no read, no chmod, no write).
+_ccd_root = str(_ccd)
+check("import resolved ACCESS_FILE inside the temp CLAUDE_CONFIG_DIR (hermetic)",
+      str(_import_access).startswith(_ccd_root), f"{_import_access} not under {_ccd_root}")
+check("import resolved channels .env inside the temp CLAUDE_CONFIG_DIR (no live-config chmod)",
+      str(_import_env).startswith(_ccd_root), f"{_import_env} not under {_ccd_root}")
 
 
 def _reset_cache():
