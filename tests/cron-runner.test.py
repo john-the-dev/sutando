@@ -182,6 +182,24 @@ def test_emit_task_prompt():
         check("priority: low" in body, "priority low")
 
 
+def test_emit_task_emits_cron_telemetry():
+    # PR #2274 CR (liususan091219): the telemetry allowlist added `cron`, but
+    # emit_task never emitted task_processed, so DAU/WAU under-counted
+    # cron-driven activity and the bucket could never fire. Assert the emit now
+    # fires with source "cron" exactly once at the write site.
+    import telemetry
+    calls: list[str] = []
+    orig = telemetry.task_processed
+    telemetry.task_processed = lambda source, **kw: calls.append(source)
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            cr.TASKS_DIR = Path(d)
+            cr.emit_task("digest", {"prompt": "do the thing"})
+        check(calls == ["cron"], f"emit_task fires task_processed('cron') once (got {calls})")
+    finally:
+        telemetry.task_processed = orig
+
+
 def test_emit_task_prompt_skill():
     with tempfile.TemporaryDirectory() as d:
         cr.TASKS_DIR = Path(d)
