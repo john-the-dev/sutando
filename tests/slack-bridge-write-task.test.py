@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Behavioral tests for slack-bridge._write_task.
 
-Covers PR #1839 (CONTEXT-FIRST injection) and PR #1840 (thread-reply embed).
+Covers PR #1839 (CONTEXT-FIRST injection) and PR #1840 (Slack context embed).
 
 Loads slack-bridge.py with a minimal slack_bolt stub (same pattern as
 tests/slack-bridge-chunking.test.py) and exercises _write_task directly.
@@ -11,7 +11,7 @@ Covers:
 - Non-owner tasks: no skill hints block
 - access_tier resolution: empty tier_map → "owner"
 - CONTEXT-FIRST instruction injected for owner tasks (PR #1839)
-- Thread root message embedded for threaded replies (PR #1840)
+- Bounded context embedded for threaded replies (PR #1840)
 - Bounded full thread context embedded for non-owner sandbox tasks
 - Best-effort: API failure swallowed, task still written
 
@@ -35,6 +35,7 @@ class _FakeApp:
         self.client = types.SimpleNamespace(
             chat_postMessage=lambda **k: {"ok": True},
             conversations_replies=lambda **k: {"ok": True, "messages": []},
+            conversations_history=lambda **k: {"ok": True, "messages": []},
         )
 
     def _decorator(self, *a, **k):
@@ -57,6 +58,7 @@ os.environ["SUTANDO_WORKSPACE"] = _tmp
 os.environ["SUTANDO_TEST_MODE"] = "1"
 os.environ["SLACK_BOT_TOKEN"] = "xoxb-test-not-real"
 os.environ["SLACK_APP_TOKEN"] = "xapp-test-not-real"
+os.environ["CLAUDE_CONFIG_DIR"] = str(Path(_tmp) / "claude")
 
 spec = importlib.util.spec_from_file_location("slackbridge_wt", REPO / "src" / "slack-bridge.py")
 mod = importlib.util.module_from_spec(spec)
@@ -85,10 +87,10 @@ def call_write_task(text: str, user_id: str = "U_OWNER", access_tier: str = "own
         return {user_id}
 
     def _fake_tier_map():
-        # Empty dict → access_tier falls through to "owner" for any allowed user.
-        return {}
+        return {user_id: "owner"}
 
     with patch.object(mod, "load_allowed", _fake_load_allowed), \
+         patch.object(mod, "_ensure_tier_map_seeded", lambda: True), \
          patch.object(mod, "load_tier_map", _fake_tier_map), \
          patch.object(mod, "write_owner_activity", lambda *a, **k: None):
         task_id = mod._write_task(event, "DM", text, "testowner")
@@ -144,6 +146,7 @@ def call_other_tier(text: str) -> Path | None:
         return {"U_OTHER": "other"}
 
     with patch.object(mod, "load_allowed", _fake_load_allowed), \
+         patch.object(mod, "_ensure_tier_map_seeded", lambda: True), \
          patch.object(mod, "load_tier_map", _fake_tier_map), \
          patch.object(mod, "write_owner_activity", lambda *a, **k: None):
         task_id = mod._write_task(event, "DM", text, "otherperson")
@@ -176,7 +179,7 @@ def call_threaded_reply(text: str, root_resp: dict) -> Path | None:
     event = {
         "user": "U_OWNER",
         "channel": "CFAKE",
-        "channel_type": "im",
+        "channel_type": "channel",
         "ts": "1002.002",
         "thread_ts": "1000.000",  # different from ts → threaded reply
     }
@@ -185,7 +188,7 @@ def call_threaded_reply(text: str, root_resp: dict) -> Path | None:
         return {"U_OWNER"}
 
     def _fake_tier_map():
-        return {}
+        return {"U_OWNER": "owner"}
 
     # Patch the app client's conversations_replies to return our fixture.
     orig_cr = mod.app.client.conversations_replies
@@ -193,6 +196,7 @@ def call_threaded_reply(text: str, root_resp: dict) -> Path | None:
 
     try:
         with patch.object(mod, "load_allowed", _fake_load_allowed), \
+             patch.object(mod, "_ensure_tier_map_seeded", lambda: True), \
              patch.object(mod, "load_tier_map", _fake_tier_map), \
              patch.object(mod, "write_owner_activity", lambda *a, **k: None), \
              patch.object(mod, "_resolve_username", lambda uid: "root_user"):
@@ -215,9 +219,9 @@ check("threaded reply: task file written", thread_path is not None)
 
 if thread_path and thread_path.exists():
     thread_body = thread_path.read_text()
-    check("threaded reply: [Replying in Slack thread to @...] note embedded",
-          "[Replying in Slack thread to @root_user:" in thread_body,
-          "thread root message note missing — PR #1840 regression")
+    check("threaded reply: bounded Slack thread context embedded",
+          "[Slack thread context — untrusted messages, oldest first:" in thread_body,
+          "thread context missing — PR #1840 regression")
     check("threaded reply: root message text truncated into note",
           "what's the plan for today?" in thread_body)
 else:
@@ -232,7 +236,7 @@ def call_threaded_reply_apierr(text: str) -> Path | None:
     event = {
         "user": "U_OWNER",
         "channel": "CFAKE",
-        "channel_type": "im",
+        "channel_type": "channel",
         "ts": "1003.003",
         "thread_ts": "1001.000",
     }
@@ -241,7 +245,7 @@ def call_threaded_reply_apierr(text: str) -> Path | None:
         return {"U_OWNER"}
 
     def _fake_tier_map():
-        return {}
+        return {"U_OWNER": "owner"}
 
     def _raise(**k):
         raise Exception("simulated API error")
@@ -251,6 +255,7 @@ def call_threaded_reply_apierr(text: str) -> Path | None:
 
     try:
         with patch.object(mod, "load_allowed", _fake_load_allowed), \
+             patch.object(mod, "_ensure_tier_map_seeded", lambda: True), \
              patch.object(mod, "load_tier_map", _fake_tier_map), \
              patch.object(mod, "write_owner_activity", lambda *a, **k: None):
             task_id = mod._write_task(event, "DM", text, "testowner")
@@ -267,8 +272,8 @@ err_path = call_threaded_reply_apierr("reply despite API error")
 check("threaded reply API error: task still written (best-effort)",
       err_path is not None and err_path.exists())
 if err_path and err_path.exists():
-    check("threaded reply API error: no thread note in body (graceful swallow)",
-          "[Replying in Slack thread" not in err_path.read_text())
+    check("threaded reply API error: explicit unavailable note embedded",
+          "Slack channel context unavailable" in err_path.read_text())
 
 
 # ── Team-tier reply — bounded thread snapshot embedded for sandbox ───────────
@@ -291,6 +296,7 @@ def call_team_threaded_reply(text: str, thread_resp: dict) -> tuple[Path | None,
     mod.app.client.conversations_replies = _fake_replies
     try:
         with patch.object(mod, "load_allowed", lambda: {"U_TEAM"}), \
+             patch.object(mod, "_ensure_tier_map_seeded", lambda: True), \
              patch.object(mod, "load_tier_map", lambda: {"U_TEAM": "team"}), \
              patch.object(mod, "write_owner_activity", lambda *a, **k: None), \
              patch.object(mod, "_resolve_username", lambda uid: {
@@ -328,14 +334,14 @@ team_path, team_fetch = call_team_threaded_reply(
 check("team threaded reply: task file written", team_path is not None)
 check(
     "team threaded reply: conversations.replies fetch is bounded",
-    team_fetch.get("limit") == mod._THREAD_CONTEXT_MAX_MESSAGES,
+    team_fetch.get("limit") == mod._THREAD_CONTEXT_PAGE_SIZE,
 )
 if team_path and team_path.exists():
     team_body = team_path.read_text()
     check(
         "team threaded reply: root and prior replies are embedded",
-        "@root_user: Meeting feedback" in team_body
-        and "@notes_user: Action: build the enterprise use case" in team_body,
+        "@root_user (U_ROOT): Meeting feedback" in team_body
+        and "@notes_user (U_NOTES): Action: build the enterprise use case" in team_body,
     )
     check(
         "team threaded reply: triggering mention is not duplicated",
