@@ -25,7 +25,7 @@ REMOTE="origin"
 BRANCH="main"
 DO_RESTART=1
 SERVICE_SESSION="sutando-services"
-DONE_MARKER="/tmp/sutando-self-upgrade-restart.done"
+DONE_MARKER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --remote) REMOTE="$2"; shift 2 ;;
@@ -61,6 +61,8 @@ if [ "$DO_RESTART" = "1" ]; then
     echo "self-upgrade: ABORT — could not resolve the Sutando tmux socket." >&2
     exit 2
   fi
+  SOCKET_TAG="$(printf '%s' "$TMUX_SOCKET" | cksum | awk '{print $1}')"
+  DONE_MARKER="/tmp/sutando-self-upgrade-$SOCKET_TAG.done"
   if "$TMUX_BIN" -S "$TMUX_SOCKET" has-session -t "=$SERVICE_SESSION" 2>/dev/null; then
     EXISTING_COMMAND="$("$TMUX_BIN" -S "$TMUX_SOCKET" list-panes -t "=$SERVICE_SESSION" -F '#{pane_current_command}' 2>/dev/null | head -1 || true)"
     EXISTING_PID="$("$TMUX_BIN" -S "$TMUX_SOCKET" list-panes -t "=$SERVICE_SESSION" -F '#{pane_pid}' 2>/dev/null | head -1 || true)"

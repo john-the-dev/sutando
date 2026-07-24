@@ -20,6 +20,8 @@ command -v tmux >/dev/null 2>&1 || { echo "FAIL: tmux is required for the self-u
 
 TMPROOT="$(mktemp -d)"
 TEST_TMUX_SOCKET="$TMPROOT/tmux.sock"
+TEST_SOCKET_TAG="$(printf '%s' "$TEST_TMUX_SOCKET" | cksum | awk '{print $1}')"
+TEST_DONE_MARKER="/tmp/sutando-self-upgrade-$TEST_SOCKET_TAG.done"
 cleanup() {
   [ -n "${MARKER_SLEEP_PID:-}" ] && kill "$MARKER_SLEEP_PID" 2>/dev/null || true
   tmux -S "$TEST_TMUX_SOCKET" kill-server 2>/dev/null || true
@@ -136,7 +138,7 @@ case "$MARKER_SLEEP_PID" in *[!0-9]*|'') fail "upgrade: invalid fixture restart 
 kill -0 "$MARKER_SLEEP_PID" 2>/dev/null || fail "upgrade: fixture restart PID is not running"
 for _ in $(seq 1 10); do
   pane_pid="$(tmux -S "$TEST_TMUX_SOCKET" list-panes -t '=sutando-services' -F '#{pane_pid}' 2>/dev/null | head -1 || true)"
-  completed_pid="$(cat /tmp/sutando-self-upgrade-restart.done 2>/dev/null || true)"
+  completed_pid="$(cat "$TEST_DONE_MARKER" 2>/dev/null || true)"
   [ -n "$pane_pid" ] && [ "$completed_pid" = "$pane_pid" ] && break
   sleep 0.5
 done
