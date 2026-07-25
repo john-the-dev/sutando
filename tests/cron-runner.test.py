@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import calendar
 import importlib.util
+import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -198,6 +200,45 @@ def test_emit_task_emits_cron_telemetry():
         check(calls == ["cron"], f"emit_task fires task_processed('cron') once (got {calls})")
     finally:
         telemetry.task_processed = orig
+
+
+def test_cron_telemetry_survives_runner_exit():
+    # Regression for the one-shot launchd lifecycle: the default telemetry
+    # sender uses a daemon thread, which dies with cron-runner. A subprocess
+    # stub records a receipt only for the bounded synchronous path, then the
+    # parent verifies the receipt after that process has exited.
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        receipt = root / "receipt.txt"
+        (root / "telemetry.py").write_text(
+            "import os\n"
+            "from pathlib import Path\n"
+            "def task_processed(source, *, flush=False):\n"
+            "    if flush:\n"
+            "        Path(os.environ['CRON_TELEMETRY_RECEIPT']).write_text(source)\n"
+        )
+        code = (
+            "import importlib.util,sys\n"
+            f"sys.path.insert(0, {str(root)!r})\n"
+            "import telemetry\n"
+            f"spec=importlib.util.spec_from_file_location('cron_runner', {str(REPO / 'src' / 'cron-runner.py')!r})\n"
+            "mod=importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mod)\n"
+            "mod._emit_cron_telemetry()\n"
+        )
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(root)
+        env["CRON_TELEMETRY_RECEIPT"] = str(receipt)
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=REPO,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        check(proc.returncode == 0, f"cron telemetry subprocess exits cleanly ({proc.stderr})")
+        check(receipt.read_text() == "cron",
+              "synchronous cron telemetry receipt exists after runner exits")
 
 
 def test_emit_task_prompt_skill():

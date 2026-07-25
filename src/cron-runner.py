@@ -242,7 +242,10 @@ def _emit_cron_telemetry() -> None:
     try:  # pragma: no cover — fire-and-forget glue; logic in tests/telemetry.test.py
         from telemetry import task_processed  # sibling module (src/ on sys.path)
 
-        task_processed("cron")
+        # cron-runner is a one-shot launchd process, so a daemon-thread send
+        # can be killed as soon as this process exits. Bound the synchronous
+        # flush in telemetry.capture() so the event is handed off first.
+        task_processed("cron", flush=True)
     except Exception:  # pragma: no cover — telemetry must never break cron emission
         pass
 
