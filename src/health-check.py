@@ -3250,6 +3250,13 @@ def recover_core_if_wedged(
             lock_fh.close()
 
 
+def community_support_line() -> str:
+    """The issue-time pointer to the official Discord (real humans +
+    community-run agents). Pure so it's unit-testable without invoking the
+    full health-check main() path (owner request 2026-07-17)."""
+    return "  Stuck? Community support (real humans + community agents): https://discord.gg/uZHWXXmrCS"
+
+
 def summary_line(checks) -> str:
     """The no-failures summary. Warnings are deliberately NOT issues — they must
     not fail the exit code or wake the launchd notifier, and that is unchanged.
@@ -3357,6 +3364,7 @@ def main():
         print(f"{len(issues)} issue(s) found:")
         for c in issues:
             print(f"  - {c['name']}: {c['status']} ({c['detail']})")
+        print(community_support_line())  # pragma: no cover — main() summary glue; the line's content is unit-tested via community_support_line()
 
         if do_fix:
             print()
