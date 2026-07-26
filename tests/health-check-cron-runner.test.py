@@ -8,6 +8,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "src" / "health-check.py"
@@ -73,6 +74,65 @@ class CronRunnerHealthTest(unittest.TestCase):
             self.assertIn("stale", stale["detail"])
             self.assertEqual(fresh["status"], "ok")
             self.assertIn("1 durable schedule(s)", fresh["detail"])
+
+    def test_missing_invalid_and_owner_exempt_configs_are_healthy(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "workspace"
+            missing = health.check_cron_runner(
+                workspace, "test-host", runtime="codex"
+            )
+            self.assertEqual(missing["status"], "ok")
+            self.assertIn("no schedules", missing["detail"])
+
+            config = workspace / "hosts" / "test-host" / "crons.json"
+            config.parent.mkdir(parents=True)
+            config.write_text("{")
+            invalid = health.check_cron_runner(
+                workspace, "test-host", runtime="codex"
+            )
+            self.assertEqual(invalid["status"], "fail")
+            self.assertIn("cannot read", invalid["detail"])
+
+            config.write_text("{}")
+            wrong_shape = health.check_cron_runner(
+                workspace, "test-host", runtime="codex"
+            )
+            self.assertEqual(wrong_shape["status"], "fail")
+            self.assertIn("not a list", wrong_shape["detail"])
+
+            config.write_text(json.dumps([
+                {"name": "dynamic", "loop": "dynamic", "cron": "* * * * *"},
+                {"name": "no-cron", "prompt": "run"},
+                {"name": "codex", "cron": "* * * * *", "execution": "codex-task"},
+            ]))
+            exempt = health.check_cron_runner(
+                workspace, "test-host", runtime="codex"
+            )
+            self.assertEqual(exempt["status"], "ok")
+            self.assertIn("no launchd-owned", exempt["detail"])
+
+    def test_loaded_runner_reports_missing_or_unreadable_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = self._workspace(Path(td), [
+                {"name": "digest", "cron": "2 6 * * *", "launchd": True},
+            ])
+            launchd_ok = lambda _: {"status": "ok"}
+            missing = health.check_cron_runner(
+                workspace, "test-host", "codex", launchd_ok
+            )
+            self.assertEqual(missing["status"], "down")
+            self.assertIn("state file is missing", missing["detail"])
+
+            state = workspace / "state" / "cron-runner-state.json"
+            state.parent.mkdir(parents=True)
+            state.write_text("{}")
+            with mock.patch.object(Path, "stat", side_effect=OSError("denied")):
+                unreadable = health.check_cron_runner(
+                    workspace, "test-host", "codex", launchd_ok
+                )
+            self.assertEqual(unreadable["status"], "down")
+            self.assertIn("unreadable", unreadable["detail"])
 
 
 if __name__ == "__main__":
