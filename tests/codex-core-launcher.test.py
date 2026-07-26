@@ -24,13 +24,20 @@ class CodexCoreLauncherTests(unittest.TestCase):
             "src/agent/codex/cli/start-cli.sh",
             "src/agent/codex/cli/task-notifier.sh",
             "src/agent/start-cli.sh",
+            "src/util_paths.py",
             "src/watch-tasks-stream.sh",
+            "src/workspace_default.py",
             "src/sutando_config.py",
             "scripts/sutando-config.sh",
         ):
             target = self.root / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REAL_REPO / rel, target)
+        reconciler = REAL_REPO / "skills/schedule-crons/scripts/reconcile_launchd.py"
+        if reconciler.exists():
+            target = self.root / "skills/schedule-crons/scripts/reconcile_launchd.py"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(reconciler, target)
         monitor = self.root / "src/core-input-watch.py"
         monitor.write_text(
             "import os, sys\n"
@@ -51,6 +58,11 @@ class CodexCoreLauncherTests(unittest.TestCase):
         self.bin.mkdir()
         self._write_exe("codex", '#!/bin/bash\n[ "${1:-}" = login ] && exit 0\nexit 0\n')
         self._write_exe("fswatch", '#!/bin/bash\nexit 0\n')
+        self._write_exe("uname", '#!/bin/bash\nprintf "Darwin\\n"\n')
+        self._write_exe("launchctl", '#!/bin/bash\n[ "${1:-}" = print ] && exit 1\nexit 0\n')
+        installer = self.root / "src/install-cron-runner-launchd.sh"
+        installer.write_text('#!/bin/bash\nprintf "installed\\n" >> "$INSTALL_LOG"\n')
+        installer.chmod(0o755)
         self._write_exe("tmux", '''#!/bin/bash
 printf '%s\\n' "$*" >> "$TMUX_LOG"
 [ "${1:-}" = -S ] && shift 2
@@ -85,6 +97,8 @@ exit 0
             "HOME": str(Path(self.tmp.name) / "home"),
             "SUTANDO_CORE_RUNTIME": "codex",
             "MONITOR_LOG": str(Path(self.tmp.name) / "monitor.log"),
+            "INSTALL_LOG": str(Path(self.tmp.name) / "install.log"),
+            "SUTANDO_HOST_LABEL": "test-host",
         })
         env.update(env_extra or {})
         return subprocess.run(
@@ -101,6 +115,8 @@ exit 0
             "HOME": str(Path(self.tmp.name) / "home"),
             "SUTANDO_CORE_RUNTIME": "codex",
             "MONITOR_LOG": str(Path(self.tmp.name) / "monitor.log"),
+            "INSTALL_LOG": str(Path(self.tmp.name) / "install.log"),
+            "SUTANDO_HOST_LABEL": "test-host",
         })
         env.update(env_extra or {})
         master, slave = pty.openpty()
@@ -162,6 +178,31 @@ exit 0
             time.sleep(0.01)
         self.assertTrue(monitor_log.exists(), "managed core-input monitor did not start")
         self.assertIn("--session sutando-core", monitor_log.read_text())
+
+    def test_reconciles_session_crons_before_codex_launch(self):
+        workspace = self.root / "workspace"
+        config = workspace / "hosts" / "test-host" / "crons.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps([
+            {"name": "main-loop", "cron": "*/5 * * * *", "prompt_skill": "proactive-loop"},
+            {"name": "digest", "cron": "2 6 * * *", "prompt": "run"},
+        ]))
+        before = int(time.time())
+        result = self.run_launcher()
+        after = int(time.time())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entries = json.loads(config.read_text())
+        self.assertNotIn("launchd", entries[0])
+        self.assertIs(entries[1]["launchd"], True)
+        state = json.loads((workspace / "state/cron-runner-state.json").read_text())
+        self.assertGreaterEqual(state["digest"], before)
+        self.assertLessEqual(state["digest"], after)
+        self.assertEqual(
+            (Path(self.tmp.name) / "install.log").read_text().strip(),
+            "installed",
+        )
+        self.assertIn("durable schedules", result.stdout)
 
     def test_restart_kills_core_and_notifier_before_launch(self):
         result = self.run_launcher("--restart")

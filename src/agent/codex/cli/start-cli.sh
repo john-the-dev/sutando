@@ -104,6 +104,33 @@ ensure_core_monitor() {
     >/tmp/core-input-watch.log 2>&1 &
 }
 
+ensure_durable_schedules() {
+  # Codex has no session CronCreate surface. Reconcile ordinary scheduled
+  # prompts onto the existing OS runner before the core session is reused or
+  # created, otherwise a runtime switch/restart leaves crons.json populated
+  # while every custom schedule silently stops.
+  [ "$(uname -s)" = "Darwin" ] || return 0
+  local result service
+  result="$(python3 "$REPO/skills/schedule-crons/scripts/reconcile_launchd.py")" || {
+    echo "  ⚠ durable schedule reconciliation failed" >&2
+    return 0
+  }
+  case "$result" in
+    *"runner_needed=1"*)
+      service="gui/$(id -u)/com.sutando.cron-runner"
+      if ! launchctl print "$service" >/dev/null 2>&1; then
+        bash "$REPO/src/install-cron-runner-launchd.sh" >/dev/null 2>&1 || {
+          echo "  ⚠ durable schedule runner failed to install" >&2
+          return 0
+        }
+      fi
+      echo "  ✓ durable schedules ($result)"
+      ;;
+  esac
+}
+
+ensure_durable_schedules
+
 if [ "${1:-}" = "--restart" ]; then
   tmux_available && tmux -S "$TMUX_SOCKET" kill-session -t "=$WATCHER_SESSION" 2>/dev/null || true
   tmux_available && tmux -S "$TMUX_SOCKET" kill-session -t "=$SESSION" 2>/dev/null || true

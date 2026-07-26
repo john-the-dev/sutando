@@ -11,6 +11,11 @@ adapts Sutando's streaming file watcher to Codex by submitting one prompt per
 task-file event into the core pane. It runs in a separate managed tmux session
 so it survives launcher exit and is restarted together with the core.
 
+On macOS the launcher also reconciles fixed `crons.json` schedules onto the
+OS-backed cron runner before starting or reusing the Codex session. Codex has
+no session `CronCreate` surface, so leaving those entries session-owned would
+make them silently stop after a runtime switch or restart.
+
 Codex authentication and settings are selected through the `type=codex`
 entry in `core_config_dirs` (`CODEX_HOME` by default). The tracked default uses
 the user's existing `~/.codex`, so switching runtimes does not copy tokens or
