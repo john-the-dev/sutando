@@ -358,6 +358,42 @@ def test_run_no_state_catches_up():
         check(emitted == ["daily"], "no-state first run catches up the missed daily cron")
 
 
+def test_run_acquires_shared_state_lock():
+    """run() must take the shared state lock around its read-modify-write, so a
+    concurrent Codex reconciler can neither clobber the tick's state write-back
+    nor have its just-seeded migration boundary dropped. Proven by holding the
+    same lock and observing run() block until it is released."""
+    import json
+    import threading
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        cr.TASKS_DIR = root / "tasks"
+        cr.CRONS_FILE = root / "crons.json"
+        cr.STATE_FILE = root / "state" / "cron-runner-state.json"
+        cr.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cr.CRONS_FILE.write_text(json.dumps([
+            {"name": "digest", "cron": "2 6 * * *", "prompt": "x", "launchd": True},
+        ]))
+        now = _epoch(2026, 7, 2, 6, 2)
+        completed = threading.Event()
+
+        def tick():
+            cr.run(now_epoch=now)
+            completed.set()
+
+        # Hold the shared lock; run() must block before it can read/write state.
+        with cr._state_lock(cr.STATE_FILE):
+            worker = threading.Thread(target=tick)
+            worker.start()
+            check(not completed.wait(0.3),
+                  "run() blocks while the shared state lock is held")
+        worker.join(2)
+        check(completed.is_set(), "run() completes once the shared lock is released")
+        # And the tick still did its job once unblocked.
+        files = list(cr.TASKS_DIR.glob("task-cron-*.txt"))
+        check(len(files) == 1, "run() emits the due entry after acquiring the lock")
+
+
 def _run_all():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -9,13 +9,15 @@ the durable runner cannot replay a backlog of old actions.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 
 def launchd_eligible(entry: dict[str, Any]) -> bool:
@@ -28,6 +30,28 @@ def launchd_eligible(entry: dict[str, Any]) -> bool:
         return False
     prompt = str(entry.get("prompt") or "").strip()
     return prompt != "/proactive-loop"
+
+
+@contextmanager
+def _state_lock(state_file: Path) -> Iterator[None]:
+    """Exclusive lock serializing the ``cron-runner-state.json`` read-modify-write
+    against a running launchd cron-runner.
+
+    This reconciler and ``src/cron-runner.py``'s ``run()`` lock the SAME path
+    (``<state_file>.lock``). Without it, this reconciler could seed a migration
+    boundary that an already-in-flight runner tick then clobbers with its stale
+    full-dict write-back — dropping the boundary and letting the next tick
+    replay a whole ``MAX_CATCHUP_SECONDS`` window of daily crons. The lock makes
+    the two read-modify-write sections mutually exclusive so the boundary
+    always survives. Peer: ``cron-runner._state_lock``."""
+    lock_path = state_file.parent / (state_file.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -51,29 +75,38 @@ def reconcile(crons_file: Path, state_file: Path, now: Optional[int] = None) -> 
     if not isinstance(crons, list):
         raise ValueError(f"{crons_file} must contain a JSON list")
 
-    try:
-        state = json.loads(state_file.read_text())
-    except FileNotFoundError:
-        state = {}
-    if not isinstance(state, dict):
-        raise ValueError(f"{state_file} must contain a JSON object")
-
     boundary = int(time.time() if now is None else now)
     migrated: list[str] = []
-    for entry in crons:
-        if not isinstance(entry, dict) or not launchd_eligible(entry):
-            continue
-        name = entry.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        state.setdefault(name, boundary)
-        migrated.append(name)
+
+    # Serialize the state read-modify-write against a concurrent launchd tick so
+    # the seeded boundary cannot be clobbered by the runner's write-back (and
+    # vice-versa). See _state_lock for the race this closes.
+    with _state_lock(state_file):
+        try:
+            state = json.loads(state_file.read_text())
+        except FileNotFoundError:
+            state = {}
+        if not isinstance(state, dict):
+            raise ValueError(f"{state_file} must contain a JSON object")
+
+        for entry in crons:
+            if not isinstance(entry, dict) or not launchd_eligible(entry):
+                continue
+            name = entry.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            state.setdefault(name, boundary)
+            migrated.append(name)
+
+        if migrated:
+            # Ordering is the safety property: a launchd tick can see either the
+            # old session-owned config or the new config plus an initialized
+            # boundary, never launchd ownership with an absent 24h catch-up
+            # state. The state write happens under the lock so a runner tick
+            # cannot interleave a stale write-back between it and the crons flip.
+            _atomic_json(state_file, state)
 
     if migrated:
-        # Ordering is the safety property: a launchd tick can see either the
-        # old session-owned config or the new config plus an initialized
-        # boundary, never launchd ownership with an absent 24h catch-up state.
-        _atomic_json(state_file, state)
         for entry in crons:
             if isinstance(entry, dict) and entry.get("name") in migrated:
                 entry["launchd"] = True

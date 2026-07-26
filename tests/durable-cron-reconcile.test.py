@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -135,6 +136,65 @@ class DurableCronReconcileTest(unittest.TestCase):
                 output.getvalue().strip(),
                 "runner_needed=1 migrated=1 names=digest",
             )
+    def test_inflight_runner_write_does_not_clobber_migration_boundary(self):
+        """Regression (state-overwrite race): a launchd tick that read state
+        BEFORE reconciliation, then writes its stale snapshot back, must not
+        drop the boundary the reconciler seeds. The shared `_state_lock`
+        serializes the two read-modify-writes so the boundary always survives —
+        without it the runner's write-back clobbers the seed and the next tick
+        replays a full MAX_CATCHUP window of daily crons."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            crons = root / "crons.json"
+            state = root / "state.json"
+            crons.write_text(json.dumps([
+                {"name": "digest", "cron": "2 6 * * *", "prompt": "x"},
+            ]))
+
+            runner_holding = threading.Event()
+            runner_may_write = threading.Event()
+
+            def inflight_runner():
+                # Mirror cron-runner.run(): hold the shared lock across a
+                # read-modify-write. This tick read an EMPTY snapshot (before the
+                # reconciler seeded anything) and writes it straight back.
+                with reconcile_launchd._state_lock(state):
+                    snapshot: dict = {}
+                    runner_holding.set()
+                    runner_may_write.wait(2)
+                    state.write_text(json.dumps(snapshot))
+
+            runner = threading.Thread(target=inflight_runner)
+            runner.start()
+            self.assertTrue(runner_holding.wait(2))
+
+            rec_result: dict = {}
+            rec_done = threading.Event()
+
+            def do_reconcile():
+                rec_result["r"] = reconcile_launchd.reconcile(crons, state, now=999)
+                rec_done.set()
+
+            reconciler = threading.Thread(target=do_reconcile)
+            reconciler.start()
+            # Reconcile must BLOCK on the lock while the runner holds it — it
+            # cannot slip its seed between the runner's read and write-back.
+            self.assertFalse(
+                rec_done.wait(0.3),
+                "reconcile should block while the runner holds the state lock",
+            )
+
+            # Release the runner: it writes its stale {} and frees the lock.
+            runner_may_write.set()
+            runner.join(2)
+            reconciler.join(2)
+
+            self.assertTrue(rec_done.is_set())
+            # Runner clobbered state to {} first; reconcile then re-seeded the
+            # boundary on top. The boundary MUST be present — proving the lock
+            # prevented the lost update that would trigger a backlog replay.
+            self.assertEqual(json.loads(state.read_text()), {"digest": 999})
+            self.assertEqual(rec_result["r"]["migrated"], ["digest"])
 
 
 if __name__ == "__main__":

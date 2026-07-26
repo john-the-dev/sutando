@@ -32,13 +32,16 @@ never a backlog storm.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 # --- workspace + host resolution (mirror the rest of the codebase) ----------
 # This file lives in src/, so its own directory IS the src/ dir — reach the
@@ -170,6 +173,47 @@ def _load_json(path: Path, default):
         return default
 
 
+@contextmanager
+def _state_lock(state_file: Path) -> Iterator[None]:
+    """Exclusive lock serializing the ``cron-runner-state.json`` read-modify-write
+    against the Codex reconciler.
+
+    Both this runner's :func:`run` and
+    ``skills/schedule-crons/scripts/reconcile_launchd.py`` lock the SAME path
+    (``<state_file>.lock``). Without it, a launchd tick that read state *before*
+    the reconciler seeded a migration boundary would write its stale full-dict
+    snapshot back *after*, silently dropping the boundary — the next tick then
+    sees ``launchd: true`` with no recorded fire and replays a whole
+    ``MAX_CATCHUP_SECONDS`` window of daily crons (the backlog storm the
+    reconciler's docstring promises to prevent). The lock makes the two
+    read-modify-write sections mutually exclusive, so the boundary always
+    survives regardless of ordering. Peer: ``reconcile_launchd._state_lock``."""
+    lock_path = state_file.parent / (state_file.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _atomic_write_text(path: Path, body: str) -> None:
+    """Write ``body`` to ``path`` atomically (temp file + ``os.replace``) so a
+    crash mid-write can never leave a torn/empty state file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def _sanitize_name(name: str) -> str:
     """Slugify a cron name for use in a task ID and filename.
 
@@ -233,32 +277,36 @@ def run(now_epoch: Optional[int] = None) -> list:
     """One tick. Returns the list of cron names emitted this tick."""
     now_epoch = int(now_epoch if now_epoch is not None else time.time())
     crons = _load_json(CRONS_FILE, [])
-    state = _load_json(STATE_FILE, {})
     emitted = []
 
-    for entry in crons:
-        if not entry.get("launchd"):
-            continue  # session-owned or not reliability-critical — skip
-        name = entry.get("name")
-        expr = entry.get("cron")
-        if not name or not expr:
-            continue
-        # When state is absent (first run or after reinstall), look back the
-        # full catch-up window so a daily cron missed during a restart or
-        # sleep cycle is still emitted on the next tick.
-        last = int(state.get(name, now_epoch - MAX_CATCHUP_SECONDS))
-        try:
-            if due_since(expr, last, now_epoch):
-                emit_task(name, entry)
-                emitted.append(name)
-        except ValueError as e:
-            print(f"cron-runner: skipping {name}: {e}", file=sys.stderr)
-            continue
-        state[name] = now_epoch
+    # Hold the shared state lock across the whole read-modify-write so a
+    # concurrent reconciler (Codex boot) can neither observe a half-written
+    # state nor have its just-seeded migration boundary clobbered by our
+    # write-back. See _state_lock for the race this closes.
+    with _state_lock(STATE_FILE):
+        state = _load_json(STATE_FILE, {})
+        for entry in crons:
+            if not entry.get("launchd"):
+                continue  # session-owned or not reliability-critical — skip
+            name = entry.get("name")
+            expr = entry.get("cron")
+            if not name or not expr:
+                continue
+            # When state is absent (first run or after reinstall), look back the
+            # full catch-up window so a daily cron missed during a restart or
+            # sleep cycle is still emitted on the next tick.
+            last = int(state.get(name, now_epoch - MAX_CATCHUP_SECONDS))
+            try:
+                if due_since(expr, last, now_epoch):
+                    emit_task(name, entry)
+                    emitted.append(name)
+            except ValueError as e:
+                print(f"cron-runner: skipping {name}: {e}", file=sys.stderr)
+                continue
+            state[name] = now_epoch
 
-    if crons:  # only persist once we've actually read a config
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(state))
+        if crons:  # only persist once we've actually read a config
+            _atomic_write_text(STATE_FILE, json.dumps(state))
     return emitted
 
 
