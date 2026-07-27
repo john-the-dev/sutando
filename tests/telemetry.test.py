@@ -451,11 +451,11 @@ def run():
         passed += 1
         print("ok   core_model collapses PII/high-cardinality alias to 'unknown'")
 
-    # 17c) token_usage status is constrained to the four documented categories;
+    # 17c) token_usage status is constrained to the five documented categories;
     #      arbitrary quota-script output becomes 'unknown', not telemetry.
     with tempfile.TemporaryDirectory() as td:
         mod = _load(Path(td), key="phc_live")
-        for ok in ("allowed", "allowed_warning", "rejected", "unknown"):
+        for ok in ("allowed", "allowed_warning", "rejected", "unknown", "unavailable"):
             assert mod._coarse_status(ok) == ok, ok
         assert mod._coarse_status("ALLOWED") == "allowed"                     # normalized
         assert mod._coarse_status("rate limited: 429 for tenant acme") == "unknown"

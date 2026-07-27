@@ -179,8 +179,9 @@ def _emit_token_usage() -> None:  # pragma: no cover — network + optional-skil
     anonymous ``token_usage`` telemetry event (bucketed utilization + status).
 
     Optional-skill safe: if the quota-tracker script isn't installed or the read
-    fails, this quietly does nothing (the core boots fine without it). Never
-    raises to the caller.
+    fails, emit an ``unavailable`` categorical event with sentinel percentages
+    so fleet views can distinguish "cannot report" from "no usage." Never raises
+    to the caller.
     """
     try:
         import subprocess
@@ -196,14 +197,27 @@ def _emit_token_usage() -> None:  # pragma: no cover — network + optional-skil
             return
         script = claude_home_path("skills", "quota-tracker", "scripts", "read-quota.py")
         if not script.exists():
+            token_usage(status="unavailable")
             return
-        out = subprocess.run(
-            [sys.executable, str(script), "--json"],
-            capture_output=True, text=True, timeout=15,
-        )
+        try:
+            out = subprocess.run(
+                [sys.executable, str(script), "--json"],
+                capture_output=True, text=True, timeout=15,
+            )
+        except Exception:
+            token_usage(status="unavailable")
+            return
         if out.returncode != 0 or not out.stdout.strip():
+            token_usage(status="unavailable")
             return
-        data = json.loads(out.stdout)
+        try:
+            data = json.loads(out.stdout)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            token_usage(status="unavailable")
+            return
+        if not isinstance(data, dict):
+            token_usage(status="unavailable")
+            return
         rem5 = data.get("remaining_5h_pct")
         rem7 = data.get("remaining_7d_pct")
         util5 = (100 - rem5) if isinstance(rem5, (int, float)) else None

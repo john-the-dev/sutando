@@ -16,7 +16,7 @@ Only bucketed / categorical **product events**:
 | `skill_invoked` | `skill` | Skill adoption |
 | `voice_session` | `duration_bucket` (`<30s` / `30-120s` / `>120s`) | Voice usage |
 | `error` | `type` | Reliability (type only) |
-| `token_usage` | `util_5h_pct`, `util_7d_pct` (Anthropic rate-limit utilization, bucketed to nearest 5%), `status` | Aggregate quota/token consumption trend (the accessible usage signal — raw token counts are never read) |
+| `token_usage` | `util_5h_pct`, `util_7d_pct` (Anthropic rate-limit utilization, bucketed to nearest 5%), `status` (`unavailable` when the local quota snapshot cannot be read) | Aggregate quota/token consumption trend and reporting coverage (the accessible usage signal — raw token counts are never read) |
 
 Every event **also** carries two categorical properties so any metric can be
 broken down by them: `surface` (`desktop`/`oss`) and `core_model` (the model id

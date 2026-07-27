@@ -230,15 +230,35 @@ class TestTokenUsageOptOutGate(unittest.TestCase):
         import telemetry
         import util_paths
         from unittest import mock
-        # enabled + a present script => the reader IS invoked (contrast case).
+        # enabled + a present script => the reader IS invoked. A failed read
+        # still emits an unavailable denominator event rather than disappearing.
         fake = mock.Mock()
         fake.exists.return_value = True
-        completed = mock.Mock(returncode=1, stdout="")  # non-zero => early return, no token_usage
+        completed = mock.Mock(returncode=1, stdout="")
         with mock.patch.object(telemetry, "enabled", return_value=True), \
+                mock.patch.object(telemetry, "token_usage") as token_usage, \
                 mock.patch.object(util_paths, "claude_home_path", return_value=fake), \
                 mock.patch("subprocess.run", return_value=completed) as run:
             self.mod._emit_token_usage()
         run.assert_called_once()
+        token_usage.assert_called_once_with(status="unavailable")
+
+    def test_non_json_quota_output_emits_unavailable(self):
+        import telemetry
+        import util_paths
+        from unittest import mock
+        fake = mock.Mock()
+        fake.exists.return_value = True
+        completed = mock.Mock(
+            returncode=0,
+            stdout="No quota-state.json found. Is the credential proxy running?",
+        )
+        with mock.patch.object(telemetry, "enabled", return_value=True), \
+                mock.patch.object(telemetry, "token_usage") as token_usage, \
+                mock.patch.object(util_paths, "claude_home_path", return_value=fake), \
+                mock.patch("subprocess.run", return_value=completed):
+            self.mod._emit_token_usage()
+        token_usage.assert_called_once_with(status="unavailable")
 
 
 if __name__ == "__main__":

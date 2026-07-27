@@ -358,10 +358,12 @@ def _bucket_pct(x) -> int:
     return int(round(v / 5.0) * 5)
 
 
-# The four documented rate-limit statuses. The value arrives as free text from
+# The five documented rate-limit statuses. The value arrives as free text from
 # the quota script, so validate it here — anything unexpected becomes ``unknown``
 # rather than high-cardinality or sensitive telemetry (CR #2148, qingyun-wu).
-_TOKEN_STATUSES = frozenset({"allowed", "allowed_warning", "rejected", "unknown"})
+_TOKEN_STATUSES = frozenset(
+    {"allowed", "allowed_warning", "rejected", "unknown", "unavailable"}
+)
 
 
 def _coarse_status(status: str) -> str:
@@ -375,8 +377,9 @@ def token_usage(util_5h_pct=None, util_7d_pct=None, status: str = "unknown") -> 
     usage signal — raw token counts aren't exposed to the core). Values are
     bucketed to the nearest 5% so they stay coarse aggregates, never a
     fingerprint. ``status`` is the categorical rate-limit status
-    (``allowed`` / ``allowed_warning`` / ``rejected`` / ``unknown``), validated
-    against that allowlist so unexpected script output can't leak. No PII.
+    (``allowed`` / ``allowed_warning`` / ``rejected`` / ``unknown`` /
+    ``unavailable``), validated against that allowlist so unexpected script
+    output can't leak. No PII.
     Emitted best-effort by the heartbeat once per boot; safe to call anywhere.
     """
     capture("token_usage", {
