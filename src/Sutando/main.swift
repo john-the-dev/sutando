@@ -10,7 +10,7 @@ import ApplicationServices
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     // Hotkeys are configurable via ~/.config/sutando/hotkeys.json.
-    // Defaults: drop_context=⌃C, drop_screenshot=⌃S, toggle_voice=⌃V, toggle_mute=⌃M
+    // Hotkey defaults are published in state/hotkeys.json (see PR #1920/#1924).
     var hotKeyRefs: [EventHotKeyRef?] = []  // one entry per registered hotkey
     var hotKeyActions: [UInt32: String] = [:]  // hotkey id → action name
     var lastDropTime: Date = .distantPast
@@ -226,7 +226,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// enough — a missed notification left no way to tell whether the
     /// recorder was still rolling.
     func setRecordingIndicator(_ on: Bool) {
+        // Keep the ⌃R toggle state in lockstep with the indicator so a recording
+        // started/stopped externally (observed via the Darwin notification) also
+        // updates behavioral state — otherwise the next ⌃R mis-computes `starting`
+        // and needs a double-press to stop. Written on the main queue alongside the
+        // menu update so notification callbacks never touch it off-main. (CR: john-the-dev)
         DispatchQueue.main.async {
+            self.isRecordingVideo = on
             guard let item = self.videoClipMenuItem else { return }
             let glyph = (item.representedObject as? String) ?? ""
             // Same leading-marker convention as the Mode rows (● = active):
@@ -234,6 +240,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             item.title = on ? "🔴 Drop Video Clip — recording… \(glyph)"
                             : "Drop Video Clip \(glyph)"
         }
+    }
+
+    /// Darwin-notification observers for recording state (push, not poll).
+    /// The capture server posts com.sutando.recording.on/.off via notifyutil
+    /// whenever recording starts or stops, whoever started it.
+    func registerRecordingStateObservers() {
+        let dn = CFNotificationCenterGetDarwinNotifyCenter()
+        let me = Unmanaged.passUnretained(self).toOpaque()
+        CFNotificationCenterAddObserver(dn, me, { _, observer, _, _, _ in
+            guard let observer = observer else { return }
+            Unmanaged<AppDelegate>.fromOpaque(observer).takeUnretainedValue().setRecordingIndicator(true)
+        }, "com.sutando.recording.on" as CFString, nil, .deliverImmediately)
+        CFNotificationCenterAddObserver(dn, me, { _, observer, _, _, _ in
+            guard let observer = observer else { return }
+            Unmanaged<AppDelegate>.fromOpaque(observer).takeUnretainedValue().setRecordingIndicator(false)
+        }, "com.sutando.recording.off" as CFString, nil, .deliverImmediately)
     }
 
     func setupMenuBar() {
@@ -351,6 +373,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Timer.scheduledTimer(withTimeInterval: 300.0, repeats: true) { [weak self] _ in
             self?.checkWatcher()
         }
+
+        // Recording-indicator sync (Susan 2026-07-22, push not poll): the
+        // capture server Darwin-notifies com.sutando.recording.on/.off on
+        // every state change (⌃R, watcher-started sessions, watchdog
+        // auto-stop) — observe those and mirror onto the Drop Video Clip row.
+        registerRecordingStateObservers()
 
         // Contextual chips: every 120s, refresh contextual-chips.json from
         // cheap mechanical sources (open PRs, top pending question, recent
@@ -558,8 +586,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // apart, so the throttle never gated. Flood-protection is now solely
         // the watcherKeystrokesQueued() check above + the Timer interval.)
 
-        // If Claude Code is running inside the `sutando-core` tmux session
-        // (launch via src/agent/claude/cli/start-cli.sh), send the word `watcher` to
+        // If the core CLI is running inside the `sutando-core` tmux session
+        // (launch via src/agent/start-cli.sh), send the word `watcher` to
         // its pane as if Chi typed it. The CLI parses that as a restart
         // prompt and starts the watcher via its own run_in_background Bash
         // — so the watcher's stdout routes through the task-notification
@@ -573,7 +601,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Fallback: Claude Code isn't in the expected tmux session.
         // Notify so Chi can restart manually.
-        notify("Sutando", "Task watcher is down — prompt the CLI to restart it (or start CLI via src/agent/claude/cli/start-cli.sh)")
+        notify("Sutando", "Task watcher is down — prompt the CLI to restart it (or start CLI via src/agent/start-cli.sh)")
         logToFile("watcher dead; notification fired (tmux session not found)")
     }
 
@@ -1651,6 +1679,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let url = URL(string: "http://localhost:7845/capture") else { return }
         var req = URLRequest(url: url)
         req.timeoutInterval = 5
+        // /capture requires a shared token (same gate as /capture-video).
+        let tokenPath = NSString(string: "~/.config/sutando/screen-capture-token").expandingTildeInPath
+        if let token = try? String(contentsOfFile: tokenPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
+            req.setValue(token, forHTTPHeaderField: "X-Sutando-Capture-Token")
+        }
         URLSession.shared.dataTask(with: req) { [self] data, _, error in
             if let error = error {
                 notify("Sutando", "Screenshot drop failed: \(error.localizedDescription)")
@@ -1728,7 +1761,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if starting {
                 // Recording began — flip state; nothing to drop until stop.
                 if status == "recording" || status == "already_recording" {
-                    isRecordingVideo = true
                     setRecordingIndicator(true)
                     appendLog(logFile, "[\(timestamp)] dropVideoClip: recording started")
                 } else {
@@ -1738,7 +1770,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             // Stopping — flip state and drop the produced clip.
-            isRecordingVideo = false
             setRecordingIndicator(false)
             guard status == "ok", let path = json["path"] as? String else {
                 notify("Sutando", "Recording stopped, no clip (\(status))")
@@ -2392,8 +2423,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Restart the Claude Code core session (sutando-core tmux session).
-    /// Invokes src/agent/claude/cli/start-cli.sh --restart which kills any existing
+    /// Restart the selected core CLI session (sutando-core tmux session).
+    /// Invokes src/agent/start-cli.sh --restart which kills any existing
     /// session and starts fresh detached. User can re-attach via
     /// "Open Core CLI" in the menu (or `tmux -S /tmp/sutando-tmux.sock
     /// attach -t sutando-core` from a terminal).
@@ -2407,10 +2438,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// self-invocation is not.
     ///
     /// Per Chi 2026-05-05: voice-agent restart explicitly excluded —
-    /// this only restarts the Claude Code CLI session.
+    /// this only restarts the selected core CLI session.
     @objc func restartCore() {
         notify("Sutando", "Restarting Core CLI…")
-        let script = repoRoot + "/src/agent/claude/cli/start-cli.sh"
+        let script = repoRoot + "/src/agent/start-cli.sh"
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/bash")
         proc.arguments = [script, "--restart"]

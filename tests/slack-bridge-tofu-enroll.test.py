@@ -354,4 +354,25 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _rc = main()
+    # Quarantine an intermittent interpreter-teardown SIGSEGV (exit 139): the
+    # imported slack-bridge module pulls in single_instance/threading state that
+    # can segfault during CPython finalization AFTER all tests have already
+    # passed — a probabilistic flake that fails otherwise-green CI runs (hit
+    # #2118 twice + #2124 in the 2026-07-15 window). Flush, then os._exit to skip
+    # the finalization that crashes; the test result (_rc) is unaffected.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # os._exit() below skips atexit handlers — including coverage.py's data
+    # writer — so under `coverage run` this file would record 0% and its
+    # exercised src/slack-bridge.py lines show as uncovered in the diff gate
+    # (spurious failures on any slack-bridge PR). Flush the active coverage
+    # session explicitly before the hard exit.
+    try:
+        import coverage
+        _cov = coverage.Coverage.current()
+        if _cov is not None:
+            _cov.save()
+    except Exception:
+        pass
+    os._exit(_rc)
