@@ -6,10 +6,11 @@ leaks it to every member (owner catch 2026-07-17). Guards:
 
   1. Owner reachable  -> code goes to the owner DM; the channel message is
      generic and does NOT contain the code.
-  2. No owner reachable (fetch_user raises / empty allowFrom) -> fail-SAFE
-     fallback: a generic, code-free channel notice (the code is NOT posted to
-     the shared channel even here — #2158 CR). Pairing stays completable via
-     the code persisted to access.json `pending` + the owner-only bridge log.
+  2. No enrolled owner + private DM -> code returns in that DM so the first
+     owner can self-pair.
+  3. An enrolled owner exists but is unreachable -> fail-SAFE fallback: a
+     generic, code-free channel notice (the code is never posted to the shared
+     channel — #2158 CR).
 
 Run: python3 tests/discord-bridge-pairing-dm.test.py   (exit 0 pass / 1 fail)
 """
@@ -78,6 +79,14 @@ class FakeMessageable:
         self.sent.append(text)
 
 
+class FakeDMMessageable(discord.DMChannel):
+    def __init__(self):
+        self.sent: list[str] = []
+
+    async def send(self, text):
+        self.sent.append(text)
+
+
 class FakeClient:
     def __init__(self, owner):
         self.owner = owner
@@ -137,13 +146,15 @@ check("fallback still notifies the channel (one message)", len(channel2.sent) ==
 check("fallback channel message does NOT contain the code (no leak in the fallback)",
       all(CODE not in m for m in channel2.sent), f"leaked: {channel2.sent}")
 
-# ── Case 3: empty allowFrom (pre-TOFU) → fallback without fetch attempts ─────
-channel3 = FakeMessageable(name="pr-review")
+# ── Case 3: empty allowFrom + private DM → first owner can self-pair ──────────
+channel3 = FakeDMMessageable()
 with patch.object(mod, "client", FakeClient(owner)):
     route3 = asyncio.run(
         mod._deliver_pairing_prompt(channel3, CODE, "newuser", "42", set())
     )
-check("empty allowFrom routes to channel fallback", route3 == "channel")
+check("empty allowFrom in a DM returns the code privately", route3 == "dm")
+check("fresh-install DM contains the pairing code",
+      any(CODE in m for m in channel3.sent), f"{channel3.sent}")
 
 # ── Case 4: on_message pairing branch drives _deliver_pairing_prompt ──────────
 # The isolation cases above exercise _deliver_pairing_prompt directly; this one
