@@ -140,7 +140,10 @@ exit 0
                 os.close(slave)
 
     def test_launches_codex_and_managed_task_notifier(self):
-        result = self.run_launcher(env_extra={"SUTANDO_CORE_MODEL": "gpt-test"})
+        result = self.run_launcher(env_extra={
+            "SUTANDO_CORE_MODEL": "gpt-test",
+            "SUTANDO_SELF_DEVELOPMENT_ENABLED": "0",
+        })
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.log.read_text()
         self.assertIn("new-session -d -s sutando-core", calls)
@@ -152,6 +155,7 @@ exit 0
         self.assertIn("new-session -d -s sutando-core-watcher", calls)
         self.assertIn("task-notifier.sh", calls)
         self.assertIn("CODEX_HOME=", calls)
+        self.assertIn("-e SUTANDO_SELF_DEVELOPMENT_ENABLED=0", calls)
         self.assertIn("has-session -t =sutando-core", calls)
         self.assertIn("has-session -t =sutando-core-watcher", calls)
 
