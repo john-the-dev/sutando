@@ -30,6 +30,35 @@ test('parseTaskSource reads the surface bucket that task_processed telemetry is 
 	assert.strictEqual(parseTaskSource('id: t\nresource: pool\nsource: phone\n'), 'phone');
 });
 
+test('context-drop writer emits telemetry from the exact serialized task body', () => {
+	const src = readFileSync(
+		join(import.meta.dirname ?? '.', '..', 'src', 'task-bridge.ts'),
+		'utf-8',
+	);
+	assert.match(
+		src,
+		/writeFileSync\([\s\S]*?taskContent,[\s\S]*?\);\s*emitTaskProcessed\(taskContent\);/,
+	);
+});
+
+test('phone telemetry child errors are handled and cannot crash a live call', () => {
+	const src = readFileSync(
+		join(
+			import.meta.dirname ?? '.',
+			'..',
+			'skills',
+			'phone-conversation',
+			'scripts',
+			'conversation-server.ts',
+		),
+		'utf-8',
+	);
+	assert.match(
+		src,
+		/spawn\('python3', \[telemetryPy, 'task_processed', 'phone'\][\s\S]*?\.on\('error', \(\) => \{[\s\S]*?\}\)[\s\S]*?\.unref\(\)/,
+	);
+});
+
 test('LocalTaskBackend.submitTask is byte-identical to the pre-seam write', () => {
 	const dir = mkdtempSync(join(tmpdir(), 'deleg-'));
 	const taskDir = join(dir, 'tasks');

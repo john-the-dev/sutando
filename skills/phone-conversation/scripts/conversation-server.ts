@@ -427,7 +427,9 @@ function delegateTask(callSession: CallSession, taskDescription: string): Promis
 	// or delays the live call; source is always "phone" here.
 	try {
 		const telemetryPy = join(dirname(_phoneSkillDir), '..', 'src', 'telemetry.py');
-		spawn('python3', [telemetryPy, 'task_processed', 'phone'], { detached: true, stdio: 'ignore' }).unref();
+		spawn('python3', [telemetryPy, 'task_processed', 'phone'], { detached: true, stdio: 'ignore' })
+			.on('error', () => { /* telemetry must never break the call */ })
+			.unref();
 	} catch { /* telemetry must never break the call */ }
 
 	// Poll for result in background, inject when ready — don't block Gemini
