@@ -29,7 +29,19 @@ def launchd_eligible(entry: dict[str, Any]) -> bool:
     if entry.get("name") == "main-loop" or entry.get("prompt_skill") == "proactive-loop":
         return False
     prompt = str(entry.get("prompt") or "").strip()
-    return prompt != "/proactive-loop"
+    if prompt == "/proactive-loop":
+        return False
+    # A cron-gate.sh-wrapped entry must NOT migrate to launchd. The launchd
+    # runner (src/cron-runner.py) emits its due entry as a ``task-cron-<name>-*.txt``
+    # file into ``<workspace>/tasks/``, and cron-gate.sh defers on ANY
+    # ``task-*.txt`` present — which ``task-cron-*.txt`` matches. Once launchd-owned,
+    # such an entry is delivered as the very queue file the gate reads as "owner
+    # work queued", so it defers on its own delivery vehicle every fire, silently
+    # and permanently. The gate + launchd scopes were disjoint by design
+    # (SKILL.md: launchd = daily-deliverable, cron-gate = sub-daily); keep them so.
+    if "cron-gate.sh" in prompt:
+        return False
+    return True
 
 
 @contextmanager
