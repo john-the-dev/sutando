@@ -16,7 +16,12 @@ REAL_REPO = Path(__file__).resolve().parents[1]
 
 class CodexCoreLauncherTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        # The launcher spawns real detached background processes (the core
+        # monitor and, now, the core heartbeat) that briefly outlive it and may
+        # still be flushing into this ephemeral dir when tearDown runs — that is
+        # by design (they are daemons). Tolerate the resulting cleanup race
+        # ("Directory not empty") instead of failing an otherwise-passing test.
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.tmp.name) / "repo"
         self.bin = Path(self.tmp.name) / "bin"
         self.log = Path(self.tmp.name) / "tmux.log"
