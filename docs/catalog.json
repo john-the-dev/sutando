@@ -8,6 +8,13 @@
       "canonical_for": "documentation navigation and lifecycle metadata",
       "last_verified": "2026-07-22"
     },
+    "docs/architecture-boundaries.md": {
+      "title": "Sutando architecture boundaries",
+      "audience": ["contributors", "maintainers"],
+      "status": "draft",
+      "canonical_for": "proposed core, enterprise, and extension architecture boundaries",
+      "last_verified": "2026-07-27"
+    },
     "docs/adr/0001-pointer-teacher-brain.md": {
       "title": "Pointer Teacher brain: accessibility-first, Gemini-vision fallback",
       "audience": ["contributors", "maintainers"],
@@ -77,6 +84,13 @@
       "status": "canonical",
       "canonical_for": "remote gateway wire protocol",
       "last_verified": null
+    },
+    "docs/runtime/claude-hook-contract-v1.md": {
+      "title": "Claude Code Hook Contract — v1",
+      "audience": ["contributors", "maintainers"],
+      "status": "canonical",
+      "canonical_for": "Claude Code hook event mapping and privacy contract",
+      "last_verified": "2026-07-27"
     },
     "docs/slack-bridge.md": {
       "title": "Slack bridge",

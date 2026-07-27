@@ -92,7 +92,7 @@ def main() -> int:
         result = run(root)
         check("invalid verification date fails", result.returncode == 1 and "last_verified" in result.stderr)
 
-    print("ALL PASS (4 checks)")
+    print("ALL PASS (5 checks)")
     return 0
 
 
