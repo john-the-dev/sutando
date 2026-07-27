@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
+import os
 import subprocess
 import tempfile
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "skills/proactive-loop/scripts/self-development-enabled.py"
@@ -73,6 +77,26 @@ invalid = subprocess.run(
 )
 check("CLI invalid value reports disabled", invalid.stdout.strip() == "disabled")
 check("CLI invalid value warns", "invalid" in invalid.stderr)
+
+
+def run_main(value: str) -> tuple[int, str, str]:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with patch.dict(os.environ, {ENV_NAME: value}, clear=True):
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            result = gate.main()
+    return result, stdout.getvalue(), stderr.getvalue()
+
+
+rc, stdout, stderr = run_main("1")
+check("main enabled path", rc == 0 and stdout.strip() == "enabled" and not stderr)
+rc, stdout, stderr = run_main("0")
+check("main disabled path", rc == 0 and stdout.strip() == "disabled" and not stderr)
+rc, stdout, stderr = run_main("unexpected")
+check(
+    "main invalid path fails closed with warning",
+    rc == 0 and stdout.strip() == "disabled" and "invalid" in stderr,
+)
 
 skill_text = (REPO / "skills/proactive-loop/SKILL.md").read_text(encoding="utf-8")
 check("loop invokes the gate", "self-development-enabled.py" in skill_text)
