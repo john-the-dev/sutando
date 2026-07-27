@@ -60,17 +60,16 @@ class DurableCronReconcileTest(unittest.TestCase):
                 {"existing": 100, "unrelated": 200, "new": 300},
             )
 
-    def test_cron_gate_wrapped_entries_are_not_migrated(self):
-        # A cron-gate.sh-wrapped sub-daily entry must stay session-owned: the
-        # launchd runner emits it as a task-cron-*.txt file that cron-gate.sh's
-        # own task-*.txt predicate reads as "owner work queued", so once
-        # launchd-owned it defers on its own delivery vehicle forever.
+    def test_cron_gate_wrapped_entries_migrate_after_gate_fix(self):
+        # #2335 made cron-gate.sh ignore task-cron-* machine work, so wrapped
+        # schedules can now have the same durable launchd owner as other fixed
+        # crons instead of remaining orphaned on Codex.
         gated = {
             "name": "sync-workspace",
             "cron": "*/30 * * * *",
             "prompt": "Run: bash scripts/cron-gate.sh sync-workspace bash scripts/sync-workspace.sh — sync.",
         }
-        self.assertFalse(reconcile_launchd.launchd_eligible(gated))
+        self.assertTrue(reconcile_launchd.launchd_eligible(gated))
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             crons = root / "crons.json"
@@ -82,11 +81,14 @@ class DurableCronReconcileTest(unittest.TestCase):
 
             result = reconcile_launchd.reconcile(crons, state, now=555)
 
-            self.assertEqual(result["migrated"], ["digest"])
+            self.assertEqual(result["migrated"], ["sync-workspace", "digest"])
             entries = json.loads(crons.read_text())
-            self.assertNotIn("launchd", entries[0])  # gated entry left untouched
+            self.assertIs(entries[0]["launchd"], True)
             self.assertIs(entries[1]["launchd"], True)
-            self.assertEqual(json.loads(state.read_text()), {"digest": 555})
+            self.assertEqual(
+                json.loads(state.read_text()),
+                {"sync-workspace": 555, "digest": 555},
+            )
 
     def test_second_run_is_idempotent(self):
         with tempfile.TemporaryDirectory() as td:

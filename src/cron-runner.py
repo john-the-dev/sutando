@@ -85,10 +85,15 @@ def host_slug() -> str:
 CRONS_FILE = WORKSPACE / "hosts" / host_slug() / "crons.json"
 TASKS_DIR = WORKSPACE / "tasks"
 STATE_FILE = WORKSPACE / "state" / "cron-runner-state.json"
+CORE_ALIVE_FILE = WORKSPACE / "state" / "cores" / f"{host_slug()}.alive"
 
 # Look back at most this far when catching up a missed fire. Bounds work after
 # long downtime and guarantees at most one catch-up emission per entry.
 MAX_CATCHUP_SECONDS = 24 * 3600
+# A short core restart may recover a recent slot, but a morning briefing or
+# other time-sensitive task must not execute hours after its intended time.
+MAX_EMIT_LATENESS_SECONDS = 15 * 60
+CORE_ALIVE_MAX_AGE_SECONDS = 90
 
 
 # --- minimal 5-field cron matcher (no external deps) ------------------------
@@ -149,21 +154,38 @@ def cron_matches(expr: str, t: time.struct_time) -> bool:
     return dom_ok and dow_ok
 
 
-def due_since(expr: str, last_epoch: int, now_epoch: int) -> bool:
-    """Did a fire-minute of ``expr`` occur in (last_epoch, now_epoch]?
+def latest_due_since(expr: str, last_epoch: int, now_epoch: int) -> Optional[int]:
+    """Latest fire-minute of ``expr`` in (last_epoch, now_epoch], if any.
 
     Iterates whole minutes across the window (bounded by MAX_CATCHUP_SECONDS)
-    so a fire that landed while the machine was busy/asleep is still caught on
-    the next tick.
+    so a recent fire that landed during a short restart can still be recovered.
+    Returning the exact slot lets :func:`run` reject stale catch-up work rather
+    than executing a day-old briefing.
     """
     window_start = max(last_epoch, now_epoch - MAX_CATCHUP_SECONDS)
     # Align to the next whole minute after window_start.
     m = (window_start // 60 + 1) * 60
+    latest = None
     while m <= now_epoch:
         if cron_matches(expr, time.localtime(m)):
-            return True
+            latest = m
         m += 60
-    return False
+    return latest
+
+
+def due_since(expr: str, last_epoch: int, now_epoch: int) -> bool:
+    """Compatibility predicate for callers/tests that only need due/not-due."""
+    return latest_due_since(expr, last_epoch, now_epoch) is not None
+
+
+def local_core_alive(now_epoch: Optional[int] = None) -> bool:
+    """Whether this host's core heartbeat is fresh enough to accept work."""
+    now_epoch = float(time.time() if now_epoch is None else now_epoch)
+    try:
+        age = now_epoch - CORE_ALIVE_FILE.stat().st_mtime
+    except OSError:
+        return False
+    return 0 <= age < CORE_ALIVE_MAX_AGE_SECONDS
 
 
 def _load_json(path: Path, default):
@@ -278,6 +300,7 @@ def run(now_epoch: Optional[int] = None) -> list:
     now_epoch = int(now_epoch if now_epoch is not None else time.time())
     crons = _load_json(CRONS_FILE, [])
     emitted = []
+    core_alive = local_core_alive(now_epoch)
 
     # Hold the shared state lock across the whole read-modify-write so a
     # concurrent reconciler (Codex boot) can neither observe a half-written
@@ -297,12 +320,25 @@ def run(now_epoch: Optional[int] = None) -> list:
             # sleep cycle is still emitted on the next tick.
             last = int(state.get(name, now_epoch - MAX_CATCHUP_SECONDS))
             try:
-                if due_since(expr, last, now_epoch):
-                    emit_task(name, entry)
-                    emitted.append(name)
+                due_epoch = latest_due_since(expr, last, now_epoch)
             except ValueError as e:
                 print(f"cron-runner: skipping {name}: {e}", file=sys.stderr)
                 continue
+            if due_epoch is not None:
+                if not core_alive:
+                    # Preserve the previous boundary so a short outage can
+                    # recover this slot after the heartbeat returns.
+                    continue
+                lateness = now_epoch - due_epoch
+                if lateness <= MAX_EMIT_LATENESS_SECONDS:
+                    emit_task(name, entry)
+                    emitted.append(name)
+                else:
+                    print(
+                        f"cron-runner: dropping stale slot for {name} "
+                        f"({lateness}s late)",
+                        file=sys.stderr,
+                    )
             state[name] = now_epoch
 
         if crons:  # only persist once we've actually read a config
