@@ -4,6 +4,17 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+
+# Direct restarts (menu bar, health-check recovery, and manual --restart) do
+# not pass through startup.sh. Load the same repo configuration here so policy
+# switches such as SUTANDO_SELF_DEVELOPMENT_ENABLED survive every launch path.
+if [ -f "$REPO/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$REPO/.env"
+  set +a
+fi
+
 runtime="$(bash "$REPO/scripts/sutando-config.sh" core-runtime)" || {
   echo "start-cli: failed to resolve core runtime" >&2
   exit 1

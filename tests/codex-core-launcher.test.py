@@ -174,6 +174,17 @@ exit 0
         self.assertLess(calls.index("kill-session -t =sutando-core-watcher"),
                         calls.index("new-session -d -s sutando-core"))
 
+    def test_restart_loads_self_development_policy_from_dotenv(self):
+        (self.root / ".env").write_text("SUTANDO_SELF_DEVELOPMENT_ENABLED=0\n")
+        result = self.run_launcher("--restart", env_extra={
+            "SUTANDO_SELF_DEVELOPMENT_ENABLED": "",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "-e SUTANDO_SELF_DEVELOPMENT_ENABLED=0",
+            self.log.read_text(),
+        )
+
     def test_dispatcher_restarts_when_active_runtime_differs(self):
         result = self.run_launcher(env_extra={"TMUX_ACTIVE_RUNTIME": "claude"})
         self.assertEqual(result.returncode, 0, result.stderr)
