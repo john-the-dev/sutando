@@ -16,12 +16,7 @@ REAL_REPO = Path(__file__).resolve().parents[1]
 
 class CodexCoreLauncherTests(unittest.TestCase):
     def setUp(self):
-        # The launcher spawns real detached background processes (the core
-        # monitor and, now, the core heartbeat) that briefly outlive it and may
-        # still be flushing into this ephemeral dir when tearDown runs — that is
-        # by design (they are daemons). Tolerate the resulting cleanup race
-        # ("Directory not empty") instead of failing an otherwise-passing test.
-        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "repo"
         self.bin = Path(self.tmp.name) / "bin"
         self.log = Path(self.tmp.name) / "tmux.log"
@@ -73,6 +68,8 @@ class CodexCoreLauncherTests(unittest.TestCase):
         # Record that it ran; exit immediately so no daemon lingers in the test.
         (self.root / "src/core_heartbeat.py").write_text(
             "import os\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['HEARTBEAT_PID']).write_text(str(os.getpid()))\n"
             "with open(os.environ['HEARTBEAT_LOG'], 'w') as f:\n"
             "    f.write('heartbeat-started')\n"
         )
@@ -101,6 +98,21 @@ exit 0
         path.write_text(body)
         path.chmod(0o755)
 
+    def _wait_for_heartbeat_exit(self):
+        pid_file = Path(self.tmp.name) / "heartbeat.pid"
+        deadline = time.monotonic() + 5
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(pid_file.exists(), "heartbeat stub did not record its pid")
+        pid = int(pid_file.read_text())
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.01)
+        self.fail(f"heartbeat stub pid {pid} did not exit")
+
     def run_launcher(self, *args, env_extra=None):
         env = dict(os.environ)
         env.update({
@@ -112,13 +124,17 @@ exit 0
             "MONITOR_LOG": str(Path(self.tmp.name) / "monitor.log"),
             "INSTALL_LOG": str(Path(self.tmp.name) / "install.log"),
             "HEARTBEAT_LOG": str(Path(self.tmp.name) / "heartbeat.log"),
+            "HEARTBEAT_PID": str(Path(self.tmp.name) / "heartbeat.pid"),
             "SUTANDO_HOST_LABEL": "test-host",
         })
         env.update(env_extra or {})
-        return subprocess.run(
+        result = subprocess.run(
             ["/bin/bash", str(self.root / "src/agent/start-cli.sh"), *args],
             cwd=self.root, env=env, capture_output=True, text=True,
         )
+        if result.returncode == 0:
+            self._wait_for_heartbeat_exit()
+        return result
 
     def run_launcher_with_tty(self, *args, env_extra=None):
         env = dict(os.environ)
@@ -131,6 +147,7 @@ exit 0
             "MONITOR_LOG": str(Path(self.tmp.name) / "monitor.log"),
             "INSTALL_LOG": str(Path(self.tmp.name) / "install.log"),
             "HEARTBEAT_LOG": str(Path(self.tmp.name) / "heartbeat.log"),
+            "HEARTBEAT_PID": str(Path(self.tmp.name) / "heartbeat.pid"),
             "SUTANDO_HOST_LABEL": "test-host",
         })
         env.update(env_extra or {})
@@ -164,7 +181,12 @@ exit 0
                 elif process.poll() is not None:
                     break
             returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
-            return subprocess.CompletedProcess(process.args, returncode, output.decode(errors="replace"), "")
+            result = subprocess.CompletedProcess(
+                process.args, returncode, output.decode(errors="replace"), ""
+            )
+            if result.returncode == 0:
+                self._wait_for_heartbeat_exit()
+            return result
         finally:
             os.close(master)
             if slave >= 0:
