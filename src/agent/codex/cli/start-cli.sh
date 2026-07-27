@@ -104,6 +104,21 @@ ensure_core_monitor() {
     >/tmp/core-input-watch.log 2>&1 &
 }
 
+# Guarantee this host's core heartbeat writer. src/core_heartbeat.py is the SOLE
+# writer of state/cores/<host>.alive; the cron-runner (installed by
+# ensure_durable_schedules below) reads that file as its liveness signal —
+# local_core_alive() returns False on a missing/stale .alive and cron-runner
+# then skips every due launchd fire without advancing the boundary
+# (src/cron-runner.py). startup.sh starts the heartbeat, but the Codex launcher
+# does not go through startup.sh, so a clean direct start-cli.sh launch would
+# migrate schedules and then silently suppress every fire. Start it here (once).
+# Guard on the $REPO-anchored path so the check is per-checkout (won't cross-match
+# a heartbeat from a different checkout/bundle, and stays hermetic under test).
+ensure_core_heartbeat() {
+  pgrep -f "$REPO/src/core_heartbeat.py" >/dev/null 2>&1 && return 0
+  python3 "$REPO/src/core_heartbeat.py" >/tmp/core-heartbeat.log 2>&1 &
+}
+
 ensure_durable_schedules() {
   # Codex has no session CronCreate surface. Reconcile ordinary scheduled
   # prompts onto the existing OS runner before the core session is reused or
@@ -146,6 +161,7 @@ if session_exists "$SESSION"; then
   apply_tmux_defaults
   ensure_task_notifier
   ensure_core_monitor
+  ensure_core_heartbeat
   if [ -t 1 ] && [ -z "${TMUX:-}" ]; then
     echo "Attaching to existing $SESSION (Ctrl-b d to detach)..."
     exec tmux -S "$TMUX_SOCKET" attach -t "$SESSION"
@@ -177,11 +193,13 @@ if [ -t 1 ] && [ -z "${TMUX:-}" ]; then
   tmux -S "$TMUX_SOCKET" new-session -d -s "$SESSION" "${CORE_ENV_ARGS[@]}" codex "${CODEX_ARGS[@]}"
   ensure_task_notifier
   ensure_core_monitor
+  ensure_core_heartbeat
   exec tmux -S "$TMUX_SOCKET" attach -t "$SESSION"
 else
   tmux -S "$TMUX_SOCKET" new-session -d -s "$SESSION" "${CORE_ENV_ARGS[@]}" codex "${CODEX_ARGS[@]}"
   ensure_task_notifier
   ensure_core_monitor
+  ensure_core_heartbeat
   echo "Started $SESSION detached with Codex. Attach via:"
   echo "  tmux -S $TMUX_SOCKET attach -t $SESSION"
 fi

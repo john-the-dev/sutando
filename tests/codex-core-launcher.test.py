@@ -63,6 +63,14 @@ class CodexCoreLauncherTests(unittest.TestCase):
         installer = self.root / "src/install-cron-runner-launchd.sh"
         installer.write_text('#!/bin/bash\nprintf "installed\\n" >> "$INSTALL_LOG"\n')
         installer.chmod(0o755)
+        # Stub the heartbeat writer: the launcher must start it (it is the sole
+        # writer of state/cores/<host>.alive that cron-runner gates fires on).
+        # Record that it ran; exit immediately so no daemon lingers in the test.
+        (self.root / "src/core_heartbeat.py").write_text(
+            "import os\n"
+            "with open(os.environ['HEARTBEAT_LOG'], 'w') as f:\n"
+            "    f.write('heartbeat-started')\n"
+        )
         self._write_exe("tmux", '''#!/bin/bash
 printf '%s\\n' "$*" >> "$TMUX_LOG"
 [ "${1:-}" = -S ] && shift 2
@@ -98,6 +106,7 @@ exit 0
             "SUTANDO_CORE_RUNTIME": "codex",
             "MONITOR_LOG": str(Path(self.tmp.name) / "monitor.log"),
             "INSTALL_LOG": str(Path(self.tmp.name) / "install.log"),
+            "HEARTBEAT_LOG": str(Path(self.tmp.name) / "heartbeat.log"),
             "SUTANDO_HOST_LABEL": "test-host",
         })
         env.update(env_extra or {})
@@ -116,6 +125,7 @@ exit 0
             "SUTANDO_CORE_RUNTIME": "codex",
             "MONITOR_LOG": str(Path(self.tmp.name) / "monitor.log"),
             "INSTALL_LOG": str(Path(self.tmp.name) / "install.log"),
+            "HEARTBEAT_LOG": str(Path(self.tmp.name) / "heartbeat.log"),
             "SUTANDO_HOST_LABEL": "test-host",
         })
         env.update(env_extra or {})
@@ -203,6 +213,26 @@ exit 0
             "installed",
         )
         self.assertIn("durable schedules", result.stdout)
+
+    def test_starts_core_heartbeat_writer_on_launch(self):
+        # Regression for the missing-heartbeat case: ensure_durable_schedules
+        # installs the cron-runner, which reads state/cores/<host>.alive as its
+        # liveness gate and skips every due fire when it is absent. The launcher
+        # must therefore also start the sole .alive writer (core_heartbeat.py);
+        # otherwise a clean Codex launch migrates schedules then silently
+        # suppresses every fire.
+        marker = Path(self.tmp.name) / "heartbeat.log"
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The writer is backgrounded (&); give it a moment to record it ran.
+        deadline = time.time() + 5
+        while not marker.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(
+            marker.exists(),
+            "launcher did not start the core heartbeat writer",
+        )
+        self.assertEqual(marker.read_text(), "heartbeat-started")
 
     def test_restart_kills_core_and_notifier_before_launch(self):
         result = self.run_launcher("--restart")
