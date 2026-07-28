@@ -102,6 +102,10 @@ class SessionCronStampTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             ws = self._workspace(Path(td), [
                 {"name": "daily", "cron": "7 9 * * *", "prompt": "x", "launchd": True},
+                {"name": "codex", "cron": "8 9 * * *", "execution": "codex-task"},
+                {"name": "dynamic", "cron": "9 9 * * *", "loop": "dynamic"},
+                {"name": "disabled", "prompt": "no cron expression"},
+                "malformed entry",
             ])
             check = self._check(ws)
             self.assertEqual(check["status"], "ok")
@@ -121,6 +125,52 @@ class SessionCronStampTest(unittest.TestCase):
             (ws / "state").mkdir(parents=True)
             check = self._check(ws)
             self.assertEqual(check["status"], "ok")
+
+    def test_invalid_config_warns(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ws = self._workspace(root, SESSION_ENTRIES)
+            config = ws / "hosts" / "test-host" / "crons.json"
+            config.write_text("{")
+            self.assertEqual(self._check(ws)["status"], "warn")
+            config.write_text(json.dumps({"not": "a list"}))
+            check = self._check(ws)
+            self.assertEqual(check["status"], "warn")
+            self.assertIn("not a list", check["detail"])
+
+    def test_unreadable_stamp_warns(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._workspace(Path(td), SESSION_ENTRIES)
+            (ws / "state" / "schedule-crons-stamp.json").mkdir()
+            check = self._check(ws)
+            self.assertEqual(check["status"], "warn")
+            self.assertIn("stamp unreadable", check["detail"])
+
+    def test_malformed_stamp_shapes_warn(self):
+        cases = [
+            ([], "expected an object"),
+            ({"registered": 2}, "numeric ts"),
+            ({"ts": "6000", "registered": 2}, "numeric ts"),
+            ({"ts": 6000}, "registered count"),
+            ({"ts": 6000, "registered": -1}, "registered count"),
+            ({"ts": 6000, "registered": True}, "registered count"),
+        ]
+        for stamp, detail in cases:
+            with self.subTest(stamp=stamp), tempfile.TemporaryDirectory() as td:
+                ws = self._workspace(Path(td), SESSION_ENTRIES, stamp=stamp)
+                check = self._check(ws)
+                self.assertEqual(check["status"], "warn")
+                self.assertIn(detail, check["detail"])
+
+    def test_malformed_heartbeat_shape_does_not_crash(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._workspace(
+                Path(td), SESSION_ENTRIES, stamp={"ts": 6000.0, "registered": 2}
+            )
+            cores = ws / "state" / "cores"
+            cores.mkdir(exist_ok=True)
+            (cores / "test-host.alive").write_text(json.dumps([]))
+            self.assertEqual(self._check(ws)["status"], "ok")
 
 
 if __name__ == "__main__":

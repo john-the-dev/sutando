@@ -568,7 +568,9 @@ def check_session_cron_registration(
     alive_file = workspace / "state" / "cores" / f"{host}.alive"
     started_at = None
     try:
-        started_at = float(json.loads(alive_file.read_text()).get("started_at"))
+        alive = json.loads(alive_file.read_text())
+        if isinstance(alive, dict):
+            started_at = float(alive.get("started_at"))
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         pass  # no heartbeat → can't anchor to a boot; fall through to stamp-only
 
@@ -584,8 +586,13 @@ def check_session_cron_registration(
     except (OSError, json.JSONDecodeError) as exc:
         return {"name": name, "status": "warn", "detail": f"stamp unreadable ({exc})"}
 
+    if not isinstance(stamp, dict):
+        return {"name": name, "status": "warn", "detail": "stamp malformed (expected an object)"}
+
     stamp_ts = stamp.get("ts")
-    if started_at is not None and isinstance(stamp_ts, (int, float)) and stamp_ts < started_at:
+    if isinstance(stamp_ts, bool) or not isinstance(stamp_ts, (int, float)):
+        return {"name": name, "status": "warn", "detail": "stamp malformed (missing numeric ts)"}
+    if started_at is not None and stamp_ts < started_at:
         return {
             "name": name,
             "status": "warn",
@@ -596,7 +603,13 @@ def check_session_cron_registration(
         }
 
     registered = stamp.get("registered")
-    if isinstance(registered, int) and registered < expected:
+    if isinstance(registered, bool) or not isinstance(registered, int) or registered < 0:
+        return {
+            "name": name,
+            "status": "warn",
+            "detail": "stamp malformed (missing non-negative registered count)",
+        }
+    if registered < expected:
         return {
             "name": name,
             "status": "warn",
