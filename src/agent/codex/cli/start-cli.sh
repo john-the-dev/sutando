@@ -150,12 +150,12 @@ ensure_durable_schedules() {
   # created, otherwise a runtime switch/restart leaves crons.json populated
   # while every custom schedule silently stops.
   [ "$(uname -s)" = "Darwin" ] || return 0
-  local result service
-  result="$(python3 "$REPO/skills/schedule-crons/scripts/reconcile_launchd.py")" || {
-    echo "  ⚠ durable schedule reconciliation failed" >&2
+  local preflight result service
+  preflight="$(python3 "$REPO/skills/schedule-crons/scripts/reconcile_launchd.py" --check)" || {
+    echo "  ⚠ durable schedule preflight failed" >&2
     return 0
   }
-  case "$result" in
+  case "$preflight" in
     *"runner_needed=1"*)
       service="gui/$(id -u)/com.sutando.cron-runner"
       if ! launchctl print "$service" >/dev/null 2>&1; then
@@ -164,6 +164,10 @@ ensure_durable_schedules() {
           return 0
         }
       fi
+      result="$(python3 "$REPO/skills/schedule-crons/scripts/reconcile_launchd.py")" || {
+        echo "  ⚠ durable schedule reconciliation failed" >&2
+        return 0
+      }
       echo "  ✓ durable schedules ($result)"
       ;;
   esac

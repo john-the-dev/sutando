@@ -34,6 +34,24 @@ def launchd_eligible(entry: dict[str, Any]) -> bool:
     return True
 
 
+def runner_required(crons: list[Any]) -> bool:
+    """Return whether the current config needs the launchd runner.
+
+    This read-only preflight lets the launcher install the runner before
+    ownership is changed.  Eligible entries without a usable name are ignored
+    because ``reconcile`` cannot migrate them.
+    """
+    for entry in crons:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("launchd") is True:
+            return True
+        name = entry.get("name")
+        if isinstance(name, str) and name and launchd_eligible(entry):
+            return True
+    return False
+
+
 @contextmanager
 def _state_lock(state_file: Path) -> Iterator[None]:
     """Exclusive lock serializing the ``cron-runner-state.json`` read-modify-write
@@ -133,11 +151,21 @@ def _default_paths() -> tuple[Path, Path]:
     )
 
 
-def main() -> int:
+def main(argv: Optional[list[str]] = None) -> int:
+    args = [] if argv is None else argv
     crons_file, state_file = _default_paths()
     if not crons_file.exists():
         print("runner_needed=0 migrated=0")
         return 0
+    if args == ["--check"]:
+        crons = json.loads(crons_file.read_text())
+        if not isinstance(crons, list):
+            raise ValueError(f"{crons_file} must contain a JSON list")
+        print(f"runner_needed={int(runner_required(crons))} migrated=0")
+        return 0
+    if args:
+        print(f"usage: {Path(sys.argv[0]).name} [--check]", file=sys.stderr)
+        return 2
     result = reconcile(crons_file, state_file)
     names = ",".join(result["migrated"])
     print(
@@ -148,4 +176,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

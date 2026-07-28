@@ -276,6 +276,27 @@ exit 0
         )
         self.assertIn("durable schedules", result.stdout)
 
+    def test_failed_runner_install_does_not_transfer_schedule_ownership(self):
+        workspace = self.root / "workspace"
+        config = workspace / "hosts" / "test-host" / "crons.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps([
+            {"name": "digest", "cron": "2 6 * * *", "prompt": "run"},
+        ]))
+        installer = self.root / "src/install-cron-runner-launchd.sh"
+        installer.write_text("#!/bin/bash\nexit 1\n")
+        installer.chmod(0o755)
+
+        result = self.run_launcher()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("runner failed to install", result.stderr)
+        self.assertNotIn("launchd", json.loads(config.read_text())[0])
+        self.assertFalse(
+            (workspace / "state/cron-runner-state.json").exists(),
+            "failed installation must not seed launchd-owned runner state",
+        )
+
     def test_starts_core_heartbeat_writer_on_launch(self):
         # Regression for the missing-heartbeat case: ensure_durable_schedules
         # installs the cron-runner, which reads state/cores/<host>.alive as its

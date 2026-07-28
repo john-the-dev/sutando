@@ -166,6 +166,25 @@ class DurableCronReconcileTest(unittest.TestCase):
                 output.getvalue().strip(),
                 "runner_needed=1 migrated=1 names=digest",
             )
+
+    def test_check_reports_need_without_mutating_config_or_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            crons = root / "crons.json"
+            state = root / "state.json"
+            original = [
+                {"name": "digest", "cron": "2 6 * * *", "prompt": "run"},
+            ]
+            crons.write_text(json.dumps(original))
+            output = StringIO()
+            with mock.patch.object(reconcile_launchd, "_default_paths", return_value=(crons, state)):
+                with redirect_stdout(output):
+                    self.assertEqual(reconcile_launchd.main(["--check"]), 0)
+
+            self.assertEqual(output.getvalue().strip(), "runner_needed=1 migrated=0")
+            self.assertEqual(json.loads(crons.read_text()), original)
+            self.assertFalse(state.exists())
+
     def test_inflight_runner_write_does_not_clobber_migration_boundary(self):
         """Regression (state-overwrite race): a launchd tick that read state
         BEFORE reconciliation, then writes its stale snapshot back, must not
