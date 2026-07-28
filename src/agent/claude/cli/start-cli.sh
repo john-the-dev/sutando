@@ -47,7 +47,9 @@ CORE_ENV_ARGS=(-e SUTANDO_CORE_SESSION=1 -e SUTANDO_CORE_RUNTIME=claude)
 # Product deployments can disable autonomous repo development while keeping
 # owner tasks, health checks, and the task watcher active. Explicitly forward
 # the override because tmux may use an older server environment.
-[ -n "${SUTANDO_SELF_DEVELOPMENT_ENABLED:-}" ] && CORE_ENV_ARGS+=(-e "SUTANDO_SELF_DEVELOPMENT_ENABLED=$SUTANDO_SELF_DEVELOPMENT_ENABLED")
+if [ "${SUTANDO_SELF_DEVELOPMENT_ENABLED+x}" = x ]; then
+  CORE_ENV_ARGS+=(-e "SUTANDO_SELF_DEVELOPMENT_ENABLED=$SUTANDO_SELF_DEVELOPMENT_ENABLED")
+fi
 
 tmux_available() {
   command -v tmux > /dev/null 2>&1

@@ -60,7 +60,9 @@ CORE_ENV_ARGS=(-e SUTANDO_CORE_SESSION=1 -e SUTANDO_CORE_RUNTIME=codex)
 [ -n "${CODEX_HOME:-}" ] && CORE_ENV_ARGS+=(-e "CODEX_HOME=$CODEX_HOME")
 # tmux's server environment can predate the product-mode override, so forward
 # the self-development policy explicitly into the persistent core session.
-[ -n "${SUTANDO_SELF_DEVELOPMENT_ENABLED:-}" ] && CORE_ENV_ARGS+=(-e "SUTANDO_SELF_DEVELOPMENT_ENABLED=$SUTANDO_SELF_DEVELOPMENT_ENABLED")
+if [ "${SUTANDO_SELF_DEVELOPMENT_ENABLED+x}" = x ]; then
+  CORE_ENV_ARGS+=(-e "SUTANDO_SELF_DEVELOPMENT_ENABLED=$SUTANDO_SELF_DEVELOPMENT_ENABLED")
+fi
 
 CODEX_ARGS=(
   -C "$WORKING_DIR"

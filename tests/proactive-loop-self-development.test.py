@@ -112,6 +112,10 @@ for launcher in (
         f"{launcher.parent.parent.name} launcher forwards override",
         f'-e "{ENV_NAME}=${ENV_NAME}"' in text,
     )
+    check(
+        f"{launcher.parent.parent.name} launcher preserves an explicit empty override",
+        f'"${{{ENV_NAME}+x}}" = x' in text,
+    )
 
 if failures:
     raise SystemExit(f"{len(failures)} failure(s): {', '.join(failures)}")
