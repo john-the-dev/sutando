@@ -713,9 +713,26 @@ if [ "${SUTANDO_OBS_COLLECTOR:-1}" != "0" ]; then
   else
     echo "  ✓ obs collector (already running on $OBS_PORT)"
   fi
-  # Wire the core's hooks to the local collector unless an endpoint is already set.
-  if [ -z "${SUTANDO_OBS_ENDPOINT:-}" ]; then
-    export SUTANDO_OBS_ENDPOINT="http://localhost:$OBS_PORT"
+  # Wire the core's hooks to the local collector unless an endpoint is already
+  # set — but ONLY after verifying the listener is OUR collector (/health
+  # identity). Hooks carry raw prompts + tool payloads; exporting the endpoint
+  # to a foreign process squatting on the port would hand it that stream.
+  # Fail closed: unverified listener → no endpoint export, capture stays off
+  # (same protection #2341 adds via obs_collector_healthy).
+  _obs_identity_ok=""
+  for _obs_probe in 1 2 3 4 5 6 7 8 9 10; do
+    case "$(curl -fsS --max-time 2 "http://127.0.0.1:$OBS_PORT/health" 2>/dev/null)" in
+      *'"service":"sutando-observability-collector"'*) _obs_identity_ok=1; break ;;
+    esac
+    sleep 0.2
+  done
+  if [ -n "$_obs_identity_ok" ]; then
+    if [ -z "${SUTANDO_OBS_ENDPOINT:-}" ]; then
+      export SUTANDO_OBS_ENDPOINT="http://localhost:$OBS_PORT"
+    fi
+    echo "  ✓ obs capture ON by default (owner policy 2026-07-28) — export SUTANDO_OBS_COLLECTOR=0 to disable"
+  else
+    echo "  ⚠ obs: listener on port $OBS_PORT failed the collector identity check — endpoint NOT exported, capture disabled (fail closed)" >&2
   fi
 else
   echo "  ~ obs collector (disabled via SUTANDO_OBS_COLLECTOR=0)"
