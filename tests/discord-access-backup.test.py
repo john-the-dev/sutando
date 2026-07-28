@@ -46,7 +46,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 BRIDGE = REPO / "src" / "discord-bridge.py"
 
-_HELPERS = ("_is_valid_access_doc", "_backup_access_to_disk", "_restore_access_from_disk")
+_HELPERS = ("_is_valid_access_doc", "_write_owner_only", "_backup_access_to_disk", "_restore_access_from_disk")
 
 
 def _load_helpers(access_file: Path, backup_file: Path):
@@ -128,9 +128,62 @@ class TestBackup(_Base):
     def test_backup_swallows_oserror(self):
         """Best-effort: an OSError on the backup write must never raise."""
         import unittest.mock as mock
-        with mock.patch.object(Path, "write_text", side_effect=OSError("disk full")):
+        with mock.patch.object(os, "replace", side_effect=OSError("disk full")):
             self.backup_to_disk({"allowFrom": ["U"]})  # must not raise
         self.assertTrue(True)
+
+    def test_backup_write_failure_preserves_previous(self):
+        """Clobber guard: a failed backup write leaves the previous good backup
+        intact (atomic replace — no in-place truncation) and no stray temp."""
+        import unittest.mock as mock
+        good = {"allowFrom": ["OWNER"], "tierMap": {"OWNER": "owner"}}
+        self.backup_to_disk(good)
+        with mock.patch.object(os, "replace", side_effect=OSError("crashed mid-write")):
+            self.backup_to_disk({"allowFrom": ["NEW"]})  # must not raise
+        self.assertEqual(json.loads(self.backup.read_text()), good,
+                         "failed write clobbered the previous good backup")
+        stray = [p for p in self.backup.parent.iterdir() if p.name != self.backup.name]
+        self.assertEqual(stray, [], "failed write left a temp file behind")
+
+    def test_permissive_umask_backup_modes(self):
+        """Permissive-umask regression (review 2026-07-28): the state/auth/ leaf
+        must be created 0700 and the backup file 0600 even under umask 000."""
+        old = os.umask(0o000)
+        try:
+            self.backup_to_disk({"allowFrom": ["OWNER"], "tierMap": {"OWNER": "owner"}})
+        finally:
+            os.umask(old)
+        self.assertEqual(self.backup.parent.stat().st_mode & 0o777, 0o700,
+                         "state/auth/ leaf must be owner-only")
+        self.assertEqual(self.backup.stat().st_mode & 0o777, 0o600,
+                         "backup file must be owner-only")
+
+    def test_permissive_umask_normalizes_existing_broad_dir(self):
+        """A pre-existing overly-broad state/auth/ (the reviewed 0777 repro) is
+        narrowed to 0700 on the next backup write."""
+        self.backup.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.backup.parent, 0o777)
+        self.backup_to_disk({"allowFrom": ["OWNER"]})
+        self.assertEqual(self.backup.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_backup_temp_born_0600(self):
+        """The backup temp is CREATED with mode 0600 (O_EXCL) — not chmod'd
+        after the contents are already on disk."""
+        import unittest.mock as mock
+        seen = []
+        real_open = os.open
+
+        def spy(path, flags, mode=0o777, *a, **kw):
+            if str(path).endswith(".tmp"):
+                seen.append((flags, mode))
+            return real_open(path, flags, mode, *a, **kw)
+
+        with mock.patch.object(os, "open", side_effect=spy):
+            self.backup_to_disk({"allowFrom": ["OWNER"]})
+        self.assertEqual(len(seen), 1, "expected exactly one temp-file open")
+        flags, mode = seen[0]
+        self.assertEqual(mode, 0o600, "temp must be born 0600")
+        self.assertTrue(flags & os.O_EXCL, "temp must be O_EXCL (no reuse of a broader file)")
 
 
 class TestRestore(_Base):
@@ -176,8 +229,35 @@ class TestRestore(_Base):
         """Valid backup but the access.json write fails → False (exception branch)."""
         import unittest.mock as mock
         self.backup_to_disk({"allowFrom": ["OWNER"]})
-        with mock.patch.object(Path, "write_text", side_effect=OSError("readonly")):
+        with mock.patch.object(os, "replace", side_effect=OSError("readonly")):
             self.assertFalse(self.restore_from_disk())
+
+    def test_permissive_umask_restore_modes(self):
+        """Permissive-umask regression (review 2026-07-28): the restore temp is
+        born 0600 (O_EXCL) and the restored access.json ends up 0600."""
+        import unittest.mock as mock
+        self.backup_to_disk({"allowFrom": ["OWNER"], "tierMap": {"OWNER": "owner"}})
+        self.access.write_text("{corrupt")
+        seen = []
+        real_open = os.open
+
+        def spy(path, flags, mode=0o777, *a, **kw):
+            if str(path).endswith(".tmp"):
+                seen.append((flags, mode))
+            return real_open(path, flags, mode, *a, **kw)
+
+        old = os.umask(0o000)
+        try:
+            with mock.patch.object(os, "open", side_effect=spy):
+                self.assertTrue(self.restore_from_disk())
+        finally:
+            os.umask(old)
+        self.assertEqual(self.access.stat().st_mode & 0o777, 0o600,
+                         "restored access.json must be owner-only")
+        self.assertEqual(len(seen), 1, "expected exactly one restore temp open")
+        flags, mode = seen[0]
+        self.assertEqual(mode, 0o600, "restore temp must be born 0600")
+        self.assertTrue(flags & os.O_EXCL, "restore temp must be O_EXCL")
 
 
 class TestBeforeAfterContrast(_Base):

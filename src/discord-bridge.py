@@ -578,19 +578,47 @@ def _is_valid_access_doc(data) -> bool:
     return isinstance(data, dict) and isinstance(data.get("allowFrom"), list)
 
 
+def _write_owner_only(path, text: str) -> None:
+    """Atomically write *text* to *path* with the file born 0600.
+
+    The temp is created O_EXCL with mode 0600 — access-control data is never
+    observable broader than owner-only, even under a permissive umask (a
+    write_text-then-chmod sequence leaves a window where it is). fsync +
+    os.replace make the swap atomic and crash-durable: a failed or partial
+    write leaves any previous file at *path* untouched."""
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _backup_access_to_disk(data: dict) -> None:
     """Persist a copy of a VALID access-control document to the durable backup.
 
     Backs up any structurally valid state (see ``_is_valid_access_doc``) —
     including an intentional empty lockdown — but never a transient/partial
     wipe, so a wipe can't overwrite the good backup. Best-effort: an OSError on
-    the backup write must never break the live access.json write path."""
+    the backup write must never break the live access.json write path.
+
+    The state/auth/ leaf is owner-only (0700) and the backup is written born
+    0600 + atomically replaced, so a permissive umask can't expose auth state
+    and a crashed write can't truncate the previous good backup."""
     if not _is_valid_access_doc(data):
         return
     try:
-        ACCESS_BACKUP_FILE.parent.mkdir(parents=True, exist_ok=True)
-        ACCESS_BACKUP_FILE.write_text(json.dumps(data, indent=2) + "\n")
-        os.chmod(ACCESS_BACKUP_FILE, 0o600)
+        ACCESS_BACKUP_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(ACCESS_BACKUP_FILE.parent, 0o700)  # normalize a pre-existing broader leaf
+        _write_owner_only(ACCESS_BACKUP_FILE, json.dumps(data, indent=2) + "\n")
     except OSError:
         pass  # best-effort; backup must never break the write path
 
@@ -619,10 +647,9 @@ def _restore_access_from_disk() -> bool:
         return False
     try:
         ACCESS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = ACCESS_FILE.with_suffix(ACCESS_FILE.suffix + f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
-        tmp.write_text(json.dumps(backup, indent=2) + "\n")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, ACCESS_FILE)
+        # access.json is itself access-control data: born-0600 temp + atomic
+        # replace (never observable broader, even under a permissive umask).
+        _write_owner_only(ACCESS_FILE, json.dumps(backup, indent=2) + "\n")
         print(
             "  [access] restored access.json from durable on-disk backup "
             "(wipe survived a restart — #899 defense-in-depth)",
