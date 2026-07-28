@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Tests for the session-cron registration divergence guard (session-crons check).
+
+The failure it detects is silent: CronCreate registrations are session-only, so
+a core boot where /schedule-crons never completed leaves crons.json intact on
+disk with zero live crons (peer instance observed 2/18 registered, 2026-07-23).
+The guard compares the /schedule-crons completion stamp against the heartbeat's
+started_at — stamp AGE alone is deliberately unused (long sessions would
+false-warn).
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+SCRIPT = REPO / "src" / "health-check.py"
+SPEC = importlib.util.spec_from_file_location("health_check", SCRIPT)
+assert SPEC and SPEC.loader
+health = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(health)
+
+SESSION_ENTRIES = [
+    {"name": "main-loop", "cron": "*/5 * * * *", "prompt_skill": "proactive-loop"},
+    {"name": "digest", "cron": "2 6 * * *", "prompt": "run"},
+    {"name": "daily", "cron": "7 9 * * *", "prompt": "x", "launchd": True},  # not session-owned
+    {"name": "codexjob", "cron": "1 1 * * *", "prompt": "y", "execution": "codex-task"},  # not session-owned
+]
+
+
+class SessionCronStampTest(unittest.TestCase):
+    def _workspace(self, root: Path, entries, stamp=None, started_at=None) -> Path:
+        workspace = root / "workspace"
+        config = workspace / "hosts" / "test-host" / "crons.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps(entries))
+        state = workspace / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        if stamp is not None:
+            (state / "schedule-crons-stamp.json").write_text(json.dumps(stamp))
+        if started_at is not None:
+            cores = state / "cores"
+            cores.mkdir(exist_ok=True)
+            (cores / "test-host.alive").write_text(json.dumps({"started_at": started_at}))
+        return workspace
+
+    def _check(self, workspace, **kw):
+        return health.check_session_cron_registration(
+            workspace, host_label="test-host", runtime=kw.pop("runtime", "claude"), **kw
+        )
+
+    def test_no_stamp_warns(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._workspace(Path(td), SESSION_ENTRIES)
+            check = self._check(ws)
+            self.assertEqual(check["status"], "warn")
+            self.assertIn("never stamped", check["detail"])
+
+    def test_stamp_predating_boot_warns(self):
+        """The Michael failure: core rebooted, /schedule-crons never re-ran."""
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._workspace(
+                Path(td), SESSION_ENTRIES,
+                stamp={"ts": 1000.0, "registered": 2},
+                started_at=5000.0,
+            )
+            check = self._check(ws)
+            self.assertEqual(check["status"], "warn")
+            self.assertIn("predates this core boot", check["detail"])
+
+    def test_fresh_stamp_ok(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._workspace(
+                Path(td), SESSION_ENTRIES,
+                stamp={"ts": 6000.0, "registered": 2},
+                started_at=5000.0,
+            )
+            check = self._check(ws)
+            self.assertEqual(check["status"], "ok")
+
+    def test_partial_registration_warns(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._workspace(
+                Path(td), SESSION_ENTRIES,
+                stamp={"ts": 6000.0, "registered": 1},
+                started_at=5000.0,
+            )
+            check = self._check(ws)
+            self.assertEqual(check["status"], "warn")
+            self.assertIn("1/2", check["detail"])
+
+    def test_codex_runtime_skips(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._workspace(Path(td), SESSION_ENTRIES)
+            check = self._check(ws, runtime="codex")
+            self.assertEqual(check["status"], "ok")
+
+    def test_only_nonsession_entries_ok(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._workspace(Path(td), [
+                {"name": "daily", "cron": "7 9 * * *", "prompt": "x", "launchd": True},
+            ])
+            check = self._check(ws)
+            self.assertEqual(check["status"], "ok")
+
+    def test_no_heartbeat_fresh_stamp_ok(self):
+        """No .alive anchor → stamp presence + counts still validate."""
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._workspace(
+                Path(td), SESSION_ENTRIES, stamp={"ts": 6000.0, "registered": 2}
+            )
+            check = self._check(ws)
+            self.assertEqual(check["status"], "ok")
+
+    def test_missing_config_ok(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = Path(td) / "workspace"
+            (ws / "state").mkdir(parents=True)
+            check = self._check(ws)
+            self.assertEqual(check["status"], "ok")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=1)
