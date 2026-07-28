@@ -273,9 +273,11 @@ def get_pending_questions() -> list[str]:
         # marked resolved/done/answered is not pending even when its title still
         # reads "[OPEN …]" (mirrors check-pending-questions.py). Without this the
         # briefing miscounts entries kept above the divider whose title wasn't
-        # updated but whose body carries "**Status:** resolved".
+        # updated but whose body carries "**Status:** resolved". `open` counts as
+        # pending (the natural word writers reach for) — kept in lockstep with
+        # check-pending-questions.py so the documented mirror stays truthful.
         status_m = re.search(r'\*\*Status:\*\*\s*(.+)', body)
-        if status_m and not status_m.group(1).strip().lower().startswith(('unanswered', 'waiting')):
+        if status_m and not status_m.group(1).strip().lower().startswith(('unanswered', 'waiting', 'open')):
             continue
         questions.append(title[:60])
     return questions
@@ -397,12 +399,29 @@ def synthesize(weather, events, reminders, discord_msgs, pending_qs, health_issu
     return " ".join(parts)
 
 
+def completion_line(result_file, narrative: str) -> str:
+    """What the run actually accomplished.
+
+    This script WRITES a result file; delivery is a channel bridge's job and may
+    never happen — no bridge running, or no channel configured on the host. The
+    previous wording ("Briefing delivered:") reported an outcome this script does
+    not observe and cannot verify, so a run that reached nobody looked identical
+    to one that reached the owner. Observed 2026-07-21: six proactive results,
+    the oldest 8h old, sat undrained while every run printed "delivered".
+
+    Extracted so the claim is testable rather than an inline literal (same shape
+    as `summary_line` in health-check.py).
+    """
+    return (f"Briefing written to {result_file.name} — delivery depends on a "
+            f"channel bridge draining results/:\n{narrative}")
+
+
 def main():
     # Check sentinel — don't repeat if already run today
     today = datetime.now().strftime("%Y-%m-%d")
     sentinel = STATE_DIR / f"morning-briefing-{today}.sentinel"
     if sentinel.exists() and "--force" not in sys.argv:
-        print(f"Morning briefing already delivered today ({today}). Use --force to re-run.")
+        print(f"Morning briefing already generated today ({today}). Use --force to re-run.")
         return
 
     print("Gathering morning briefing...")
@@ -436,14 +455,19 @@ def main():
     ts = int(time.time() * 1000)
     result_file = RESULTS_DIR / f"proactive-morning-{ts}.txt"
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    result_file.write_text(narrative)
+    # Privacy: the briefing carries calendar + email — private data that must
+    # go to the owner's DM only. The `[dm-only]` marker forces DM delivery and
+    # suppresses any `[channel:]` redirect at the bridge, so this can never be
+    # posted to a shared channel (result_markers.parse_markers). The marker is
+    # stripped before delivery/voice, so the owner never sees it.
+    result_file.write_text(f"[dm-only]\n{narrative}")
     print(f"  → {result_file.name}")
 
     # Mark as done today
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     sentinel.write_text(datetime.now().isoformat())
 
-    print(f"\nBriefing delivered:\n{narrative}")
+    print("\n" + completion_line(result_file, narrative))
 
     # Anonymous, opt-out product telemetry: one bucketed event when this feature
     # actually runs (not on the already-delivered early return). No content/PII.
