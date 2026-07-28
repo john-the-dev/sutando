@@ -169,6 +169,7 @@ case "$cmd" in
                 echo "    Grant: System Settings → Privacy & Security → Full Disk Access → add:"
                 echo "      $PYTHON_BIN"
                 echo "    then verify with: bash $0 --status"
+                exit 1
             fi
         fi
         echo

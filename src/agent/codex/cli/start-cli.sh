@@ -163,6 +163,10 @@ ensure_durable_schedules() {
           echo "  ⚠ durable schedule runner failed to install" >&2
           return 0
         }
+        if ! launchctl print "$service" >/dev/null 2>&1; then
+          echo "  ⚠ durable schedule runner failed post-install verification" >&2
+          return 0
+        fi
       fi
       result="$(python3 "$REPO/skills/schedule-crons/scripts/reconcile_launchd.py")" || {
         echo "  ⚠ durable schedule reconciliation failed" >&2

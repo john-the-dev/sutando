@@ -65,9 +65,19 @@ class CodexCoreLauncherTests(unittest.TestCase):
         self._write_exe("codex", '#!/bin/bash\n[ "${1:-}" = login ] && exit 0\nexit 0\n')
         self._write_exe("fswatch", '#!/bin/bash\nexit 0\n')
         self._write_exe("uname", '#!/bin/bash\nprintf "Darwin\\n"\n')
-        self._write_exe("launchctl", '#!/bin/bash\n[ "${1:-}" = print ] && exit 1\nexit 0\n')
+        self._write_exe("launchctl", '''#!/bin/bash
+if [ "${1:-}" = print ]; then
+  [ -f "$LAUNCHCTL_STATE" ]
+  exit
+fi
+exit 0
+''')
         installer = self.root / "src/install-cron-runner-launchd.sh"
-        installer.write_text('#!/bin/bash\nprintf "installed\\n" >> "$INSTALL_LOG"\n')
+        installer.write_text(
+            '#!/bin/bash\n'
+            'printf "installed\\n" >> "$INSTALL_LOG"\n'
+            'touch "$LAUNCHCTL_STATE"\n'
+        )
         installer.chmod(0o755)
         # Stub the heartbeat writer: the launcher must start it (it is the sole
         # writer of state/cores/<host>.alive that cron-runner gates fires on).
@@ -145,6 +155,7 @@ exit 0
             "SUTANDO_CORE_RUNTIME": "codex",
             "MONITOR_LOG": str(Path(self.tmp.name) / "monitor.log"),
             "INSTALL_LOG": str(Path(self.tmp.name) / "install.log"),
+            "LAUNCHCTL_STATE": str(Path(self.tmp.name) / "launchctl-loaded"),
             "HEARTBEAT_LOG": str(Path(self.tmp.name) / "heartbeat.log"),
             "HEARTBEAT_PID": str(Path(self.tmp.name) / "heartbeat.pid"),
             "SCHEDULER_LOG": str(Path(self.tmp.name) / "scheduler.log"),
@@ -171,6 +182,7 @@ exit 0
             "SUTANDO_CORE_RUNTIME": "codex",
             "MONITOR_LOG": str(Path(self.tmp.name) / "monitor.log"),
             "INSTALL_LOG": str(Path(self.tmp.name) / "install.log"),
+            "LAUNCHCTL_STATE": str(Path(self.tmp.name) / "launchctl-loaded"),
             "HEARTBEAT_LOG": str(Path(self.tmp.name) / "heartbeat.log"),
             "HEARTBEAT_PID": str(Path(self.tmp.name) / "heartbeat.pid"),
             "SUTANDO_HOST_LABEL": "test-host",
@@ -295,6 +307,27 @@ exit 0
         self.assertFalse(
             (workspace / "state/cron-runner-state.json").exists(),
             "failed installation must not seed launchd-owned runner state",
+        )
+
+    def test_false_success_without_loaded_runner_does_not_transfer_ownership(self):
+        workspace = self.root / "workspace"
+        config = workspace / "hosts" / "test-host" / "crons.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps([
+            {"name": "digest", "cron": "2 6 * * *", "prompt": "run"},
+        ]))
+        installer = self.root / "src/install-cron-runner-launchd.sh"
+        installer.write_text("#!/bin/bash\nexit 0\n")
+        installer.chmod(0o755)
+
+        result = self.run_launcher()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("failed post-install verification", result.stderr)
+        self.assertNotIn("launchd", json.loads(config.read_text())[0])
+        self.assertFalse(
+            (workspace / "state/cron-runner-state.json").exists(),
+            "an absent runner must not receive schedule ownership",
         )
 
     def test_starts_core_heartbeat_writer_on_launch(self):
