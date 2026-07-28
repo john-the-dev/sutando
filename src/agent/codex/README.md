@@ -14,7 +14,11 @@ so it survives launcher exit and is restarted together with the core.
 On macOS the launcher also reconciles fixed `crons.json` schedules onto the
 OS-backed cron runner before starting or reusing the Codex session. Codex has
 no session `CronCreate` surface, so leaving those entries session-owned would
-make them silently stop after a runtime switch or restart.
+make them silently stop after a runtime switch or restart. Separately, the
+launcher reconciles the durable Codex scheduler: while this runtime is
+selected, the canonical `main-loop` entry is converted at read time into one
+silent proactive-pass task per cron fire; the user's `crons.json` remains
+unchanged for runtime switching.
 
 Codex authentication and settings are selected through the `type=codex`
 entry in `core_config_dirs` (`CODEX_HOME` by default). The tracked default uses
