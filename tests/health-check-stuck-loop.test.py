@@ -285,8 +285,13 @@ def case_m2_completed_tasks_excluded() -> list[str]:
 def case_m2b_retention_archived_tasks_excluded() -> list[str]:
     fails = []
     def setup(d):
-        archive = d.parent / "results" / "archive-2026-07-26"
+        results = d.parent / "results"
+        archive = results / "archive-2026-07-26"
         archive.mkdir(parents=True)
+        # Non-file *.txt entries and non-directory archive-* entries are
+        # ignored without affecting the completed-task set.
+        (archive / "ignored.txt").mkdir()
+        (results / "archive-not-a-directory").write_text("fixture")
         for i in range(8):
             task = write_task(d, f"task-{i}.txt", age_sec=600)
             (archive / task.name).write_text("complete")
