@@ -40,7 +40,7 @@ class SessionCronStampTest(unittest.TestCase):
         state = workspace / "state"
         state.mkdir(parents=True, exist_ok=True)
         if stamp is not None:
-            (state / "schedule-crons-stamp.json").write_text(json.dumps(stamp))
+            (config.parent / "schedule-crons-stamp.json").write_text(json.dumps(stamp))
         if started_at is not None:
             cores = state / "cores"
             cores.mkdir(exist_ok=True)
@@ -55,6 +55,21 @@ class SessionCronStampTest(unittest.TestCase):
     def test_no_stamp_warns(self):
         with tempfile.TemporaryDirectory() as td:
             ws = self._workspace(Path(td), SESSION_ENTRIES)
+            check = self._check(ws)
+            self.assertEqual(check["status"], "warn")
+            self.assertIn("never stamped", check["detail"])
+
+    def test_other_hosts_stamp_does_not_satisfy_this_host(self):
+        """A newer same-count foreign stamp cannot hide this host's missing run."""
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._workspace(
+                Path(td), SESSION_ENTRIES, started_at=5000.0
+            )
+            foreign = ws / "hosts" / "other-host"
+            foreign.mkdir()
+            (foreign / "schedule-crons-stamp.json").write_text(
+                json.dumps({"ts": 7000.0, "registered": 2})
+            )
             check = self._check(ws)
             self.assertEqual(check["status"], "warn")
             self.assertIn("never stamped", check["detail"])
@@ -141,7 +156,7 @@ class SessionCronStampTest(unittest.TestCase):
     def test_unreadable_stamp_warns(self):
         with tempfile.TemporaryDirectory() as td:
             ws = self._workspace(Path(td), SESSION_ENTRIES)
-            (ws / "state" / "schedule-crons-stamp.json").mkdir()
+            (ws / "hosts" / "test-host" / "schedule-crons-stamp.json").mkdir()
             check = self._check(ws)
             self.assertEqual(check["status"], "warn")
             self.assertIn("stamp unreadable", check["detail"])

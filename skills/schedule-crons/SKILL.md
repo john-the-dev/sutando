@@ -61,9 +61,11 @@ When `core.runtime` is `codex`, the canonical unmarked `main-loop` entry (`promp
 5.7. **Stamp completion for the health-check divergence guard.** After all registrations (and the fallback check in step 4), count the session-owned entries you actually registered this run (CronCreate successes + pre-existing matches from step 3, including the main-loop/fallback) and write the stamp — script-visible proof that THIS core boot completed registration:
    ```bash
    WS="$(bash scripts/sutando-config.sh workspace)"
-   echo "{\"ts\": $(date +%s), \"registered\": <count>, \"config_total\": <total entries in crons.json>}" > "$WS/state/schedule-crons-stamp.json"
+   H="$(bash scripts/sutando-config.sh host-label)"
+   mkdir -p "$WS/hosts/$H"
+   echo "{\"ts\": $(date +%s), \"registered\": <count>, \"config_total\": <total entries in crons.json>}" > "$WS/hosts/$H/schedule-crons-stamp.json"
    ```
-   `health-check.py`'s `session-crons` probe compares this stamp against the core heartbeat's `started_at`: a stamp older than the boot means session crons died with a previous session and were never re-registered (the silent 2/18 failure observed on a peer instance 2026-07-23). Do not skip the stamp on re-runs — a fresh stamp is what keeps the guard quiet.
+   `health-check.py`'s `session-crons` probe compares this host-owned stamp against the same host's core heartbeat `started_at`: a stamp older than the boot means session crons died with a previous session and were never re-registered (the silent 2/18 failure observed on a peer instance 2026-07-23). Do not skip the stamp on re-runs — a fresh stamp is what keeps the guard quiet.
 
 6. Confirm what was scheduled — note whether the proactive-loop fallback was triggered (informs operator that crons.json may need a persistent entry).
 

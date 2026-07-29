@@ -532,10 +532,12 @@ def check_session_cron_registration(
     only exist if /schedule-crons completed after the core booted. The failure
     is silent (config intact on disk, zero live crons, no error) — observed
     2026-07-23 on a peer instance as 2/18 registered. The script-visible signal:
-    /schedule-crons writes `state/schedule-crons-stamp.json` when it finishes;
-    if that stamp predates the running core's `started_at` (from the heartbeat
-    payload), the current session never completed registration. Stamp AGE alone
-    is deliberately not used — long-lived sessions would false-warn.
+    /schedule-crons writes
+    `hosts/<hostname>/schedule-crons-stamp.json` when it finishes; if that
+    host-owned stamp predates the running core's `started_at` (from the
+    heartbeat payload), the current session never completed registration.
+    Stamp AGE alone is deliberately not used — long-lived sessions would
+    false-warn.
     """
     workspace = Path(workspace_dir or WORKSPACE_DIR)
     host = host_label or _host_label()
@@ -574,7 +576,7 @@ def check_session_cron_registration(
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         pass  # no heartbeat → can't anchor to a boot; fall through to stamp-only
 
-    stamp_file = workspace / "state" / "schedule-crons-stamp.json"
+    stamp_file = workspace / "hosts" / host / "schedule-crons-stamp.json"
     try:
         stamp = json.loads(stamp_file.read_text())
     except FileNotFoundError:
