@@ -601,6 +601,30 @@ _event_count_lock = threading.Lock()
 # Bolt App. Socket Mode handler attaches via SocketModeHandler below.
 app = App(token=BOT_TOKEN)
 
+# Handler reference so the heartbeat writer can check the LIVE socket state.
+# The heartbeat thread starts before the handler is built, so this is wired in
+# main() right before handler.start().
+_socket_handler = None
+
+
+def _socket_connected() -> bool:
+    """True only when the Socket Mode WSS connection is actually up.
+
+    A wedged socket (the BrokenPipeError reconnect-fail loop) reports False, so
+    gating the heartbeat write on this makes the heartbeat file go stale during
+    a wedge — the exact signal health-check needs to tell 'wedged' (process
+    alive but deaf) apart from 'process alive and healthy'. Before the handler
+    is wired (early boot) this returns False and the heartbeat simply starts a
+    beat or two late; health-check's staleness threshold is generous enough
+    that the short boot gap never reads as a wedge.
+    """
+    handler = _socket_handler
+    try:
+        client = getattr(handler, "client", None)
+        return bool(client is not None and client.is_connected())
+    except Exception:
+        return False
+
 
 def _download_slack_file(file_dict: dict) -> str | None:
     """Download a Slack file to INBOX_DIR. Returns the local path or None.
@@ -1529,9 +1553,14 @@ def result_watcher():
                         print(f"  [proactive] no owner in allowFrom, skipping {claim.name}", flush=True)
                     claim.unlink(missing_ok=True)
 
-            # Heartbeat (used by health-check.py)
+            # Heartbeat (used by health-check.py) — written ONLY while the
+            # Socket Mode connection is actually up. This thread runs
+            # independently of the WSS loop, so an unconditional write would
+            # stay fresh through a socket wedge and hide it; gating on the live
+            # connection makes the heartbeat go stale during a wedge so
+            # health-check can detect an alive-but-deaf bridge.
             now = time.time()
-            if now - last_heartbeat >= 60:
+            if now - last_heartbeat >= 60 and _socket_connected():
                 try:
                     heartbeat_file.write_text(str(int(now)))
                     last_heartbeat = now
@@ -1649,6 +1678,8 @@ def main():  # pragma: no cover
     threading.Thread(target=result_watcher, name="slack-result-watcher", daemon=True).start()
     threading.Thread(target=_no_events_hint_thread, name="slack-no-events-hint", daemon=True).start()
     handler = SocketModeHandler(app, APP_TOKEN)
+    global _socket_handler
+    _socket_handler = handler  # let the heartbeat thread read live socket state
     handler.start()  # blocks
 
 
