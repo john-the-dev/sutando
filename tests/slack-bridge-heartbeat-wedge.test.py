@@ -5,14 +5,16 @@ lets health-check's existing heartbeat-staleness check (Check 3) see it.
 
 Does NOT import the bridge (slack_bolt is a CI-absent dep + the module has
 import-time side effects) — mirrors the other slack-bridge tests: source-
-structure assertions, plus a behavioral test that exec's the `_socket_connected`
-function in isolation against fake handlers. Run: python3 tests/slack-bridge-heartbeat-wedge.test.py
+structure assertions, plus a behavioral test that exec's the real
+`_socket_connected` source with its production filename and line numbers
+against fake handlers. Run: python3 tests/slack-bridge-heartbeat-wedge.test.py
 """
 import re
 import types
 from pathlib import Path
 
-SRC = (Path(__file__).resolve().parent.parent / "src" / "slack-bridge.py").read_text()
+SRC_PATH = Path(__file__).resolve().parent.parent / "src" / "slack-bridge.py"
+SRC = SRC_PATH.read_text()
 passed = []
 
 
@@ -46,14 +48,16 @@ check("handler-wired-before-start",
 
 # --- behavioral: exec the real _socket_connected source against fakes ---
 # Pull the function's source out of the module and exec it standalone, so we
-# test the actual code without importing slack_bolt.
+# test the actual code without importing slack_bolt. Preserve the production
+# filename and line offset so coverage attributes these branches to the real
+# source file instead of this test harness.
 m = re.search(r"\ndef _socket_connected\(\)[\s\S]+?\n(?=\S)", SRC)
 assert m, "could not locate _socket_connected source"
-fn_src = m.group(0)
+fn_src = "\n" * SRC[:m.start()].count("\n") + m.group(0)
 
 def run_socket_connected(handler):
     ns = {"_socket_handler": handler}
-    exec(fn_src, ns)
+    exec(compile(fn_src, str(SRC_PATH), "exec"), ns)
     return ns["_socket_connected"]()
 
 class _Client:
