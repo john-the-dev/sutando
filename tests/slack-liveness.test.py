@@ -120,24 +120,30 @@ class TickTests(unittest.TestCase):
 
 
 class OwnerResolveTests(unittest.TestCase):
-    def test_owner_ids_from_access(self):
-        tmp = Path(tempfile.mkdtemp())
+    def _write_access(self, tmp, payload):
         acc = tmp / ".claude-sutando" / "channels" / "slack"
         acc.mkdir(parents=True)
-        (acc / "access.json").write_text('{"allowFrom": ["U1", "U2"]}')
+        (acc / "access.json").write_text(payload)
+
+    def test_prefers_tofu_owner_over_list_order(self):
+        # A collaborator (team tier) is listed FIRST; the real owner must win.
+        tmp = Path(tempfile.mkdtemp())
+        self._write_access(tmp, '{"allowFrom": ["Ucollab", "Uowner"], '
+                                '"tierMap": {"Ucollab": "team", "Uowner": "owner"}, '
+                                '"tofuOwner": "Uowner"}')
         orig = liveness._WS
         liveness._WS = tmp
         try:
-            self.assertEqual(liveness._owner_ids_from_access(), ["U1", "U2"])
+            self.assertEqual(liveness._resolve_owner_id(), "Uowner")
         finally:
             liveness._WS = orig
 
-    def test_owner_ids_missing_file(self):
+    def test_missing_file_returns_none(self):
         tmp = Path(tempfile.mkdtemp())
         orig = liveness._WS
         liveness._WS = tmp
         try:
-            self.assertEqual(liveness._owner_ids_from_access(), [])
+            self.assertIsNone(liveness._resolve_owner_id())
         finally:
             liveness._WS = orig
 
@@ -171,12 +177,12 @@ class MainOnceTests(unittest.TestCase):
         self.assertEqual(rc, 1)
 
     def test_main_owner_unresolvable(self):
-        orig = liveness._owner_ids_from_access
-        liveness._owner_ids_from_access = lambda: []
+        orig = liveness._resolve_owner_id
+        liveness._resolve_owner_id = lambda: None
         try:
             rc = liveness.main(["--user", "owner", "--heartbeat", str(self.hb), "--once"])
         finally:
-            liveness._owner_ids_from_access = orig
+            liveness._resolve_owner_id = orig
         self.assertEqual(rc, 1)
 
     def test_bot_token_from_env(self):

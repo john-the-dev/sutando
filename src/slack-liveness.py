@@ -11,9 +11,15 @@ While the socket is up → "🟢 online — last alive HH:MM". Once the bridge h
 goes stale → "🔴 may be offline" and the timestamp freezes, so a stale time really
 means the agent is down/wedged.
 
-Liveness source: the slack-bridge heartbeat file, written only while the socket is
-up. views.publish needs the app's **Home Tab** enabled (Slack app → App Home →
-Home Tab); no extra OAuth scope. The owner is resolved from the bridge access.json.
+Liveness source: the slack-bridge heartbeat file. NOTE: this is only a true
+socket-liveness signal once #2387 ("gate heartbeat on live socket") lands — on
+main the heartbeat is refreshed unconditionally by the result-watcher loop, so a
+wedged socket could still read green. This indicator therefore DEPENDS on #2387;
+until it merges, "online" means "bridge process alive", not "socket confirmed up".
+
+views.publish needs the app's **Home Tab** enabled (Slack app → App Home → Home
+Tab); no extra OAuth scope. The owner is resolved via the bridge's
+`resolve_proactive_owner_id` (tofuOwner / owner-tier), never raw allowFrom order.
 
 Run (daemon):  python3 src/slack-liveness.py [--user owner]
 Options: --interval SEC (default 300) · --stale-sec SEC (default 120) ·
@@ -57,15 +63,24 @@ def _bot_token() -> str | None:
     return None  # pragma: no cover
 
 
-def _owner_ids_from_access() -> list:
-    """Owner Slack user IDs from the bridge's access.json allowFrom (may be empty)."""
+def _resolve_owner_id() -> str | None:
+    """The bridge's configured owner Slack id — NOT just allowFrom[0].
+
+    Reuses the bridge's `resolve_proactive_owner_id`, which prefers `tofuOwner`
+    and filters `tierMap` to owner-tier, so a collaborator listed before the
+    owner in `allowFrom` never gets the liveness Home tab (qingyun-wu CR on #2427).
+    """
     access = _WS / ".claude-sutando" / "channels" / "slack" / "access.json"
     try:
         data = json.loads(access.read_text())
     except (OSError, ValueError):
-        return []
-    allow = data.get("allowFrom", [])
-    return [str(u) for u in allow] if isinstance(allow, list) else []
+        return None
+    try:
+        from slack_owner import resolve_proactive_owner_id  # type: ignore
+    except ImportError:  # pragma: no cover — src/ not importable
+        allow = data.get("allowFrom") or []
+        return str(allow[0]) if allow else None
+    return resolve_proactive_owner_id(data)
 
 
 def heartbeat_fresh(path, stale_sec: int, now: float) -> bool:
@@ -142,11 +157,10 @@ def main(argv=None) -> int:
 
     user = args.user
     if user == "owner":
-        ids = _owner_ids_from_access()
-        if not ids:
+        user = _resolve_owner_id()
+        if not user:
             print("slack-liveness: no owner in access.json to publish a Home tab for", file=sys.stderr)
             return 1
-        user = ids[0]
 
     interval_min = max(1, round(args.interval / 60))
     store: dict = {}
