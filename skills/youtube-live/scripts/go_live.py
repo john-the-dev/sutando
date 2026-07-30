@@ -42,17 +42,14 @@ def _log(event, **kw):
 
 
 def _ffmpeg_bin():
-    """Resolve the ffmpeg binary robustly across hosts (Homebrew arm/intel, PATH)."""
-    for cand in ("ffmpeg", "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
-        found = shutil.which(cand) if "/" not in cand else (cand if os.path.exists(cand) else None)
-        if found:
-            return found
-    return None
+    """Resolve the ffmpeg binary from PATH (Homebrew installs land on PATH)."""
+    return shutil.which("ffmpeg")
 
 
 def _load_manifest_config():
     """Read the skill manifest's `config` block for defaults (bitrate, resolution, etc.)."""
-    manifest = Path(__file__).resolve().parent.parent / "manifest.json"
+    # manifest.json sits one level up from this scripts/ dir (the skill root).
+    manifest = Path(__file__).resolve().parents[1] / "manifest.json"
     try:
         data = json.loads(manifest.read_text())
         return data.get("config", {}) or {}
