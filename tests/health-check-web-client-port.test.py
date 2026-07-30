@@ -38,12 +38,24 @@ with tempfile.TemporaryDirectory() as tmp:
         "canonical dotenv CLIENT_PORT is honored",
     )
     check(
-        hc.resolve_web_client_port(env={"CLIENT_PORT": "9090"}, env_path=env_path) == {"port": 9090},
-        "process environment overrides dotenv",
+        hc.resolve_web_client_port(env={"CLIENT_PORT": "9090"}, env_path=env_path) == {"port": 8081},
+        "sourced dotenv overrides an inherited process value",
     )
     check(
-        hc.resolve_web_client_port(env={"CLIENT_PORT": ""}, env_path=env_path) == {"port": 8080},
-        "empty process environment matches startup fallback semantics",
+        hc.resolve_web_client_port(env={"CLIENT_PORT": ""}, env_path=env_path) == {"port": 8081},
+        "sourced dotenv overrides an empty inherited process value",
+    )
+
+    env_path.write_text("OTHER_PORT=7000\n")
+    check(
+        hc.resolve_web_client_port(env={"CLIENT_PORT": "9090"}, env_path=env_path) == {"port": 9090},
+        "process value survives when dotenv does not assign CLIENT_PORT",
+    )
+
+    env_path.write_text("CLIENT_PORT=\n")
+    check(
+        hc.resolve_web_client_port(env={"CLIENT_PORT": "9090"}, env_path=env_path) == {"port": 8080},
+        "empty sourced dotenv value matches startup fallback semantics",
     )
 
     env_path.write_text('export CLIENT_PORT="8181" # local conflict\n')

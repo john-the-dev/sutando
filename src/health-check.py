@@ -178,12 +178,13 @@ def resolve_web_client_port(
     env: Optional[dict] = None,
     env_path: Optional[Path] = None,
 ) -> dict:
-    """Resolve CLIENT_PORT with the same env-over-dotenv precedence as startup."""
+    """Resolve CLIENT_PORT with the same sourced-dotenv precedence as startup."""
     env = os.environ if env is None else env
     env_path = _resolve_dotenv() if env_path is None else env_path
     file_value: Optional[str] = None
+    file_has_value = False
 
-    if "CLIENT_PORT" not in env and env_path.exists():
+    if env_path.exists():
         try:
             lines = env_path.read_text().splitlines()
         except OSError as exc:
@@ -209,8 +210,10 @@ def resolve_web_client_port(
             if len(parsed) > 1:
                 return {"error": f"{env_path.name}:{line_no} malformed CLIENT_PORT value"}
             file_value = parsed[0] if parsed else ""
+            file_has_value = True
 
-    value = str(env.get("CLIENT_PORT") or file_value or "8080").strip()
+    configured = file_value if file_has_value else env.get("CLIENT_PORT")
+    value = str(configured or "8080").strip()
     try:
         port = int(value)
     except ValueError:
