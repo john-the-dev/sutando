@@ -510,9 +510,21 @@ fi
 # line per launch; consecutive entries bound each session's lifetime, which
 # is what session-recap tooling needs to pick the right transcript (owner
 # ask 2026-07-13). Best-effort: never block the launch on it.
+#
+# ALSO write the runtime marker state/core-runtime.json declaring THIS core as
+# the Claude runtime. The Codex launcher (src/agent/codex/cli/start-cli.sh)
+# writes runtime:"codex" the same way; the Claude launcher previously wrote
+# neither the marker nor the runtime field on session-starts.log. So after a
+# Codex->Claude switch, core-runtime.json stayed whatever the last Codex boot
+# wrote ("codex"), or was absent — readers (health-check's Codex-repair path,
+# the dashboard, rollback logic) then saw a runtime that no longer matched
+# reality. It failed closed via a tmux-env cross-check, but the marker should
+# just be accurate. Best-effort, same as the log stamp — never block the launch.
 if _ws="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null)" && [ -n "$_ws" ]; then
   mkdir -p "$_ws/state" 2>/dev/null || true
-  printf '{"host":"%s","session_started_at":%s,"iso":"%s","source":"start-cli"}\n' \
+  printf '{"runtime":"claude","session":"%s","started_at":%s}\n' \
+    "$SESSION" "$(date +%s)" > "$_ws/state/core-runtime.json" 2>/dev/null || true
+  printf '{"host":"%s","session_started_at":%s,"iso":"%s","source":"start-cli","runtime":"claude"}\n' \
     "$(hostname | sed 's/\..*//')" "$(date +%s)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     >> "$_ws/state/session-starts.log" 2>/dev/null || true
 fi
