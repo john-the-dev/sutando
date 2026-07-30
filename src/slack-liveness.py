@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""Self-reported Slack "last alive" indicator.
+"""Self-reported Slack liveness on the bot's **App Home** tab.
 
-Slack does not render presence for bots (see reference: setPresence returns ok
-but paints no dot for a Socket Mode bot; profile-status is blocked for bot
-tokens). So instead of a green dot, we self-report: keep ONE message in the
-owner's DM and refresh it in place (chat.update) every few minutes with the last
-time the bridge's Socket Mode socket was confirmed live. If the timestamp stops
-advancing (message goes stale), the agent is offline — the exact signal the
-owner asked for.
+Slack shows no presence for bots (setPresence returns ok but paints no dot for a
+Socket Mode bot; profile-status is blocked for bot tokens). And editing a DM
+message every few minutes is easy to miss and clutters history. So we publish a
+dedicated **App Home** view for the owner and republish it every few minutes with
+the last time the bridge's Socket Mode socket was confirmed live.
 
-Liveness source: the slack-bridge heartbeat file, which is written only while the
-socket is actually up. A fresh heartbeat = live socket; a stale one = down/wedged,
-so we flip the message to "may be offline" and freeze the last-alive time.
+While the socket is up → "🟢 online — last alive HH:MM". Once the bridge heartbeat
+goes stale → "🔴 may be offline" and the timestamp freezes, so a stale time really
+means the agent is down/wedged.
 
-Run (daemon):
-    python3 src/slack-liveness.py --channel <owner-dm-id>
-Options: --interval SEC (default 300) · --stale-sec SEC (heartbeat freshness,
-default 120) · --heartbeat PATH · --state PATH · --once (single update, for tests
-/ smoke). Token from $SLACK_BOT_TOKEN or channels/slack/.env.
+Liveness source: the slack-bridge heartbeat file, written only while the socket is
+up. views.publish needs the app's **Home Tab** enabled (Slack app → App Home →
+Home Tab); no extra OAuth scope. The owner is resolved from the bridge access.json.
+
+Run (daemon):  python3 src/slack-liveness.py [--user owner]
+Options: --interval SEC (default 300) · --stale-sec SEC (default 120) ·
+--heartbeat PATH · --once (single publish, for tests/smoke).
 """
 
 from __future__ import annotations
@@ -27,12 +27,10 @@ import json
 import os
 import sys
 import time
-import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-# Make repo src/ importable for the workspace resolver.
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
 try:
@@ -42,7 +40,6 @@ except Exception:  # pragma: no cover
     _WS = _REPO / "workspace"  # pragma: no cover
 
 DEFAULT_HEARTBEAT = _WS / "state" / "slack-bridge.heartbeat"
-DEFAULT_STATE = _WS / "state" / "slack-liveness.json"
 _SLACK = "https://slack.com/api"
 
 
@@ -60,12 +57,20 @@ def _bot_token() -> str | None:
     return None  # pragma: no cover
 
 
-def heartbeat_fresh(path, stale_sec: int, now: float) -> bool:
-    """True if the bridge heartbeat exists and is younger than stale_sec.
+def _owner_ids_from_access() -> list:
+    """Owner Slack user IDs from the bridge's access.json allowFrom (may be empty)."""
+    access = _WS / ".claude-sutando" / "channels" / "slack" / "access.json"
+    try:
+        data = json.loads(access.read_text())
+    except (OSError, ValueError):
+        return []
+    allow = data.get("allowFrom", [])
+    return [str(u) for u in allow] if isinstance(allow, list) else []
 
-    The heartbeat records the last epoch the Socket Mode socket was confirmed
-    live, so freshness here means the bridge is actually connected.
-    """
+
+def heartbeat_fresh(path, stale_sec: int, now: float) -> bool:
+    """True if the bridge heartbeat exists and is younger than stale_sec — i.e.
+    the Socket Mode socket was confirmed live within that window."""
     try:
         beat = int(Path(path).read_text().strip())
     except (OSError, ValueError):
@@ -73,15 +78,24 @@ def heartbeat_fresh(path, stale_sec: int, now: float) -> bool:
     return (now - beat) <= stale_sec
 
 
-def compose_message(alive: bool, last_alive_hhmm: str, interval_min: int) -> str:
-    """The single-line status text. `last_alive_hhmm` is the last time the socket
-    was confirmed live (frozen once the bridge goes quiet)."""
+def build_home_view(alive: bool, last_alive_hhmm: str, interval_min: int) -> dict:
+    """The App Home view (Block Kit) showing the liveness status."""
     if alive:
-        return (f":large_green_circle: *Sutando — online*  ·  last alive *{last_alive_hhmm}*  ·  "
-                f"updates every ~{interval_min} min "
-                f"(if this time is more than ~{interval_min} min old, I may be offline)")
-    return (f":red_circle: *Sutando — may be offline*  ·  last alive *{last_alive_hhmm}*  ·  "
-            f"the heartbeat went stale, so I'm likely down or my Slack socket wedged")
+        header = ":large_green_circle:  Sutando — Online"
+        detail = f"*Last alive:* {last_alive_hhmm}   ·   updates every ~{interval_min} min"
+        note = f"If this time is more than ~{interval_min} min old, I may be offline."
+    else:
+        header = ":red_circle:  Sutando — may be offline"
+        detail = f"*Last alive:* {last_alive_hhmm}"
+        note = "The heartbeat went stale, so I'm likely down or my Slack socket wedged."
+    return {
+        "type": "home",
+        "blocks": [
+            {"type": "header", "text": {"type": "plain_text", "text": header, "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": detail}},
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": note}]},
+        ],
+    }
 
 
 def _api(token: str, method: str, payload: dict) -> dict:  # pragma: no cover — network boundary; tests monkeypatch this
@@ -94,82 +108,31 @@ def _api(token: str, method: str, payload: dict) -> dict:  # pragma: no cover �
     return json.load(urllib.request.urlopen(req))  # pragma: no cover
 
 
-def _owner_ids_from_access() -> list:
-    """Owner Slack user IDs from the bridge's access.json allowFrom (may be empty)."""
-    access = _WS / ".claude-sutando" / "channels" / "slack" / "access.json"
-    try:
-        data = json.loads(access.read_text())
-    except (OSError, ValueError):
-        return []
-    allow = data.get("allowFrom", [])
-    return [str(u) for u in allow] if isinstance(allow, list) else []
+def publish_home(token: str, user_id: str, view: dict) -> dict:
+    """Publish (idempotent replace) the owner's App Home view. Stateless — no
+    message ts to track, unlike the DM approach."""
+    return _api(token, "views.publish", {"user_id": user_id, "view": view})
 
 
-def resolve_channel(token: str, channel: str) -> str | None:
-    """Pass a literal channel id through; resolve the sentinel "owner" to the
-    owner's DM channel via conversations.open (needs im:write, which the bridge
-    already has). Returns None if it can't be resolved."""
-    if channel != "owner":
-        return channel
-    ids = _owner_ids_from_access()
-    if not ids:
-        return None
-    resp = _api(token, "conversations.open", {"users": ids[0]})  # pragma: no cover — network
-    return (resp.get("channel") or {}).get("id") if resp.get("ok") else None  # pragma: no cover
-
-
-def _load_state(path) -> dict:
-    try:
-        return json.loads(Path(path).read_text())
-    except (OSError, ValueError):
-        return {}
-
-
-def _save_state(path, data: dict) -> None:
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(f".json.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(data))
-    os.replace(tmp, p)
-
-
-def post_or_update(token: str, channel: str, text: str, state_path) -> dict:
-    """Post the status message once, then chat.update the same message thereafter.
-    Reposts fresh if the stored message was deleted. Returns the API response."""
-    state = _load_state(state_path)
-    ts = state.get("ts") if state.get("channel") == channel else None
-    if ts:
-        resp = _api(token, "chat.update", {"channel": channel, "ts": ts, "text": text})
-        if resp.get("ok"):
-            return resp
-        # Message gone (deleted) — fall through to a fresh post.
-    resp = _api(token, "chat.postMessage", {"channel": channel, "text": text})
-    if resp.get("ok"):
-        _save_state(state_path, {"channel": channel, "ts": resp.get("ts")})
-    return resp
-
-
-def tick(token: str, channel: str, *, heartbeat, state_path, stale_sec: int,
-         interval_min: int, now: float, last_alive_store: dict) -> dict:
-    """One update cycle. Advances the last-alive clock only while the heartbeat is
-    fresh; freezes it (and flips to offline) once the bridge goes quiet."""
+def tick(token: str, user_id: str, *, heartbeat, stale_sec: int, interval_min: int,
+         now: float, last_alive_store: dict) -> dict:
+    """One publish cycle. Advances the last-alive clock only while the heartbeat
+    is fresh; freezes it (and flips to offline) once the bridge goes quiet."""
     alive = heartbeat_fresh(heartbeat, stale_sec, now)
     if alive:
         last_alive_store["hhmm"] = datetime.fromtimestamp(now).strftime("%H:%M")
     hhmm = last_alive_store.get("hhmm") or datetime.fromtimestamp(now).strftime("%H:%M")
-    text = compose_message(alive, hhmm, interval_min)
-    return post_or_update(token, channel, text, state_path)
+    return publish_home(token, user_id, build_home_view(alive, hhmm, interval_min))
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Self-reported Slack liveness indicator.")
-    ap.add_argument("--channel", required=True,
-                    help="Channel id to post into, or the sentinel 'owner' to auto-resolve the owner DM.")
+    ap = argparse.ArgumentParser(description="Self-reported Slack liveness on the App Home tab.")
+    ap.add_argument("--user", default="owner",
+                    help="Slack user id whose Home tab to publish, or 'owner' to resolve from access.json.")
     ap.add_argument("--interval", type=int, default=300, help="Seconds between updates (default 300).")
     ap.add_argument("--stale-sec", type=int, default=120, help="Heartbeat freshness threshold (default 120).")
     ap.add_argument("--heartbeat", default=str(DEFAULT_HEARTBEAT))
-    ap.add_argument("--state", default=str(DEFAULT_STATE))
-    ap.add_argument("--once", action="store_true", help="Single update then exit (smoke/test).")
+    ap.add_argument("--once", action="store_true", help="Single publish then exit (smoke/test).")
     args = ap.parse_args(argv)
 
     token = _bot_token()
@@ -177,20 +140,23 @@ def main(argv=None) -> int:
         print("slack-liveness: no SLACK_BOT_TOKEN (env or channels/slack/.env)", file=sys.stderr)
         return 1
 
-    channel = resolve_channel(token, args.channel)
-    if not channel:
-        print("slack-liveness: could not resolve channel "
-              f"'{args.channel}' (no owner in access.json?)", file=sys.stderr)
-        return 1
+    user = args.user
+    if user == "owner":
+        ids = _owner_ids_from_access()
+        if not ids:
+            print("slack-liveness: no owner in access.json to publish a Home tab for", file=sys.stderr)
+            return 1
+        user = ids[0]
 
     interval_min = max(1, round(args.interval / 60))
     store: dict = {}
     while True:  # pragma: no cover
-        resp = tick(token, channel, heartbeat=args.heartbeat, state_path=args.state,
-                    stale_sec=args.stale_sec, interval_min=interval_min,
-                    now=time.time(), last_alive_store=store)
+        resp = tick(token, user, heartbeat=args.heartbeat, stale_sec=args.stale_sec,
+                    interval_min=interval_min, now=time.time(), last_alive_store=store)
         if not resp.get("ok"):
-            print(f"slack-liveness: update failed: {resp.get('error')}", file=sys.stderr)
+            err = resp.get("error")
+            hint = " (enable the app's Home Tab: Slack app → App Home → Home Tab)" if err == "not_enabled" else ""
+            print(f"slack-liveness: views.publish failed: {err}{hint}", file=sys.stderr)
         if args.once:
             return 0 if resp.get("ok") else 1
         time.sleep(args.interval)

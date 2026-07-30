@@ -97,7 +97,7 @@ and re-run `python3 scripts/gen-src-map.py`.
 - **`session-handoff.sh`** — Session handoff — writes a summary for the next session to pick up.
 - **`single_instance.py`** — Single-instance guard for long-running bridge daemons.
 - **`slack-bridge.py`** — Slack bridge for Sutando — receives DMs + @mentions via Socket Mode, writes to tasks/, sends replies from results/.
-- **`slack-liveness.py`** — Self-reported Slack "last alive" indicator.
+- **`slack-liveness.py`** — Self-reported Slack liveness on the bot's **App Home** tab.
 - **`slack_owner.py`** — Slack owner-recipient resolution helpers.
 - **`slack_proactive_receipts.py`** — Durable idempotency receipts for Slack proactive-result delivery.
 - **`startup-runtime.sh`** — Runtime/credential decisions shared by startup and behavior-level tests.

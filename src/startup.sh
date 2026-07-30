@@ -1153,10 +1153,10 @@ elif _SL_ENV="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path channels
   fi
 
   # 7c. Slack liveness indicator — Slack shows no bot presence, so self-report a
-  # "last alive HH:MM" in the owner DM, refreshed while the bridge socket is live.
+  # "last alive HH:MM" on the bot's App Home tab, refreshed while the socket is live.
   if ! pgrep -f "src/slack-liveness.py" > /dev/null 2>&1; then
     set -a; . "$_SL_ENV"; set +a
-    python3 "$REPO/src/slack-liveness.py" --channel owner > "$LOGS_DIR/slack-liveness.log" 2>&1 &
+    python3 "$REPO/src/slack-liveness.py" --user owner > "$LOGS_DIR/slack-liveness.log" 2>&1 &
     echo "  ✓ slack liveness indicator"
   else
     echo "  ✓ slack liveness indicator (already running)"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for src/slack-liveness.py — the self-reported Slack "last alive" indicator.
+"""Tests for src/slack-liveness.py — self-reported Slack liveness on the App Home tab.
 
-CI-safe: no network (Slack calls are monkeypatched), no daemon loop.
+CI-safe: no network (views.publish is monkeypatched), no daemon loop.
 Run: python3 tests/slack-liveness.test.py
 """
 
@@ -25,133 +25,101 @@ class HeartbeatFreshTests(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.hb = self.tmp / "hb"
 
-    def test_fresh_heartbeat(self):
+    def test_fresh(self):
         now = 1_000_000
         self.hb.write_text(str(now - 30))
         self.assertTrue(liveness.heartbeat_fresh(self.hb, 120, now))
 
-    def test_stale_heartbeat(self):
+    def test_stale(self):
         now = 1_000_000
         self.hb.write_text(str(now - 500))
         self.assertFalse(liveness.heartbeat_fresh(self.hb, 120, now))
 
-    def test_missing_heartbeat(self):
+    def test_missing(self):
         self.assertFalse(liveness.heartbeat_fresh(self.tmp / "nope", 120, 1_000_000))
 
-    def test_garbage_heartbeat(self):
-        self.hb.write_text("")  # the empty-file race that flaked codex-core-launcher
+    def test_garbage(self):
+        self.hb.write_text("")  # empty-file race
         self.assertFalse(liveness.heartbeat_fresh(self.hb, 120, 1_000_000))
 
 
-class ComposeTests(unittest.TestCase):
-    def test_alive_message(self):
-        m = liveness.compose_message(True, "11:23", 5)
-        self.assertIn("online", m)
-        self.assertIn("11:23", m)
-        self.assertIn("5 min", m)
-        self.assertIn("large_green_circle", m)
+class HomeViewTests(unittest.TestCase):
+    def test_alive_view(self):
+        v = liveness.build_home_view(True, "11:23", 5)
+        self.assertEqual(v["type"], "home")
+        blob = str(v)
+        self.assertIn("Online", blob)
+        self.assertIn("11:23", blob)
+        self.assertIn("large_green_circle", blob)
 
-    def test_offline_message(self):
-        m = liveness.compose_message(False, "11:23", 5)
-        self.assertIn("offline", m)
-        self.assertIn("11:23", m)
-        self.assertIn("red_circle", m)
+    def test_offline_view(self):
+        v = liveness.build_home_view(False, "11:23", 5)
+        blob = str(v)
+        self.assertIn("offline", blob)
+        self.assertIn("red_circle", blob)
 
 
 class _FakeApi:
-    """Records calls; returns scripted responses keyed by method."""
     def __init__(self, responses):
         self.responses = responses
         self.calls = []
 
     def __call__(self, token, method, payload):
         self.calls.append((method, payload))
-        r = self.responses.get(method, {"ok": True, "ts": "1.1"})
-        return r
+        return self.responses.get(method, {"ok": True})
 
 
-class PostOrUpdateTests(unittest.TestCase):
+class PublishTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-        self.state = self.tmp / "state.json"
         self._orig = liveness._api
 
     def tearDown(self):
         liveness._api = self._orig
 
-    def test_first_post_saves_ts(self):
-        liveness._api = _FakeApi({"chat.postMessage": {"ok": True, "ts": "111.222"}})
-        r = liveness.post_or_update("tok", "C1", "hi", self.state)
+    def test_publish_home_targets_user(self):
+        liveness._api = _FakeApi({"views.publish": {"ok": True}})
+        r = liveness.publish_home("tok", "U9", {"type": "home", "blocks": []})
         self.assertTrue(r["ok"])
-        saved = __import__("json").loads(self.state.read_text())
-        self.assertEqual(saved, {"channel": "C1", "ts": "111.222"})
-        self.assertEqual(liveness._api.calls[0][0], "chat.postMessage")
-
-    def test_subsequent_updates_same_message(self):
-        self.state.write_text('{"channel": "C1", "ts": "111.222"}')
-        liveness._api = _FakeApi({"chat.update": {"ok": True, "ts": "111.222"}})
-        liveness.post_or_update("tok", "C1", "hi again", self.state)
-        self.assertEqual(liveness._api.calls[0][0], "chat.update")
-        self.assertEqual(liveness._api.calls[0][1]["ts"], "111.222")
-
-    def test_reposts_when_message_gone(self):
-        self.state.write_text('{"channel": "C1", "ts": "111.222"}')
-        liveness._api = _FakeApi({
-            "chat.update": {"ok": False, "error": "message_not_found"},
-            "chat.postMessage": {"ok": True, "ts": "333.444"},
-        })
-        r = liveness.post_or_update("tok", "C1", "revive", self.state)
-        self.assertTrue(r["ok"])
-        methods = [c[0] for c in liveness._api.calls]
-        self.assertEqual(methods, ["chat.update", "chat.postMessage"])
-        saved = __import__("json").loads(self.state.read_text())
-        self.assertEqual(saved["ts"], "333.444")
+        method, payload = liveness._api.calls[0]
+        self.assertEqual(method, "views.publish")
+        self.assertEqual(payload["user_id"], "U9")
 
 
 class TickTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.state = self.tmp / "state.json"
         self.hb = self.tmp / "hb"
         self._orig = liveness._api
-        liveness._api = _FakeApi({"chat.postMessage": {"ok": True, "ts": "1.1"},
-                                  "chat.update": {"ok": True, "ts": "1.1"}})
+        liveness._api = _FakeApi({"views.publish": {"ok": True}})
 
     def tearDown(self):
         liveness._api = self._orig
 
-    def test_tick_alive_advances_clock(self):
+    def test_alive_advances_clock_and_publishes_online(self):
         now = 1_000_000
-        self.hb.write_text(str(now - 10))  # fresh
+        self.hb.write_text(str(now - 10))
         store = {}
-        liveness.tick("tok", "C1", heartbeat=self.hb, state_path=self.state,
-                      stale_sec=120, interval_min=5, now=now, last_alive_store=store)
-        self.assertIn("hhmm", store)  # clock advanced because alive
-        sent = liveness._api.calls[-1][1]["text"]
-        self.assertIn("online", sent)
+        liveness.tick("tok", "U1", heartbeat=self.hb, stale_sec=120,
+                      interval_min=5, now=now, last_alive_store=store)
+        self.assertIn("hhmm", store)
+        view = liveness._api.calls[-1][1]["view"]
+        self.assertIn("Online", str(view))
 
-    def test_tick_stale_freezes_and_flips_offline(self):
-        # First a fresh tick to set a last-alive time...
+    def test_stale_freezes_time_and_flips_offline(self):
         t0 = 1_000_000
         self.hb.write_text(str(t0 - 10))
         store = {}
-        liveness.tick("tok", "C1", heartbeat=self.hb, state_path=self.state,
-                      stale_sec=120, interval_min=5, now=t0, last_alive_store=store)
+        liveness.tick("tok", "U1", heartbeat=self.hb, stale_sec=120,
+                      interval_min=5, now=t0, last_alive_store=store)
         frozen = store["hhmm"]
-        # ...then a stale tick: clock must NOT advance, message flips offline.
         self.hb.write_text(str(t0 - 999))
-        liveness.tick("tok", "C1", heartbeat=self.hb, state_path=self.state,
-                      stale_sec=120, interval_min=5, now=t0 + 3600, last_alive_store=store)
-        self.assertEqual(store["hhmm"], frozen)  # frozen at last-alive
-        sent = liveness._api.calls[-1][1]["text"]
-        self.assertIn("offline", sent)
+        liveness.tick("tok", "U1", heartbeat=self.hb, stale_sec=120,
+                      interval_min=5, now=t0 + 3600, last_alive_store=store)
+        self.assertEqual(store["hhmm"], frozen)
+        self.assertIn("offline", str(liveness._api.calls[-1][1]["view"]))
 
 
-class ResolveChannelTests(unittest.TestCase):
-    def test_literal_channel_passthrough(self):
-        # A real id passes through untouched — no network.
-        self.assertEqual(liveness.resolve_channel("tok", "C12345"), "C12345")
-
+class OwnerResolveTests(unittest.TestCase):
     def test_owner_ids_from_access(self):
         tmp = Path(tempfile.mkdtemp())
         acc = tmp / ".claude-sutando" / "channels" / "slack"
@@ -177,32 +145,38 @@ class ResolveChannelTests(unittest.TestCase):
 class MainOnceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.state = self.tmp / "state.json"
         self.hb = self.tmp / "hb"
-        self.hb.write_text(str(int(time.time()) - 5))  # fresh
+        self.hb.write_text(str(int(time.time()) - 5))
         self._orig = liveness._api
-        liveness._api = _FakeApi({"chat.postMessage": {"ok": True, "ts": "1.1"}})
+        liveness._api = _FakeApi({"views.publish": {"ok": True}})
         os.environ["SLACK_BOT_TOKEN"] = "xoxb-test"
 
     def tearDown(self):
         liveness._api = self._orig
         os.environ.pop("SLACK_BOT_TOKEN", None)
 
-    def test_main_once_posts_and_returns_zero(self):
-        rc = liveness.main(["--channel", "C9", "--heartbeat", str(self.hb),
-                            "--state", str(self.state), "--once"])
+    def test_main_once_explicit_user(self):
+        rc = liveness.main(["--user", "U9", "--heartbeat", str(self.hb), "--once"])
         self.assertEqual(rc, 0)
-        self.assertEqual(liveness._api.calls[-1][0], "chat.postMessage")
+        self.assertEqual(liveness._api.calls[-1][0], "views.publish")
 
-    def test_main_missing_token_returns_1(self):
+    def test_main_missing_token(self):
         os.environ.pop("SLACK_BOT_TOKEN", None)
         orig = liveness._bot_token
         liveness._bot_token = lambda: None
         try:
-            rc = liveness.main(["--channel", "C9", "--heartbeat", str(self.hb),
-                                "--state", str(self.state), "--once"])
+            rc = liveness.main(["--user", "U9", "--heartbeat", str(self.hb), "--once"])
         finally:
             liveness._bot_token = orig
+        self.assertEqual(rc, 1)
+
+    def test_main_owner_unresolvable(self):
+        orig = liveness._owner_ids_from_access
+        liveness._owner_ids_from_access = lambda: []
+        try:
+            rc = liveness.main(["--user", "owner", "--heartbeat", str(self.hb), "--once"])
+        finally:
+            liveness._owner_ids_from_access = orig
         self.assertEqual(rc, 1)
 
     def test_bot_token_from_env(self):
