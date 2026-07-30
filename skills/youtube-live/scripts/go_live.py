@@ -30,9 +30,40 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-PID_FILE = "/tmp/sutando-youtube-live.pid"
+
+def _state_dir() -> Path:
+    """Sutando's scoped, per-user state dir (never world-shared /tmp).
+
+    Prefers ``<workspace>/state`` (resolved via the repo helper); falls back to a
+    uid-scoped tmp dir if the workspace can't be resolved. Created 0700 so a
+    peer user can't drop a pid file we'd act on.
+    """
+    d = None
+    try:
+        repo = next(p for p in Path(__file__).resolve().parents
+                    if (p / "src" / "workspace_default.py").is_file())
+        sys.path.insert(0, str(repo / "src"))
+        from workspace_default import resolve_workspace  # type: ignore
+        d = Path(resolve_workspace()) / "state"
+    except Exception:
+        base = os.environ.get("TMPDIR") or "/tmp"
+        d = Path(base) / f"sutando-{os.getuid()}"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    return d
+
+
+# Resolved once at import; tests override PID_FILE directly. Scoped to the
+# workspace state area (owner-only) instead of a world-writable /tmp path so a
+# stale or planted pid file can't make `stop` signal an unrelated process.
+PID_FILE = str(_state_dir() / "youtube-live.pid")
+FFMPEG_LOG = str(_state_dir() / "youtube-live.ffmpeg.log")
 DEFAULT_INGEST_BASE = "rtmp://a.rtmp.youtube.com/live2"
 _REDACTION = "<STREAM_KEY>"
 
@@ -146,6 +177,35 @@ def _running_pid():
         return None
 
 
+def _proc_looks_like_our_stream(pid) -> bool:
+    """True only if `pid`'s command line looks like the ffmpeg→RTMP stream this
+    skill starts. Guards `stop` against a stale/reused/planted pid pointing at an
+    unrelated process — we refuse to SIGTERM anything that isn't our ffmpeg."""
+    try:
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return False
+    return "ffmpeg" in out and "rtmp://" in out
+
+
+def _write_pidfile(pid) -> None:
+    """Write the pid owner-only (0600) so a peer can't tamper with it."""
+    path = Path(PID_FILE)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(str(pid))
+
+
+def _log_tail(path, limit: int = 800) -> str:
+    """Last `limit` chars of a log file, for surfacing ffmpeg's failure reason."""
+    try:
+        data = Path(path).read_text(errors="replace")
+    except OSError:
+        return ""
+    return data[-limit:].strip()
+
+
 def cmd_start(args):
     if _running_pid():
         print(json.dumps({"ok": False, "error": "a stream is already running; stop it first",
@@ -174,10 +234,25 @@ def cmd_start(args):
         print(json.dumps({"ok": False, "error": "ffmpeg not found on PATH"}))
         return 1
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    Path(PID_FILE).write_text(str(proc.pid))
+    # Keep ffmpeg's stderr for diagnostics instead of discarding it — otherwise a
+    # broadcast that dies on bad args/network leaves no trace.
+    log_fh = open(FFMPEG_LOG, "wb")
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=log_fh)
+
+    # Don't claim "started" if ffmpeg exited immediately (bad key, bad source,
+    # network refused). Give it a moment, then confirm it's still alive.
+    time.sleep(args.startup_grace)
+    if proc.poll() is not None:
+        log_fh.close()
+        tail = _log_tail(FFMPEG_LOG)
+        print(json.dumps({"ok": False, "error": "ffmpeg exited immediately "
+                          f"(rc={proc.returncode}) — stream not started", "ffmpeg_stderr": tail}))
+        return 1
+
+    _write_pidfile(proc.pid)
     _log("youtube_live_started", pid=proc.pid, source=args.source)
     print(json.dumps({"ok": True, "started": True, "pid": proc.pid, "source": args.source,
+                      "log": FFMPEG_LOG,
                       "note": "streaming to YouTube; if the stream shows offline, confirm auto-start is "
                               "enabled on the YouTube stream or start the broadcast in Studio"}))
     return 0
@@ -190,6 +265,14 @@ def cmd_stop(_args):
             os.remove(PID_FILE)
         print(json.dumps({"ok": True, "stopped": False, "note": "no stream was running"}))
         return 0
+    # Never SIGTERM a pid that isn't our ffmpeg stream — after a reuse/tamper the
+    # recorded pid can belong to an unrelated process. Refuse and clear the file.
+    if not _proc_looks_like_our_stream(pid):
+        os.remove(PID_FILE) if os.path.exists(PID_FILE) else None
+        print(json.dumps({"ok": False, "stopped": False, "pid": pid,
+                          "error": "recorded pid is not our ffmpeg stream (stale/reused) — "
+                                   "refusing to kill it; cleared the stale pid file"}))
+        return 1
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError as e:
@@ -220,6 +303,9 @@ def main(argv=None):
                          help="Override the stream key (else $YOUTUBE_STREAM_KEY, else vault).")
     p_start.add_argument("--dry-run", action="store_true",
                          help="Print the (key-redacted) ffmpeg command without streaming.")
+    p_start.add_argument("--startup-grace", type=float, default=0.5,
+                         help="Seconds to wait after spawning ffmpeg before confirming it "
+                              "didn't exit immediately (default 0.5).")
     p_start.set_defaults(func=cmd_start)
 
     sub.add_parser("stop", help="Stop the running stream.").set_defaults(func=cmd_stop)

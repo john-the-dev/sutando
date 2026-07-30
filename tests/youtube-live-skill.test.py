@@ -132,6 +132,7 @@ class _Args:
         self.loop = kw.get("loop", False)
         self.stream_key = kw.get("stream_key", None)
         self.dry_run = kw.get("dry_run", False)
+        self.startup_grace = kw.get("startup_grace", 0.0)
 
 
 def _capture(fn, *a):
@@ -149,10 +150,13 @@ class CmdStartBranchTests(unittest.TestCase):
         import tempfile
         self._tmp = tempfile.mkdtemp()
         self._orig_pid_file = go_live.PID_FILE
+        self._orig_log = go_live.FFMPEG_LOG
         go_live.PID_FILE = os.path.join(self._tmp, "pid")
+        go_live.FFMPEG_LOG = os.path.join(self._tmp, "ffmpeg.log")
 
     def tearDown(self):
         go_live.PID_FILE = self._orig_pid_file
+        go_live.FFMPEG_LOG = self._orig_log
 
     def test_start_refuses_when_already_running(self):
         from unittest import mock
@@ -197,6 +201,9 @@ class CmdStartBranchTests(unittest.TestCase):
         class FakeProc:
             pid = 9999
 
+            def poll(self):
+                return None  # still alive after the grace window
+
         with mock.patch.object(go_live, "_running_pid", return_value=None), \
              mock.patch.object(go_live, "_ffmpeg_bin", return_value="/x/ffmpeg"), \
              mock.patch.object(go_live, "_resolve_stream_key", return_value="K"), \
@@ -207,6 +214,35 @@ class CmdStartBranchTests(unittest.TestCase):
         self.assertEqual(out["pid"], 9999)
         popen.assert_called_once()
         self.assertEqual(Path(go_live.PID_FILE).read_text().strip(), "9999")
+        # pid file is owner-only (0600)
+        import stat
+        self.assertEqual(stat.S_IMODE(os.stat(go_live.PID_FILE).st_mode), 0o600)
+
+    def test_start_fails_if_ffmpeg_exits_immediately(self):
+        from unittest import mock
+
+        class DeadProc:
+            pid = 4242
+            returncode = 1
+
+            def poll(self):
+                return 1  # already exited
+
+        def fake_popen(*a, **k):
+            # ffmpeg emits an error to its stderr log, then dies immediately.
+            Path(go_live.FFMPEG_LOG).write_text("Connection refused to rtmp ingest")
+            return DeadProc()
+
+        with mock.patch.object(go_live, "_running_pid", return_value=None), \
+             mock.patch.object(go_live, "_ffmpeg_bin", return_value="/x/ffmpeg"), \
+             mock.patch.object(go_live, "_resolve_stream_key", return_value="K"), \
+             mock.patch.object(go_live.subprocess, "Popen", side_effect=fake_popen):
+            rc, out = _capture(go_live.cmd_start, _Args())
+        self.assertEqual(rc, 1)
+        self.assertFalse(out["ok"])
+        self.assertIn("exited immediately", out["error"])
+        self.assertIn("Connection refused", out["ffmpeg_stderr"])
+        self.assertFalse(os.path.exists(go_live.PID_FILE))  # no pid written for a dead stream
 
 
 class CmdStopStatusTests(unittest.TestCase):
@@ -228,12 +264,40 @@ class CmdStopStatusTests(unittest.TestCase):
         from unittest import mock
         Path(go_live.PID_FILE).write_text("5555")
         with mock.patch.object(go_live, "_running_pid", return_value=5555), \
+             mock.patch.object(go_live, "_proc_looks_like_our_stream", return_value=True), \
              mock.patch.object(go_live.os, "kill") as kill:
             rc, out = _capture(go_live.cmd_stop, None)
         self.assertEqual(rc, 0)
         self.assertTrue(out["stopped"])
         kill.assert_called_once()
         self.assertFalse(os.path.exists(go_live.PID_FILE))
+
+    def test_stop_refuses_foreign_process(self):
+        # Recorded pid is live but ISN'T our ffmpeg (stale/reused) → never kill it.
+        from unittest import mock
+        Path(go_live.PID_FILE).write_text("5555")
+        with mock.patch.object(go_live, "_running_pid", return_value=5555), \
+             mock.patch.object(go_live, "_proc_looks_like_our_stream", return_value=False), \
+             mock.patch.object(go_live.os, "kill") as kill:
+            rc, out = _capture(go_live.cmd_stop, None)
+        self.assertEqual(rc, 1)
+        self.assertFalse(out["stopped"])
+        kill.assert_not_called()  # crucial: we did NOT signal the foreign pid
+        self.assertFalse(os.path.exists(go_live.PID_FILE))  # cleared the stale file
+
+    def test_proc_looks_like_our_stream(self):
+        from unittest import mock
+
+        class R:
+            stdout = "/x/ffmpeg -i rtmp://a.rtmp.youtube.com/live2/KEY"
+
+        class R2:
+            stdout = "/usr/bin/vim notes.txt"
+
+        with mock.patch.object(go_live.subprocess, "run", return_value=R()):
+            self.assertTrue(go_live._proc_looks_like_our_stream(123))
+        with mock.patch.object(go_live.subprocess, "run", return_value=R2()):
+            self.assertFalse(go_live._proc_looks_like_our_stream(123))
 
     def test_status_running(self):
         from unittest import mock
@@ -300,6 +364,7 @@ class MiscBranchTests(unittest.TestCase):
         try:
             Path(go_live.PID_FILE).write_text("444")
             with mock.patch.object(go_live, "_running_pid", return_value=444), \
+                 mock.patch.object(go_live, "_proc_looks_like_our_stream", return_value=True), \
                  mock.patch.object(go_live.os, "kill", side_effect=OSError("nope")):
                 rc, out = _capture(go_live.cmd_stop, None)
             self.assertEqual(rc, 1)
