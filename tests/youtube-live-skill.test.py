@@ -126,5 +126,194 @@ class StatusTests(unittest.TestCase):
         self.assertFalse(out["running"])
 
 
+class _Args:
+    def __init__(self, **kw):
+        self.source = kw.get("source", "test")
+        self.loop = kw.get("loop", False)
+        self.stream_key = kw.get("stream_key", None)
+        self.dry_run = kw.get("dry_run", False)
+
+
+def _capture(fn, *a):
+    import io
+    import json
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = fn(*a)
+    return rc, json.loads(buf.getvalue())
+
+
+class CmdStartBranchTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp()
+        self._orig_pid_file = go_live.PID_FILE
+        go_live.PID_FILE = os.path.join(self._tmp, "pid")
+
+    def tearDown(self):
+        go_live.PID_FILE = self._orig_pid_file
+
+    def test_start_refuses_when_already_running(self):
+        from unittest import mock
+        with mock.patch.object(go_live, "_running_pid", return_value=4321):
+            rc, out = _capture(go_live.cmd_start, _Args())
+        self.assertEqual(rc, 1)
+        self.assertFalse(out["ok"])
+        self.assertIn("already running", out["error"])
+
+    def test_start_errors_when_ffmpeg_missing(self):
+        from unittest import mock
+        with mock.patch.object(go_live, "_running_pid", return_value=None), \
+             mock.patch.object(go_live, "_ffmpeg_bin", return_value=None):
+            rc, out = _capture(go_live.cmd_start, _Args())
+        self.assertEqual(rc, 1)
+        self.assertIn("ffmpeg", out["error"])
+
+    def test_start_errors_when_no_key(self):
+        from unittest import mock
+        with mock.patch.object(go_live, "_running_pid", return_value=None), \
+             mock.patch.object(go_live, "_ffmpeg_bin", return_value="/x/ffmpeg"), \
+             mock.patch.object(go_live, "_resolve_stream_key", return_value=None):
+            rc, out = _capture(go_live.cmd_start, _Args())
+        self.assertEqual(rc, 1)
+        self.assertIn("stream key", out["error"])
+
+    def test_start_errors_on_unknown_source(self):
+        from unittest import mock
+        with mock.patch.object(go_live, "_running_pid", return_value=None), \
+             mock.patch.object(go_live, "_ffmpeg_bin", return_value="/x/ffmpeg"), \
+             mock.patch.object(go_live, "_resolve_stream_key", return_value="K"):
+            rc, out = _capture(go_live.cmd_start, _Args(source="bogus"))
+        self.assertEqual(rc, 1)
+        self.assertIn("unknown source", out["error"])
+
+    def test_start_spawns_and_writes_pidfile(self):
+        from unittest import mock
+
+        class FakeProc:
+            pid = 9999
+
+        with mock.patch.object(go_live, "_running_pid", return_value=None), \
+             mock.patch.object(go_live, "_ffmpeg_bin", return_value="/x/ffmpeg"), \
+             mock.patch.object(go_live, "_resolve_stream_key", return_value="K"), \
+             mock.patch.object(go_live.subprocess, "Popen", return_value=FakeProc()) as popen:
+            rc, out = _capture(go_live.cmd_start, _Args())
+        self.assertEqual(rc, 0)
+        self.assertTrue(out["started"])
+        self.assertEqual(out["pid"], 9999)
+        popen.assert_called_once()
+        self.assertEqual(Path(go_live.PID_FILE).read_text().strip(), "9999")
+
+
+class CmdStopStatusTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp()
+        self._orig = go_live.PID_FILE
+        go_live.PID_FILE = os.path.join(self._tmp, "pid")
+
+    def tearDown(self):
+        go_live.PID_FILE = self._orig
+
+    def test_stop_when_nothing_running(self):
+        rc, out = _capture(go_live.cmd_stop, None)
+        self.assertEqual(rc, 0)
+        self.assertFalse(out["stopped"])
+
+    def test_stop_kills_running_pid(self):
+        from unittest import mock
+        Path(go_live.PID_FILE).write_text("5555")
+        with mock.patch.object(go_live, "_running_pid", return_value=5555), \
+             mock.patch.object(go_live.os, "kill") as kill:
+            rc, out = _capture(go_live.cmd_stop, None)
+        self.assertEqual(rc, 0)
+        self.assertTrue(out["stopped"])
+        kill.assert_called_once()
+        self.assertFalse(os.path.exists(go_live.PID_FILE))
+
+    def test_status_running(self):
+        from unittest import mock
+        with mock.patch.object(go_live, "_running_pid", return_value=7777):
+            rc, out = _capture(go_live.cmd_status, None)
+        self.assertTrue(out["running"])
+        self.assertEqual(out["pid"], 7777)
+
+    def test_running_pid_detects_self(self):
+        Path(go_live.PID_FILE).write_text(str(os.getpid()))
+        self.assertEqual(go_live._running_pid(), os.getpid())
+
+    def test_running_pid_none_for_dead(self):
+        Path(go_live.PID_FILE).write_text("999999")  # almost certainly not a live pid
+        self.assertIsNone(go_live._running_pid())
+
+
+class MiscBranchTests(unittest.TestCase):
+    def test_manifest_config_returns_empty_on_error(self):
+        from unittest import mock
+        with mock.patch.object(go_live.json, "loads", side_effect=ValueError):
+            self.assertEqual(go_live._load_manifest_config(), {})
+
+    def test_resolve_stream_key_vault_path_returns_none_when_unset(self):
+        # No CLI, no env → falls through to the vault branch. In CI there's no
+        # YOUTUBE_STREAM_KEY in any vault/keyring, so it must resolve to None
+        # (the broad except swallows any backend error).
+        os.environ.pop("YOUTUBE_STREAM_KEY", None)
+        self.assertIsNone(go_live._resolve_stream_key(None))
+
+    def test_running_pid_malformed_file(self):
+        import tempfile
+        orig = go_live.PID_FILE
+        tmp = tempfile.mkdtemp()
+        go_live.PID_FILE = os.path.join(tmp, "pid")
+        try:
+            Path(go_live.PID_FILE).write_text("not-an-int")
+            self.assertIsNone(go_live._running_pid())
+        finally:
+            go_live.PID_FILE = orig
+
+    def test_stop_removes_stale_pidfile_when_not_running(self):
+        import tempfile
+        from unittest import mock
+        orig = go_live.PID_FILE
+        tmp = tempfile.mkdtemp()
+        go_live.PID_FILE = os.path.join(tmp, "pid")
+        try:
+            Path(go_live.PID_FILE).write_text("123")
+            with mock.patch.object(go_live, "_running_pid", return_value=None):
+                rc, out = _capture(go_live.cmd_stop, None)
+            self.assertEqual(rc, 0)
+            self.assertFalse(out["stopped"])
+            self.assertFalse(os.path.exists(go_live.PID_FILE))
+        finally:
+            go_live.PID_FILE = orig
+
+    def test_stop_reports_error_when_kill_fails(self):
+        import tempfile
+        from unittest import mock
+        orig = go_live.PID_FILE
+        tmp = tempfile.mkdtemp()
+        go_live.PID_FILE = os.path.join(tmp, "pid")
+        try:
+            Path(go_live.PID_FILE).write_text("444")
+            with mock.patch.object(go_live, "_running_pid", return_value=444), \
+                 mock.patch.object(go_live.os, "kill", side_effect=OSError("nope")):
+                rc, out = _capture(go_live.cmd_stop, None)
+            self.assertEqual(rc, 1)
+            self.assertFalse(out["ok"])
+        finally:
+            go_live.PID_FILE = orig
+
+
+class MainDispatchTests(unittest.TestCase):
+    def test_main_status(self):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = go_live.main(["status"])
+        self.assertEqual(rc, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

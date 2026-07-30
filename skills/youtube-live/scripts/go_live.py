@@ -73,7 +73,9 @@ def _resolve_stream_key(cli_key):
         sys.path.insert(0, str(repo / "src"))
         from vault_intercept import get_vault_key  # type: ignore
         return get_vault_key("YOUTUBE_STREAM_KEY")
-    except (StopIteration, KeyError, ImportError):
+    except Exception:
+        # Any vault/keyring failure (missing key, no backend, import error) →
+        # treat as "no key"; the caller emits a clear vault-set hint.
         return None
 
 
