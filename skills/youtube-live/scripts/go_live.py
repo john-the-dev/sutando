@@ -151,9 +151,6 @@ def cmd_start(args):
         print(json.dumps({"ok": False, "error": "a stream is already running; stop it first",
                           "pid": _running_pid()}))
         return 1
-    if _ffmpeg_bin() is None:
-        print(json.dumps({"ok": False, "error": "ffmpeg not found on PATH"}))
-        return 1
     cfg = _load_manifest_config()
     ingest_base = os.environ.get("YOUTUBE_INGEST_BASE") or cfg.get("ingest_base", DEFAULT_INGEST_BASE)
     key = _resolve_stream_key(args.stream_key)
@@ -171,6 +168,11 @@ def cmd_start(args):
         print(json.dumps({"ok": True, "dry_run": True, "command": _redacted_str(cmd, key),
                           "source": args.source, "ingest_base": ingest_base}))
         return 0
+
+    # Only a real stream needs ffmpeg on PATH — dry-run above just prints the command.
+    if _ffmpeg_bin() is None:
+        print(json.dumps({"ok": False, "error": "ffmpeg not found on PATH"}))
+        return 1
 
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     Path(PID_FILE).write_text(str(proc.pid))

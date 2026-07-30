@@ -163,8 +163,11 @@ class CmdStartBranchTests(unittest.TestCase):
         self.assertIn("already running", out["error"])
 
     def test_start_errors_when_ffmpeg_missing(self):
+        # ffmpeg is only checked for a real stream (after key + build + dry-run),
+        # so provide a key and a non-dry-run Args to reach that gate.
         from unittest import mock
         with mock.patch.object(go_live, "_running_pid", return_value=None), \
+             mock.patch.object(go_live, "_resolve_stream_key", return_value="K"), \
              mock.patch.object(go_live, "_ffmpeg_bin", return_value=None):
             rc, out = _capture(go_live.cmd_start, _Args())
         self.assertEqual(rc, 1)
