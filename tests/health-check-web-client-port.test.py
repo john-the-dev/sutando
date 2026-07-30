@@ -7,6 +7,7 @@ import importlib.util
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src" / "health-check.py"
@@ -47,9 +48,53 @@ with tempfile.TemporaryDirectory() as tmp:
         "export, quotes, and comments match shell dotenv syntax",
     )
 
+    env_path.write_text(
+        "# comment\n"
+        "\n"
+        "OTHER_PORT=7000\n"
+        "CLIENT_PORT_EXTRA=7001\n"
+        "CLIENT_PORT=8082\n"
+    )
+    check(
+        hc.resolve_web_client_port(env={}, env_path=env_path) == {"port": 8082},
+        "comments, unrelated keys, and prefixed keys are ignored",
+    )
+
+    for malformed in (
+        "CLIENT_PORT\n",
+        'CLIENT_PORT="unterminated\n',
+        "CLIENT_PORT=8080 extra\n",
+    ):
+        env_path.write_text(malformed)
+        check(
+            "error" in hc.resolve_web_client_port(env={}, env_path=env_path),
+            f"malformed dotenv value {malformed.strip()!r} fails closed",
+        )
+
+    check(
+        "error" in hc.resolve_web_client_port(env={}, env_path=Path(tmp)),
+        "unreadable dotenv path fails closed",
+    )
+
     for invalid in ("", "not-a-port", "0", "65536"):
         result = hc.resolve_web_client_port(env={"CLIENT_PORT": invalid}, env_path=env_path)
         check("error" in result, f"invalid CLIENT_PORT={invalid!r} fails closed")
+
+with patch.object(
+    hc,
+    "resolve_web_client_port",
+    return_value={"error": "invalid CLIENT_PORT='bad'"},
+):
+    checks = hc.run_all_checks()
+    web_check = next(item for item in checks if item["name"] == "web-client")
+    check(
+        web_check == {
+            "name": "web-client",
+            "status": "down",
+            "detail": "invalid CLIENT_PORT='bad'",
+        },
+        "run_all_checks reports invalid CLIENT_PORT as required health failure",
+    )
 
 source = SRC.read_text()
 check(
