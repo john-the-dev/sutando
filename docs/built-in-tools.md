@@ -154,8 +154,10 @@ python3 "$C" sources
 python3 "$C" search browser
 python3 "$C" inspect anthropic-skills skills/skill-creator
 python3 "$C" install anthropic-skills skills/skill-creator        # dry run
-python3 "$C" install anthropic-skills skills/skill-creator --yes  # atomic write
-python3 "$C" update skill-creator
+# Review the dry-run output, then copy its exact commit into the write:
+python3 "$C" install anthropic-skills skills/skill-creator --commit <40-char-sha> --yes
+python3 "$C" update skill-creator                                 # dry run
+python3 "$C" update skill-creator --commit <40-char-sha> --yes
 ```
 Skill installs are pinned to an upstream commit and record provenance for later
 updates. Tool repositories can be searched and inspected but are
