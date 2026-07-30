@@ -209,7 +209,7 @@ def resolve_web_client_port(
                 return {"error": f"{env_path.name}:{line_no} malformed CLIENT_PORT value"}
             file_value = parsed[0] if parsed else ""
 
-    value = str(env["CLIENT_PORT"] if "CLIENT_PORT" in env else file_value or "8080").strip()
+    value = str(env.get("CLIENT_PORT") or file_value or "8080").strip()
     try:
         port = int(value)
     except ValueError:
