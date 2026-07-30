@@ -92,6 +92,7 @@ with tempfile.TemporaryDirectory() as tmp:
         "unreadable dotenv path fails closed",
     )
 
+    env_path.write_text("OTHER_PORT=7000\n")
     for invalid in ("not-a-port", "0", "65536"):
         result = hc.resolve_web_client_port(env={"CLIENT_PORT": invalid}, env_path=env_path)
         check("error" in result, f"invalid CLIENT_PORT={invalid!r} fails closed")
