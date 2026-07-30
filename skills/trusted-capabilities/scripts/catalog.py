@@ -316,9 +316,11 @@ def resolve_remote(
     path: str,
     *,
     require_skill: bool = True,
+    commit: str | None = None,
 ) -> tuple[str, list[dict[str, Any]], dict[str, bytes]]:
     path = source_path(source, path)
-    _branch, commit = client.head(source.repo)
+    if commit is None:
+        _branch, commit = client.head(source.repo)
     entries = files_under(
         path, client.tree(source.repo, commit), require_skill=require_skill
     )
@@ -350,7 +352,13 @@ def cmd_install(args: argparse.Namespace, client: GitHubClient) -> int:
             f"{source.id} is discovery-only; tool installation needs a source-specific review"
         )
     path = source_path(source, args.path)
-    commit, entries, contents = resolve_remote(client, source, path)
+    if args.yes and not args.commit:
+        raise ValueError("install write requires --commit <sha> from the dry run")
+    if args.commit and not re.fullmatch(r"[0-9a-fA-F]{40}", args.commit):
+        raise ValueError("--commit must be a full 40-character Git SHA")
+    commit, entries, contents = resolve_remote(
+        client, source, path, commit=args.commit
+    )
     root = destination_root(args.dest_root)
     target = root / slug_for(path)
     print(f"resolved: {source.repo}:{path} @ {commit}")
@@ -358,7 +366,10 @@ def cmd_install(args: argparse.Namespace, client: GitHubClient) -> int:
     for finding in assess(entries, contents):
         print(f"risk: {finding}")
     if not args.yes:
-        print("dry run only; pass --yes to install")
+        print(
+            "dry run only; install this exact reviewed commit with: "
+            f"install {args.source} {path} --commit {commit} --yes"
+        )
         return 0
     installed = install_skill(source, path, commit, entries, contents, root)
     print(f"installed: {installed}")
@@ -375,7 +386,17 @@ def cmd_update(args: argparse.Namespace, client: GitHubClient) -> int:
         raise ValueError(f"no managed install metadata at {metadata_path}")
     metadata = json.loads(metadata_path.read_text())
     source = resolve_source(metadata["source"])
-    commit, entries, contents = resolve_remote(client, source, metadata["path"])
+    if not source.installable:
+        raise ValueError(
+            f"{source.id} is no longer installable; update is disabled by current policy"
+        )
+    if args.yes and not args.commit:
+        raise ValueError("update write requires --commit <sha> from the dry run")
+    if args.commit and not re.fullmatch(r"[0-9a-fA-F]{40}", args.commit):
+        raise ValueError("--commit must be a full 40-character Git SHA")
+    commit, entries, contents = resolve_remote(
+        client, source, metadata["path"], commit=args.commit
+    )
     if commit == metadata["commit"]:
         print(f"up to date: {args.slug} @ {commit}")
         return 0
@@ -383,7 +404,10 @@ def cmd_update(args: argparse.Namespace, client: GitHubClient) -> int:
     for finding in assess(entries, contents):
         print(f"risk: {finding}")
     if not args.yes:
-        print("dry run only; pass --yes to update")
+        print(
+            "dry run only; update to this exact reviewed commit with: "
+            f"update {args.slug} --commit {commit} --yes"
+        )
         return 0
     installed = install_skill(source, metadata["path"], commit, entries, contents, root)
     print(f"updated: {installed}")
@@ -408,11 +432,13 @@ def parser() -> argparse.ArgumentParser:
     install.add_argument("source")
     install.add_argument("path")
     install.add_argument("--dest-root")
+    install.add_argument("--commit")
     install.add_argument("--yes", action="store_true")
     install.set_defaults(func=cmd_install)
     update = sub.add_parser("update", help="update a previously managed skill")
     update.add_argument("slug")
     update.add_argument("--dest-root")
+    update.add_argument("--commit")
     update.add_argument("--yes", action="store_true")
     update.set_defaults(func=cmd_update)
     return result

@@ -357,23 +357,39 @@ class TrustedCapabilitiesTest(unittest.TestCase):
                 )
 
     def test_install_dry_run_write_and_discovery_rejection(self):
-        client = FakeClient(self.entries, self.contents)
+        reviewed = "a" * 40
+        client = FakeClient(self.entries, self.contents, commit=reviewed)
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(
             catalog, "load_sources", return_value={"test": self.source}
         ):
-            base = dict(source="test", path="skills/demo", dest_root=temp)
+            base = dict(
+                source="test", path="skills/demo", dest_root=temp, commit=None
+            )
             with redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(
                     catalog.cmd_install(SimpleNamespace(**base, yes=False), client),
                     0,
                 )
                 self.assertIn("dry run only", output.getvalue())
+                self.assertIn(f"--commit {reviewed} --yes", output.getvalue())
+            with self.assertRaisesRegex(ValueError, "requires --commit"):
+                catalog.cmd_install(SimpleNamespace(**base, yes=True), client)
+            moved_client = FakeClient(
+                self.entries, self.contents, commit="b" * 40
+            )
             with redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(
-                    catalog.cmd_install(SimpleNamespace(**base, yes=True), client),
+                    catalog.cmd_install(
+                        SimpleNamespace(**(base | {"commit": reviewed}), yes=True),
+                        moved_client,
+                    ),
                     0,
                 )
                 self.assertTrue((Path(temp) / "demo" / "SKILL.md").is_file())
+                metadata = json.loads(
+                    (Path(temp) / "demo" / catalog.METADATA).read_text()
+                )
+                self.assertEqual(metadata["commit"], reviewed)
                 self.assertIn("installed:", output.getvalue())
         blocked = catalog.Source("blocked", "owner/repo", ".", "tool", False)
         with mock.patch.object(
@@ -385,25 +401,31 @@ class TrustedCapabilitiesTest(unittest.TestCase):
                         source="blocked",
                         path="demo",
                         dest_root=None,
+                        commit=None,
                         yes=False,
                     ),
                     client,
                 )
 
     def test_update_missing_current_dry_run_and_write(self):
-        client = FakeClient(self.entries, self.contents)
+        reviewed = "a" * 40
+        client = FakeClient(self.entries, self.contents, commit=reviewed)
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(
             catalog, "load_sources", return_value={"test": self.source}
         ):
             root = Path(temp)
             with self.assertRaisesRegex(ValueError, "unsafe skill slug"):
                 catalog.cmd_update(
-                    SimpleNamespace(slug="../demo", dest_root=temp, yes=False),
+                    SimpleNamespace(
+                        slug="../demo", dest_root=temp, commit=None, yes=False
+                    ),
                     client,
                 )
             with self.assertRaisesRegex(ValueError, "no managed install"):
                 catalog.cmd_update(
-                    SimpleNamespace(slug="demo", dest_root=temp, yes=False),
+                    SimpleNamespace(
+                        slug="demo", dest_root=temp, commit=None, yes=False
+                    ),
                     client,
                 )
             target = root / "demo"
@@ -411,13 +433,15 @@ class TrustedCapabilitiesTest(unittest.TestCase):
             metadata = {
                 "source": "test",
                 "path": "skills/demo",
-                "commit": "newcommit",
+                "commit": reviewed,
             }
             (target / catalog.METADATA).write_text(json.dumps(metadata))
             with redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(
                     catalog.cmd_update(
-                        SimpleNamespace(slug="demo", dest_root=temp, yes=False),
+                        SimpleNamespace(
+                            slug="demo", dest_root=temp, commit=None, yes=False
+                        ),
                         client,
                     ),
                     0,
@@ -428,21 +452,53 @@ class TrustedCapabilitiesTest(unittest.TestCase):
             with redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(
                     catalog.cmd_update(
-                        SimpleNamespace(slug="demo", dest_root=temp, yes=False),
+                        SimpleNamespace(
+                            slug="demo", dest_root=temp, commit=None, yes=False
+                        ),
                         client,
                     ),
                     0,
                 )
                 self.assertIn("dry run only", output.getvalue())
+                self.assertIn(f"--commit {reviewed} --yes", output.getvalue())
+            with self.assertRaisesRegex(ValueError, "requires --commit"):
+                catalog.cmd_update(
+                    SimpleNamespace(
+                        slug="demo", dest_root=temp, commit=None, yes=True
+                    ),
+                    client,
+                )
             with redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(
                     catalog.cmd_update(
-                        SimpleNamespace(slug="demo", dest_root=temp, yes=True),
+                        SimpleNamespace(
+                            slug="demo",
+                            dest_root=temp,
+                            commit=reviewed,
+                            yes=True,
+                        ),
                         client,
                     ),
                     0,
                 )
                 self.assertIn("updated:", output.getvalue())
+
+            blocked = catalog.Source(
+                "test", "owner/repo", "skills", "skill", False
+            )
+            with mock.patch.object(
+                catalog, "load_sources", return_value={"test": blocked}
+            ):
+                with self.assertRaisesRegex(ValueError, "no longer installable"):
+                    catalog.cmd_update(
+                        SimpleNamespace(
+                            slug="demo",
+                            dest_root=temp,
+                            commit=reviewed,
+                            yes=True,
+                        ),
+                        client,
+                    )
 
     def test_parser_and_main_success_and_handled_error(self):
         self.assertEqual(catalog.parser().parse_args(["sources"]).command, "sources")
