@@ -1715,7 +1715,7 @@ def main():  # pragma: no cover
     # it never blocks shutdown; needs the users:write bot scope (logs a hint if
     # absent). Started before handler.start() (which blocks) so it can watch the
     # socket come up.
-    threading.Thread(target=_presence_keepalive, args=(handler,),
+    threading.Thread(target=_presence_keepalive, args=(handler,),  # pragma: no cover
                      name="slack-presence-keepalive", daemon=True).start()
     handler.start()  # blocks
 
