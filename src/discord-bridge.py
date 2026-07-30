@@ -550,8 +550,6 @@ if TEAM_TIER_OWNER:
 seen_message_ids = set()  # Discord message IDs already processed
 
 
-# Load access config
-ACCESS_FILE = channel_access_path("discord")
 # Durable on-disk backup of the Discord access allowlist (parity with
 # slack-bridge.py's ACCESS_BACKUP_FILE, #899 defense-in-depth). The live
 # access.json lives in the VOLATILE `channels/discord/` dir: Sutando.app
@@ -563,6 +561,27 @@ ACCESS_FILE = channel_access_path("discord")
 # CLAUDE.md, the cleanup-exempt per-host install-state dir) so a restart can
 # auto-restore the allowlist from disk instead of exposing an open pairing gate.
 ACCESS_BACKUP_FILE = STATE_DIR / "auth" / "discord-access-backup.json"
+
+
+def _resolve_access_file() -> Path:
+    """Resolve the live file without letting the migration fallback bypass a
+    durable restore.
+
+    Before the first durable backup exists, preserve the transition-window
+    behavior: a missing canonical file may read/write the populated legacy
+    ``~/.claude`` file. Once the durable backup exists, however, a missing
+    canonical file is a wipe to restore—not a reason to resurrect legacy
+    authorization state. Pin to the canonical path so ``on_ready`` can restore
+    it from ``state/auth`` before any access read.
+    """
+    if ACCESS_BACKUP_FILE.exists():
+        return claude_home_path("channels", "discord", "access.json")
+    return channel_access_path("discord")
+
+
+# Load access config after defining the durable path: its presence determines
+# whether a missing canonical file means migration fallback or wipe recovery.
+ACCESS_FILE = _resolve_access_file()
 
 
 def _is_valid_access_doc(data) -> bool:
@@ -2481,6 +2500,11 @@ async def on_ready():
         _initial_access = json.loads(ACCESS_FILE.read_text())
     except Exception:
         _initial_access = {}
+    # Seed the durable backup immediately on upgrade. Existing installations
+    # may already have a valid, fully-migrated access.json and therefore never
+    # hit one of the write paths below; without this startup mirror they would
+    # remain unprotected until a later access-control change happened.
+    _backup_access_to_disk(_initial_access)  # pragma: no cover — startup glue; helper + live restart path are tested
     try:
         discord_config.auto_seed_if_missing(_initial_access)
     except Exception as _seed_exc:

@@ -10,8 +10,9 @@ access.json.bak-*" for the operator to restore BY HAND. A wipe + process restart
 pairing/TOFU with the owner de-authorized (observed 2026-07-21).
 
 A durable backup under state/auth/ (the cleanup-exempt per-host install-state
-dir) closes that: every VALID access write mirrors to disk, and on startup a
-missing/invalid live access.json is auto-restored from the backup.
+dir) closes that: every VALID existing access document is mirrored on startup,
+every VALID access write mirrors to disk, and a missing/invalid live
+access.json is auto-restored from the backup.
 
 Guards:
   (a) a valid access doc is backed up to state/auth/discord-access-backup.json
@@ -46,7 +47,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 BRIDGE = REPO / "src" / "discord-bridge.py"
 
-_HELPERS = ("_is_valid_access_doc", "_write_owner_only", "_backup_access_to_disk", "_restore_access_from_disk")
+_HELPERS = (
+    "_resolve_access_file",
+    "_is_valid_access_doc",
+    "_write_owner_only",
+    "_backup_access_to_disk",
+    "_restore_access_from_disk",
+)
 
 
 def _load_helpers(access_file: Path, backup_file: Path):
@@ -62,8 +69,18 @@ def _load_helpers(access_file: Path, backup_file: Path):
     if len(nodes) != len(_HELPERS):
         found = {n.name for n in nodes}
         raise AssertionError(f"missing helper(s): {set(_HELPERS) - found}")
-    ns = {"json": json, "os": os, "uuid": uuid,
-          "ACCESS_FILE": access_file, "ACCESS_BACKUP_FILE": backup_file}
+    canonical = access_file
+    legacy = access_file.parent / "legacy-access.json"
+    ns = {
+        "json": json,
+        "os": os,
+        "uuid": uuid,
+        "Path": Path,
+        "ACCESS_FILE": access_file,
+        "ACCESS_BACKUP_FILE": backup_file,
+        "claude_home_path": lambda *_parts: canonical,
+        "channel_access_path": lambda _source: legacy,
+    }
     module = ast.Module(body=nodes, type_ignores=[])
     ast.fix_missing_locations(module)
     exec(compile(module, str(BRIDGE), "exec"), ns)
@@ -186,6 +203,23 @@ class TestBackup(_Base):
         self.assertTrue(flags & os.O_EXCL, "temp must be O_EXCL (no reuse of a broader file)")
 
 
+class TestAccessPathResolution(_Base):
+    def test_legacy_fallback_preserved_before_first_durable_backup(self):
+        """Fresh migration-window installs still use channel_access_path until
+        a durable backup has been seeded."""
+        self.assertFalse(self.backup.exists())
+        self.assertEqual(
+            self.ns["_resolve_access_file"](),
+            self.access.parent / "legacy-access.json",
+        )
+
+    def test_durable_backup_pins_missing_live_file_to_canonical_path(self):
+        """Once state/auth has a valid backup, a missing canonical live file is
+        a wipe to restore—not permission to resurrect stale legacy state."""
+        self.backup_to_disk({"allowFrom": ["OWNER"], "tierMap": {"OWNER": "owner"}})
+        self.assertEqual(self.ns["_resolve_access_file"](), self.access)
+
+
 class TestRestore(_Base):
     def test_restore_when_live_missing(self):
         """(c) startup with a MISSING live access.json → restored from durable backup."""
@@ -305,8 +339,13 @@ class TestWiredIntoBridge(unittest.TestCase):
         self.assertNotEqual(ready, -1)
         call = self.src.find("_restore_access_from_disk()", ready)
         seed = self.src.find("json.loads(ACCESS_FILE.read_text())", ready)
+        backup = self.src.find("_backup_access_to_disk(_initial_access)", seed)
         self.assertNotEqual(call, -1, "on_ready must call _restore_access_from_disk()")
         self.assertLess(call, seed, "restore must run BEFORE the first access read in on_ready")
+        self.assertNotEqual(
+            backup, -1,
+            "on_ready must seed the durable backup from an existing valid access.json",
+        )
 
     def test_backup_called_at_write_sites(self):
         # Every atomic access.json write-back should mirror a durable backup.
