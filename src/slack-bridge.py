@@ -1617,67 +1617,6 @@ def _recover_orphan_sending_files() -> int:
         print(f"  [startup] recovered {recovered} orphan .sending file(s)", flush=True)
     return recovered
 
-def _assert_presence_auto(client) -> dict:
-    """Set this bot's Slack presence to ``auto`` (Slack then shows it *active*
-    while the app has a live connection, *away* when it doesn't).
-
-    Returns a small status dict — never raises — so the caller's keep-alive loop
-    can't die on a transient API error:
-      {"ok": True}                         — presence asserted
-      {"ok": False, "error": "<slack err>"} — API said no (e.g. missing_scope)
-
-    Requires the ``users:write`` bot scope. Without it Slack returns
-    ``missing_scope`` and the bot simply never shows online (no crash).
-    """
-    try:
-        client.users_setPresence(presence="auto")
-        return {"ok": True}
-    except Exception as e:  # SlackApiError or any transport hiccup
-        resp = getattr(e, "response", None)
-        err = None
-        if resp is not None:
-            try:
-                err = resp.get("error")
-            except Exception:
-                err = None
-        return {"ok": False, "error": err or str(e)}
-
-
-def _presence_keepalive(handler, *, interval: float = 300.0, poll: float = 15.0):  # pragma: no cover
-    """Keep the bot's Slack presence in sync with the LIVE Socket Mode socket.
-
-    Asserts ``presence=auto`` when the socket transitions to connected (covers
-    every reconnect) and re-asserts every ``interval`` seconds while it stays
-    up. Presence therefore tracks the real connection, not merely "process is
-    running" — a wedged socket stops re-asserting and Slack drops the bot to
-    away. Logs the users:write hint exactly once so the operator knows the
-    one-time scope step.
-    """
-    warned = False
-    was_connected = False
-    last_asserted = 0.0
-    while True:
-        try:
-            c = getattr(handler, "client", None)
-            connected = bool(c is not None and c.is_connected())
-        except Exception:
-            connected = False
-        now = time.time()
-        if connected and (not was_connected or now - last_asserted >= interval):
-            status = _assert_presence_auto(app.client)
-            if status["ok"]:
-                last_asserted = now
-            elif status.get("error") == "missing_scope" and not warned:
-                print("  [presence] can't show online: users.setPresence needs the "
-                      "'users:write' bot scope — add it (Slack app → OAuth & Permissions "
-                      "→ Bot Token Scopes) and Reinstall, then restart the bridge.", flush=True)
-                warned = True
-            elif status.get("error") not in ("missing_scope", None):
-                print(f"  [presence] setPresence failed: {status['error']}", flush=True)
-        was_connected = connected
-        time.sleep(poll)
-
-
 def main():  # pragma: no cover
     global _TOFU_ENROLLMENT_CODE
     _single_instance_acquire("slack-bridge")
@@ -1710,13 +1649,6 @@ def main():  # pragma: no cover
     threading.Thread(target=result_watcher, name="slack-result-watcher", daemon=True).start()
     threading.Thread(target=_no_events_hint_thread, name="slack-no-events-hint", daemon=True).start()
     handler = SocketModeHandler(app, APP_TOKEN)
-    # Show an online (green) status while the Socket Mode socket is live — the
-    # Slack analogue of Discord's automatic gateway presence. Daemon thread so
-    # it never blocks shutdown; needs the users:write bot scope (logs a hint if
-    # absent). Started before handler.start() (which blocks) so it can watch the
-    # socket come up.
-    threading.Thread(target=_presence_keepalive, args=(handler,),  # pragma: no cover
-                     name="slack-presence-keepalive", daemon=True).start()
     handler.start()  # blocks
 
 
