@@ -44,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from util_paths import _host_label, claude_home_path, shared_personal_path  # noqa: E402
 from workspace_default import resolve_workspace, status_read_path  # noqa: E402
 from sutando_config import resolve_core_runtime  # noqa: E402
+from task_archive import find_task_file  # noqa: E402
 
 # Workspace = runtime-state root (tasks/, results/, state/). REPO_DIR stays the
 # source-code root (src/, skills/, logs/, .env, build_log.md). Before PR #762's
@@ -518,6 +519,106 @@ def check_cron_runner(
         "status": "ok",
         "detail": f"{launchd_count} durable schedule(s), state {int(max(age, 0))}s old",
     }
+
+
+def check_session_cron_registration(
+    workspace_dir: Optional[Path] = None,
+    host_label: Optional[str] = None,
+    runtime: Optional[str] = None,
+    now: Optional[float] = None,
+) -> dict:
+    """Warn when session-owned crons were never (re-)registered for this core boot.
+
+    CronCreate registrations are session-only: they die with the session and
+    only exist if /schedule-crons completed after the core booted. The failure
+    is silent (config intact on disk, zero live crons, no error) — observed
+    2026-07-23 on a peer instance as 2/18 registered. The script-visible signal:
+    /schedule-crons writes
+    `hosts/<hostname>/schedule-crons-stamp.json` when it finishes; if that
+    host-owned stamp predates the running core's `started_at` (from the
+    heartbeat payload), the current session never completed registration.
+    Stamp AGE alone is deliberately not used — long-lived sessions would
+    false-warn.
+    """
+    workspace = Path(workspace_dir or WORKSPACE_DIR)
+    host = host_label or _host_label()
+    name = "session-crons"
+    runtime = runtime or resolve_core_runtime(repo_root=REPO_DIR)
+
+    crons_file = workspace / "hosts" / host / "crons.json"
+    try:
+        crons = json.loads(crons_file.read_text())
+    except FileNotFoundError:
+        return {"name": name, "status": "ok", "detail": "no schedules configured"}
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"name": name, "status": "warn", "detail": f"cannot read crons.json ({exc})"}
+    if not isinstance(crons, list):
+        return {"name": name, "status": "warn", "detail": "crons.json is not a list"}
+
+    def session_owned(entry: dict) -> bool:
+        if entry.get("launchd") is True or entry.get("execution") == "codex-task":
+            return False
+        if entry.get("loop") == "dynamic" or not entry.get("cron"):
+            return False
+        return True
+
+    expected = sum(1 for e in crons if isinstance(e, dict) and session_owned(e))
+    if runtime == "codex" or expected == 0:
+        # codex has no session CronCreate surface (check_cron_runner owns that
+        # story); zero expected → nothing to verify.
+        return {"name": name, "status": "ok", "detail": "no session-owned schedules expected"}
+
+    alive_file = workspace / "state" / "cores" / f"{host}.alive"
+    started_at = None
+    try:
+        alive = json.loads(alive_file.read_text())
+        if isinstance(alive, dict):
+            started_at = float(alive.get("started_at"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass  # no heartbeat → can't anchor to a boot; fall through to stamp-only
+
+    stamp_file = workspace / "hosts" / host / "schedule-crons-stamp.json"
+    try:
+        stamp = json.loads(stamp_file.read_text())
+    except FileNotFoundError:
+        return {
+            "name": name,
+            "status": "warn",
+            "detail": f"{expected} session cron(s) expected but /schedule-crons has never stamped completion — run /schedule-crons",
+        }
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"name": name, "status": "warn", "detail": f"stamp unreadable ({exc})"}
+
+    if not isinstance(stamp, dict):
+        return {"name": name, "status": "warn", "detail": "stamp malformed (expected an object)"}
+
+    stamp_ts = stamp.get("ts")
+    if isinstance(stamp_ts, bool) or not isinstance(stamp_ts, (int, float)):
+        return {"name": name, "status": "warn", "detail": "stamp malformed (missing numeric ts)"}
+    if started_at is not None and stamp_ts < started_at:
+        return {
+            "name": name,
+            "status": "warn",
+            "detail": (
+                f"stamp predates this core boot ({int(started_at - stamp_ts)}s older) — "
+                f"session crons are gone with the old session; re-run /schedule-crons"
+            ),
+        }
+
+    registered = stamp.get("registered")
+    if isinstance(registered, bool) or not isinstance(registered, int) or registered < 0:
+        return {
+            "name": name,
+            "status": "warn",
+            "detail": "stamp malformed (missing non-negative registered count)",
+        }
+    if registered < expected:
+        return {
+            "name": name,
+            "status": "warn",
+            "detail": f"only {registered}/{expected} session cron(s) registered at last /schedule-crons",
+        }
+    return {"name": name, "status": "ok", "detail": f"{expected} session cron(s) stamped registered this boot"}
 
 
 def check_file(path: Path, name: str) -> dict:
@@ -2382,6 +2483,88 @@ def check_task_queue(threshold_count: int = 3, threshold_age_sec: int = 300) -> 
     return {"name": name, "status": "ok", "detail": f"{len(files)} task(s), oldest {oldest_age}s"}
 
 
+def check_orphaned_results(threshold_age_sec: int = 900) -> dict:
+    """Detect results that no consumer will ever claim.
+
+    Normal flow: a result is written to `results/task-<id>.txt` while
+    `tasks/task-<id>.txt` is still present; the consuming bridge delivers and
+    archives both. So a result whose task is already gone from `tasks/` was
+    written AFTER that task was archived — and every consumer keys off either a
+    tracked task_id or a `task-*` glob it has already retired. Nothing claims
+    the file, and the reply is silently never delivered.
+
+    Observed 2026-07-29: a reply sat in `results/` for 2h22m while its task sat
+    in `tasks/archive/`, and the conversation read as one-sided to the other
+    party because the answer existed on disk but was never sent. Writing a
+    result is not answering a task, and until now nothing noticed the
+    difference — `check_task_queue` watches the inbound side only, so a queue
+    that drains perfectly can still be losing every late reply.
+
+    Scope is deliberately narrow:
+      * top-level `task-*.txt` only. `<channel-key>.task-<id>.txt` is the pull
+        namespace, claimed by a consumer that did not delegate the work (e.g.
+        the phone conversation-server), so its lifetime is not ours to judge.
+      * `question-*` / `proactive-*` have their own delivery lifecycles.
+      * age-gated, because between our write and the consumer's claim the task
+        is legitimately still present for a few seconds.
+    """
+    name = "orphaned-results"
+    results_dir = WORKSPACE_DIR / "results"
+    tasks_dir = WORKSPACE_DIR / "tasks"
+    if not results_dir.exists():
+        return {"name": name, "status": "ok", "detail": "results/ not yet created"}
+    now = time.time()
+    try:
+        entries = list(results_dir.glob("task-*.txt"))
+    except OSError as e:  # noqa: BLE001 — a probe failure must not fail the check
+        return {"name": name, "status": "warn", "detail": f"could not scan results/: {e}"}
+    orphans: list[tuple[str, int]] = []
+    unreadable = 0
+    for path in entries:
+        # Per-file isolation on purpose. One unreadable entry must not decide
+        # the answer for the whole directory: with the guard around the loop
+        # instead, a single EACCES/EIO aborted the scan and any real orphan
+        # sitting beside it went unreported. Note pathlib only swallows a
+        # specific errno set (ENOENT/ENOTDIR/EBADF/ELOOP), so `is_file()` does
+        # raise for the rest and belongs inside the guard too.
+        try:
+            if not path.is_file():
+                continue
+            age = now - path.stat().st_mtime
+        except OSError:
+            unreadable += 1
+            continue
+        if age < threshold_age_sec:
+            continue
+        # Task still present -> the consumer has not reached this pair yet.
+        #
+        # Must ask "does a task with this id exist", NOT "is there a file with
+        # this exact name". `claim_task.py` renames a claimed task to
+        # `task-<id>.claimed-core-N.txt`, so a bare-name test reports a LIVE,
+        # in-flight task as archived — a valid retrying delivery raising the
+        # same signal as a genuinely stranded reply, which is how a detector
+        # trains its readers to ignore it. `find_task_file()` is the canonical
+        # locator (it is what the bridge archive paths already use).
+        if find_task_file(tasks_dir, path.stem) is not None:
+            continue
+        orphans.append((path.name, int(age)))
+    # Coverage is part of the verdict: say what could not be measured rather
+    # than let it round down into a clean result.
+    partial = f" ({unreadable} entr{'y' if unreadable == 1 else 'ies'} unreadable)" if unreadable else ""
+    if not orphans:
+        status = "warn" if unreadable else "ok"
+        return {"name": name, "status": status,
+                "detail": f"no undeliverable results{partial}"}
+    orphans.sort(key=lambda item: -item[1])
+    oldest_name, oldest_age = orphans[0]
+    return {
+        "name": name,
+        "status": "warn",
+        "detail": (f"{len(orphans)} result(s) whose task is already archived — never delivered; "
+                   f"oldest {oldest_name} ({oldest_age // 3600}h{oldest_age % 3600 // 60}m){partial}"),
+    }
+
+
 def _proc_argv(pid: int) -> str:
     """argv of `pid`, or "" if no such process.
 
@@ -3064,6 +3247,7 @@ def run_all_checks() -> list[dict]:
     # Comm-handling liveness (P1): loud when the owner-comm sweep goes stale.
     checks.append(check_comm_sweep_freshness())
     checks.append(check_cron_runner())
+    checks.append(check_session_cron_registration())
 
     # macOS TCC — must come before critical-file checks so if TCC is blocking
     # everything, the operator sees the root cause before the downstream failures.
@@ -3413,6 +3597,7 @@ def run_all_checks() -> list[dict]:
     checks.append(check_core_proactive_loop(threshold_sec=loop_stale_sec))
     checks.append(check_core_supervisor())
     checks.append(check_task_queue(threshold_count=queue_count, threshold_age_sec=queue_age_sec))
+    checks.append(check_orphaned_results())
     checks.append(check_task_watcher())
     checks.append(check_codex_task_notifier())
     checks.append(check_skill_symlinks())
