@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 import re
 import shlex
 import subprocess
@@ -52,7 +53,12 @@ except ModuleNotFoundError:
     for _cand in _RESCUE_CANDIDATES:
         if not os.path.exists(_cand) or os.path.realpath(_cand) == _current:
             continue
-        _check = subprocess.run([_cand, "-c", "import discord"], capture_output=True)
+        try:
+            _check = subprocess.run(
+                [_cand, "-c", "import discord"], capture_output=True, timeout=20,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            continue  # a wedged interpreter must not hang bridge startup
         if _check.returncode == 0:
             print(
                 f"discord-bridge: launched with {_current} (no discord.py); "
@@ -80,12 +86,27 @@ except Exception:  # pragma: no cover — best-effort telemetry
 from task_archive import find_task_file  # noqa: E402
 from result_markers import parse_markers, dedup_cross_channel_target, dedup_requeue_count, build_requeued_task  # noqa: E402
 from discord_addressee import is_addressed_in_shared_channel  # noqa: E402  # pragma: no cover — bridge not unit-imported; addressee logic is covered in discord_addressee.py
+from reply_chain import format_reply_chain, format_reply_chain_ids, format_reply_chain_truncation, walk_reply_chain  # noqa: E402  # pragma: no cover — bridge not unit-imported; chain formatting is covered in reply_chain.py
+
+# Cap the reply-chain CONTENT walk (a fetch per level; the immediate parent is
+# depth 0). Only the immediate parent is inlined, so beyond this there is no
+# content to keep.
+REPLY_CHAIN_MAX_DEPTH = 8
+# Cap the ID-only walk toward the root. The `reply_chain_ids` spine keeps
+# walking (ids are cheap) past the content cap so a deep thread still exposes
+# every ancestor's re-fetch handle — not just the nearest 8. Bounded so a
+# pathological thread can't trigger an unbounded fetch loop; if the root is not
+# reached within this bound, an explicit truncation marker is emitted.
+REPLY_CHAIN_IDS_MAX_DEPTH = 64
 from message_chunking import chunk_message, _is_fence_open_line  # noqa: E402  (Result Router S3 — shared fence-aware chunker; _is_fence_open_line re-exported for existing tests)
 import result_audit  # noqa: E402  (Result Router S5 — §7 audit ledger sink; top-level so hooks carry no lazy import)
+import result_router  # noqa: E402  (Result Router §9.3 — owner-visible delivery failures)
 import local_task_protocol  # noqa: E402
 from task_body_guard import confine_user_content  # noqa: E402
 import progress_stream  # noqa: E402  — pure helpers for the progress-streamer (poll_progress)
 from vault_intercept import intercept_vault_commands, redact_vault_commands  # noqa: E402
+from core_restart_intent import parse_restart_command, write_intent  # noqa: E402
+from chat_secret_filter import filter_chat_secrets, secret_handling_instruction  # noqa: E402
 REPO = resolve_workspace()
 
 # Generic plugin message-hook loader. The bridge stays a THIN, plugin-AGNOSTIC
@@ -327,9 +348,14 @@ def write_owner_activity(channel: str, summary: str, channel_id=None) -> None:
         }
         if channel_id:
             payload["channel_id"] = str(channel_id)
-        tmp = OWNER_ACTIVITY_FILE.with_suffix(".json.tmp")
+        # Per-PID staging name: this file is written by four processes (this
+        # bridge + slack/telegram/sparrow). A shared ".json.tmp" name lets two
+        # concurrent writers truncate and interleave the same temp file, so the
+        # rename can publish torn JSON. A per-PID temp is never shared, and
+        # os.replace is an atomic overwrite — last writer wins, cleanly. (#2222)
+        tmp = OWNER_ACTIVITY_FILE.with_suffix(f".json.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         tmp.write_text(json.dumps(payload))
-        tmp.rename(OWNER_ACTIVITY_FILE)
+        os.replace(tmp, OWNER_ACTIVITY_FILE)
     except Exception as e:
         print(f"  [owner-activity] write failed: {e}", flush=True)
 
@@ -542,8 +568,136 @@ if TEAM_TIER_OWNER:
 seen_message_ids = set()  # Discord message IDs already processed
 
 
-# Load access config
-ACCESS_FILE = channel_access_path("discord")
+# Durable on-disk backup of the Discord access allowlist (parity with
+# slack-bridge.py's ACCESS_BACKUP_FILE, #899 defense-in-depth). The live
+# access.json lives in the VOLATILE `channels/discord/` dir: Sutando.app
+# Settings, a corrupt-read + bad-default write (observed 2026-07-21 — owner
+# silently dropped from allowFrom), or an external delete can wipe it. Before
+# this backup the bridge only printed "restore from access.json.bak-*" and left
+# the operator to restore BY HAND; a wipe + restart booted into pairing/TOFU
+# with the owner de-authorized. This backup lives under state/auth/ (per
+# CLAUDE.md, the cleanup-exempt per-host install-state dir) so a restart can
+# auto-restore the allowlist from disk instead of exposing an open pairing gate.
+ACCESS_BACKUP_FILE = STATE_DIR / "auth" / "discord-access-backup.json"
+
+
+def _resolve_access_file() -> Path:
+    """Resolve the live file without letting the migration fallback bypass a
+    durable restore.
+
+    Before the first durable backup exists, preserve the transition-window
+    behavior: a missing canonical file may read/write the populated legacy
+    ``~/.claude`` file. Once the durable backup exists, however, a missing
+    canonical file is a wipe to restore—not a reason to resurrect legacy
+    authorization state. Pin to the canonical path so ``on_ready`` can restore
+    it from ``state/auth`` before any access read.
+    """
+    if ACCESS_BACKUP_FILE.exists():
+        return claude_home_path("channels", "discord", "access.json")
+    return channel_access_path("discord")
+
+
+# Load access config after defining the durable path: its presence determines
+# whether a missing canonical file means migration fallback or wipe recovery.
+ACCESS_FILE = _resolve_access_file()
+
+
+def _is_valid_access_doc(data) -> bool:
+    """A structurally valid access-control document worth backing up / restoring.
+
+    The core schema is an ``allowFrom`` list. Both a populated allowlist and the
+    intentional locked-down state ``allowFrom: []`` qualify and MUST be
+    protected. Only a transient/partial wipe — a non-dict, a parse failure, or a
+    missing/non-list ``allowFrom`` — is rejected, so it can't overwrite a good
+    backup. Mirrors slack-bridge._is_valid_access_doc so the two bridges share
+    one gate.
+    """
+    return isinstance(data, dict) and isinstance(data.get("allowFrom"), list)
+
+
+def _write_owner_only(path, text: str) -> None:
+    """Atomically write *text* to *path* with the file born 0600.
+
+    The temp is created O_EXCL with mode 0600 — access-control data is never
+    observable broader than owner-only, even under a permissive umask (a
+    write_text-then-chmod sequence leaves a window where it is). fsync +
+    os.replace make the swap atomic and crash-durable: a failed or partial
+    write leaves any previous file at *path* untouched."""
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _backup_access_to_disk(data: dict) -> None:
+    """Persist a copy of a VALID access-control document to the durable backup.
+
+    Backs up any structurally valid state (see ``_is_valid_access_doc``) —
+    including an intentional empty lockdown — but never a transient/partial
+    wipe, so a wipe can't overwrite the good backup. Best-effort: an OSError on
+    the backup write must never break the live access.json write path.
+
+    The state/auth/ leaf is owner-only (0700) and the backup is written born
+    0600 + atomically replaced, so a permissive umask can't expose auth state
+    and a crashed write can't truncate the previous good backup."""
+    if not _is_valid_access_doc(data):
+        return
+    try:
+        ACCESS_BACKUP_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(ACCESS_BACKUP_FILE.parent, 0o700)  # normalize a pre-existing broader leaf
+        _write_owner_only(ACCESS_BACKUP_FILE, json.dumps(data, indent=2) + "\n")
+    except OSError:
+        pass  # best-effort; backup must never break the write path
+
+
+def _restore_access_from_disk() -> bool:
+    """Restore access.json from the durable on-disk backup when the live file is
+    missing or invalid. Survives process death (unlike an in-memory cache),
+    closing the wipe+restart -> open-pairing/TOFU exposure. Returns True if it
+    restored.
+
+    Self-gating: if the live access.json already parses as a valid access doc,
+    this is a no-op (never clobber a good live file with a possibly-stale
+    backup). Only a missing / corrupt / schema-invalid live file is restored,
+    and only from a schema-VALID backup."""
+    try:
+        live = json.loads(ACCESS_FILE.read_text())
+        if _is_valid_access_doc(live):
+            return False  # live file is fine — nothing to restore
+    except Exception:
+        pass  # missing / corrupt / unparseable — fall through to restore
+    try:
+        backup = json.loads(ACCESS_BACKUP_FILE.read_text())
+    except Exception:
+        return False
+    if not _is_valid_access_doc(backup):
+        return False
+    try:
+        ACCESS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # access.json is itself access-control data: born-0600 temp + atomic
+        # replace (never observable broader, even under a permissive umask).
+        _write_owner_only(ACCESS_FILE, json.dumps(backup, indent=2) + "\n")
+        print(
+            "  [access] restored access.json from durable on-disk backup "
+            "(wipe survived a restart — #899 defense-in-depth)",
+            flush=True,
+        )
+        return True
+    except Exception as e:
+        print(f"  [access] disk-backup restore failed: {e}", flush=True)
+        return False
+
+
 def load_allowed():
     try:
         data = json.loads(ACCESS_FILE.read_text())
@@ -557,6 +711,97 @@ def load_policy():
         return data.get("dmPolicy", "pairing")
     except Exception:
         return "pairing"
+
+
+def load_tier_map() -> dict:
+    """Per-user-id -> tier ("owner"|"team"|"other") from access.json `tierMap`.
+    Empty dict if absent. Mirrors slack-bridge.load_tier_map so the two
+    bridges share one access-control model."""
+    try:
+        data = json.loads(ACCESS_FILE.read_text())
+        tier_map = data.get("tierMap")
+        return tier_map if isinstance(tier_map, dict) else {}
+    except Exception:
+        return {}
+
+
+def ensure_tier_map_seeded() -> bool:
+    """One-time migration (owner request 2026-07-17: allowlist default =
+    read-only). If access.json has a populated global allowFrom but no
+    tierMap, seed tierMap = {existing -> owner} once and persist. Existing
+    members are grandfathered as owner; any NEW allowFrom addition is then
+    missing from tierMap and resolves to team (read-only, sandboxed) instead
+    of the previous unconditional owner. Idempotent once a tierMap exists.
+
+    Returns True when a tierMap is reliably in place afterward (already
+    present, just persisted, or nothing to seed); False when a seed was
+    needed but could NOT be persisted/read. On False the caller MUST fail
+    closed — never grant owner off an empty/unconfirmed map (#2161 CR:
+    a transient read/write error must not silently escalate every
+    allowlisted sender to owner)."""
+    try:
+        data = json.loads(ACCESS_FILE.read_text())
+    except Exception as e:
+        print(f"  [tier-map] WARNING: access.json unreadable ({e}); allowlisted senders resolve read-only (team) until the tierMap can be read", flush=True)
+        return False
+    allow = data.get("allowFrom") or []
+    # Test key PRESENCE, not truthiness. An explicitly-empty tierMap ({}) is a
+    # deliberate "nobody is owner via tierMap" state — treating it as falsy
+    # here would re-seed every allowFrom member as owner, escalating read-only
+    # users (#2161 CR: {"allowFrom":["U"],"tierMap":{}} must NOT become
+    # {"U":"owner"}). Only a genuinely ABSENT key (never-seeded legacy file)
+    # triggers first-run grandfathering below. A present-but-empty map returns
+    # here, so the allowlisted user is missing from the map and resolves team.
+    if "tierMap" in data:
+        return True
+    if not allow:
+        return True  # nothing to grandfather — an empty map is legitimate here
+    data["tierMap"] = {uid: "owner" for uid in allow}
+    # Atomic write: a bare ACCESS_FILE.write_text() truncates the live
+    # access-control file BEFORE writing, so a disk-full / interrupt / partial
+    # write can destroy allowFrom — and with fail-closed tier resolution that
+    # locks legitimate owners out against a corrupt file, at bridge startup.
+    # Write a sibling temp, chmod it, then os.replace() atomically (mirrors the
+    # pairing path + the #2222 owner-activity fix). The pid+uuid suffix avoids
+    # colliding with a concurrent pairing-path .tmp; on any failure the original
+    # access.json bytes are left intact and the orphan temp is removed.
+    tmp = ACCESS_FILE.with_suffix(ACCESS_FILE.suffix + f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, ACCESS_FILE)
+        _backup_access_to_disk(data)  # durable backup on every valid access write
+        print(f"  [tier-map] grandfathered {len(allow)} existing Discord allowFrom member(s) as owner; new additions now default to read-only (team)", flush=True)
+        return True
+    except OSError as e:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        print(f"  [tier-map] WARNING: failed to persist grandfather tierMap ({e}); allowlisted senders resolve read-only (team) until seeded", flush=True)
+        return False
+
+def read_access_for_seed(path):
+    """Read access.json for a path that is about to WRITE it back (pairing seed).
+
+    Returns:
+      - the parsed dict when the file is present and valid;
+      - a fresh default dict when the file is genuinely ABSENT (first-run
+        onboarding — seeding a default is correct);
+      - None when the file EXISTS but is unreadable/corrupt — the caller MUST
+        NOT overwrite it. Writing an empty-allowFrom default over a
+        present-but-unparseable access.json turns a transient read glitch into
+        a PERMANENT config wipe: the owner is dropped from allowFrom, so every
+        sender gets a pairing prompt and codes leak into channels. Observed
+        2026-07-21 (the owner was silently de-authorized mid-session). The safe
+        move on corruption is to leave the file untouched and bail.
+    """
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return {"dmPolicy": "pairing", "allowFrom": [], "pending": {}}
+    except Exception:
+        return None
 
 def load_channel_config(channel_id):
     """Load channel config. Returns (requireMention, allowFrom set) or None if not configured."""
@@ -2258,6 +2503,12 @@ _poll_loops_started = False
 @client.event
 async def on_ready():
     print(f"Discord bridge ready: {client.user}", flush=True)
+    # Restart-safety FIRST: if access.json was wiped/corrupted while the bridge
+    # was down, auto-restore it from the durable state/auth/ backup BEFORE any
+    # access read below. Without this a wipe+restart boots into pairing/TOFU with
+    # the owner de-authorized (observed 2026-07-21). Self-gating: a valid live
+    # file is left untouched (see _restore_access_from_disk). #899 defense-in-depth.
+    _restore_access_from_disk()  # pragma: no cover — on_ready startup glue; the restore fn is unit-tested (discord-access-backup.test.py)
     # #1147: auto-seed workspace `state/discord-config.json` from the legacy
     # access.json heuristic on first boot. Idempotent (no-op if file
     # exists). Emits a WARN to stderr if the seed had to fall back to
@@ -2267,10 +2518,24 @@ async def on_ready():
         _initial_access = json.loads(ACCESS_FILE.read_text())
     except Exception:
         _initial_access = {}
+    # Seed the durable backup immediately on upgrade. Existing installations
+    # may already have a valid, fully-migrated access.json and therefore never
+    # hit one of the write paths below; without this startup mirror they would
+    # remain unprotected until a later access-control change happened.
+    _backup_access_to_disk(_initial_access)  # pragma: no cover — startup glue; helper + live restart path are tested
     try:
         discord_config.auto_seed_if_missing(_initial_access)
     except Exception as _seed_exc:
         print(f"  [discord-config] auto-seed failed (non-fatal): {_seed_exc}")
+    # Seed the tier-map grandfather snapshot at STARTUP, before any message is
+    # processed — otherwise a fresh (pre-migration) install where the owner
+    # adds a NEW allowFrom id would grandfather that new id as owner the first
+    # time it messages (the seed runs on-demand and captures whoever is in
+    # allowFrom at that moment). Seeding at boot pins the snapshot to the
+    # allowFrom present at upgrade, so post-upgrade additions default read-only
+    # (owner CR #2161). Idempotent: no-op once a tierMap exists, so firing on
+    # every reconnect is harmless.
+    ensure_tier_map_seeded()  # pragma: no cover — startup call-site glue in on_ready; the seed fn is unit-tested (bridges-allowlist-default-readonly.test.py) and already swallows its own FS errors internally
     # Restart-safety: sweep orphan `.sending` files before the poll
     # loops start. See _recover_orphan_sending_files for rationale.
     _recover_orphan_sending_files()
@@ -2403,6 +2668,29 @@ def _write_task_file(task_file: Path, content, username: str,
     return True
 
 
+def _reply_author_header(message) -> str:
+    """Structured ``reply_to_author`` / ``reply_to_author_id`` task-file lines.
+
+    When ``message`` is a Discord reply whose parent author is resolved, return
+    the two metadata lines so a consumer can tell WHO the sender was addressing
+    (e.g. a reply aimed at another bot) without parsing the lossy ``[Replying to
+    ...]`` body snippet. Returns ``""`` when there is no reference, no resolved
+    parent, or no author. The author's ``str()`` is newline-sanitized so a name
+    containing ``\\n`` can't inject a spurious metadata line into the k:v shape.
+    """
+    reply_author = (
+        getattr(getattr(message.reference, "resolved", None), "author", None)
+        if getattr(message, "reference", None) else None
+    )
+    if reply_author is None:
+        return ""
+    ra_name = str(reply_author).replace("\n", " ")
+    return (
+        f"reply_to_author: {ra_name}\n"
+        f"reply_to_author_id: {reply_author.id}\n"
+    )
+
+
 def resolve_is_collaborator(access_data, sender_id, serving_channel_id):
     """True iff `sender_id` is listed under the SERVING channel's `collaborators`
     array in access.json.
@@ -2438,6 +2726,36 @@ def select_rulebook_key(access_tier, is_collaborator):
     return "team-collaborator" if is_collaborator else access_tier
 
 
+async def _handle_restart_command(message, text, access_tier, username, workspace) -> bool:
+    """Owner easy-restart command (sonichi#2401): "restart core" / "stop core"
+    is handled by the BRIDGE, not the core — the whole point is that it works
+    while the core is dead. Writes the intent file for the GUI-session
+    executor (Sutando.app poller) and acks in-channel; no task file. Returns
+    True when the message was a restart command (caller stops processing).
+    Owner tier only — never team/other — and parse is exact-match so prose
+    that merely mentions restarting can't trigger it."""
+    if not text or access_tier != "owner":
+        return False
+    action = parse_restart_command(text)
+    if not action:
+        return False
+    try:
+        write_intent(workspace, action, "discord")
+        ack = ("Restart requested — the app will relaunch the core in a few "
+               "seconds (authenticated, GUI session). I'll be back once it's up."
+               if action == "restart" else
+               "Stop requested — the app will stop the core in a few seconds. "
+               "It stays stopped until you say `restart core`.")
+    except Exception as exc:
+        ack = f"Couldn't write the {action} request ({type(exc).__name__}) — not queued."
+    print(f"  [core-restart] owner {action} command from @{username}", flush=True)
+    try:
+        await message.channel.send(ack)
+    except Exception as send_exc:
+        print(f"  [core-restart] ack send failed: {send_exc}", flush=True)
+    return True
+
+
 async def _handle_discord_message(message, force=False):
     if message.author == client.user:
         return
@@ -2458,6 +2776,8 @@ async def _handle_discord_message(message, force=False):
     sender_id = str(message.author.id)
     username = str(message.author)
     text = message.content or ""
+    initial_secret_filter = filter_chat_secrets(text)
+    detected_secret_types = set(initial_secret_filter.secret_types)
     is_dm = isinstance(message.channel, discord.DMChannel)
     channel_name = getattr(message.channel, 'name', 'DM')
 
@@ -2473,10 +2793,12 @@ async def _handle_discord_message(message, force=False):
         except Exception as e:
             print(f"  [dm-checkpoint] update failed: {e}", flush=True)
 
-    print(f"  [msg] #{channel_name} @{username}: {redact_vault_commands(text)[:80]} (mentions: {[str(m) for m in message.mentions]}, is_dm: {is_dm}, embeds: {len(message.embeds)}, type: {message.type}, ref: {message.reference is not None})", flush=True)
+    safe_log_text = redact_vault_commands(initial_secret_filter.text)
+    print(f"  [msg] #{channel_name} @{username}: {safe_log_text[:80]} (mentions: {[str(m) for m in message.mentions]}, is_dm: {is_dm}, embeds: {len(message.embeds)}, type: {message.type}, ref: {message.reference is not None})", flush=True)
     # Debug: log message snapshots for forwarded messages
     if hasattr(message, 'message_snapshots') and message.message_snapshots:
-        print(f"  [debug] message_snapshots: {message.message_snapshots}", flush=True)
+        safe_snapshots = filter_chat_secrets(str(message.message_snapshots)).text  # pragma: no cover
+        print(f"  [debug] message_snapshots: {safe_snapshots}", flush=True)  # pragma: no cover
     if message.type != discord.MessageType.default and message.type != discord.MessageType.reply:
         print(f"  [debug] non-default message type: {message.type}", flush=True)
 
@@ -2543,6 +2865,24 @@ async def _handle_discord_message(message, force=False):
         # messages through without a mention — that's the point.
         if message.author.bot and client.user not in message.mentions and require_mention:
             print(f"  [skip] bot message without mention in requireMention=true channel", flush=True)
+            return
+
+        # Progress-stream placeholder guard: a peer node with
+        # SUTANDO_PROGRESS_STREAM=1 posts "⏳ <step> (Ns)" placeholders (and edits
+        # them) while its own owner task runs. In a requireMention=false channel
+        # where that node sits in allowFrom, the bot-author filter above lets them
+        # through and we'd ingest each placeholder + edit as a fresh task — a
+        # self-inflicted flood. These carry no work for us; drop them regardless
+        # of requireMention. Tight-anchored detector (see progress_stream) so a
+        # real task containing an hourglass emoji is not misclassified.
+        # Scoped to BOT authors (qingyun P1 on #2157). The shape alone is not a
+        # safe discriminator: a human owner/team message whose entire body happens
+        # to read "⏳ deploy the release (9s)" would otherwise be silently dropped
+        # before task creation — a valid human task lost with only a skip log.
+        # Only a peer NODE emits these, so author.bot is the real signal and the
+        # text shape is the secondary filter, not the primary one.
+        if getattr(message.author, "bot", False) and progress_stream.is_progress_placeholder(message.content):
+            print(f"  [skip] progress-stream placeholder from bot {message.author}", flush=True)
             return
 
         bot_mentioned = client.user in message.mentions
@@ -2626,6 +2966,7 @@ async def _handle_discord_message(message, force=False):
                     tmp_path = ACCESS_FILE.with_suffix(ACCESS_FILE.suffix + '.tmp')
                     tmp_path.write_text(json.dumps(access_data, indent=2))
                     os.replace(tmp_path, ACCESS_FILE)
+                    _backup_access_to_disk(access_data)  # pragma: no cover — thread-engage seed write glue; the backup fn is unit-tested. Durable backup on every valid access write
                     # Refresh the gate for THIS message. require_mention was
                     # computed by load_channel_config before the seed existed,
                     # so without this the seeding message itself is still
@@ -2779,10 +3120,25 @@ async def _handle_discord_message(message, force=False):
     if policy == "pairing" and sender_id not in allowed and not channel_authorized:
         # Generate pairing code — user must approve via /discord:access pair <code>
         import random, string
-        try:
-            access = json.loads(ACCESS_FILE.read_text())
-        except Exception:
-            access = {"dmPolicy": "pairing", "allowFrom": [], "pending": {}}
+        # Async gateway wiring is structurally pinned below; the pure helper's
+        # valid/absent/corrupt behavior is executed against real files.
+        access = read_access_for_seed(ACCESS_FILE)  # pragma: no cover
+        if access is None:  # pragma: no cover
+            # access.json EXISTS but is corrupt/unreadable. Do NOT overwrite it
+            # with an empty-allowFrom default — that permanently wipes the real
+            # config (owner dropped from allowFrom → pairing prompts + code leak
+            # to channels; observed 2026-07-21). Bail loudly; leave the file for
+            # recovery. A restart auto-restores from the durable state/auth/
+            # backup (_restore_access_from_disk in on_ready); the legacy
+            # channels/discord/access.json.bak-* files remain a manual fallback.
+            print(
+                f"  [pairing] access.json present but unreadable — NOT overwriting "
+                f"(would wipe allowFrom). Skipping pairing for @{username} ({sender_id}). "
+                f"Restart to auto-restore from the durable state/auth/discord-access-backup.json "
+                f"(or manually restore a channels/discord/access.json.bak-* backup).",
+                flush=True,
+            )
+            return
         code = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
         pending = access.get("pending", {})
         # Clean expired codes
@@ -2795,8 +3151,22 @@ async def _handle_discord_message(message, force=False):
             "expiresAt": now_ms + 3600000,  # 1 hour
         }
         access["pending"] = pending
-        ACCESS_FILE.write_text(json.dumps(access, indent=2))
-        os.chmod(ACCESS_FILE, 0o600)  # don't inherit umask 644 — file holds owner's Discord user IDs
+        # Atomic tmp+rename. A bare write_text truncates-then-writes, exposing a
+        # window where a concurrent reader (every message hits load_channel_config,
+        # which re-reads access.json) sees a partial/empty file → json parse fail.
+        # THIS truncate-in-place write was the TRIGGER of the 2026-07-21 corrupt
+        # read: before the no-clobber guard above, that failed read fell to the
+        # bare-except default and permanently wiped allowFrom → pairing-code leak
+        # into DMs and #dev. The no-clobber guard stops the amplification; writing
+        # atomically here closes the window that produced the corrupt read at all
+        # (and the lost-update race with the `/discord:access` read-modify-write).
+        # Same pattern the thread-engage seed already uses. chmod the tmp before
+        # replace so the final file is never briefly 0644 (it holds owner IDs).
+        tmp_path = ACCESS_FILE.with_suffix(ACCESS_FILE.suffix + '.tmp')  # pragma: no cover — async pairing branch; atomicity asserted structurally
+        tmp_path.write_text(json.dumps(access, indent=2))  # pragma: no cover
+        os.chmod(tmp_path, 0o600)  # pragma: no cover
+        os.replace(tmp_path, ACCESS_FILE)  # pragma: no cover
+        _backup_access_to_disk(access)  # pragma: no cover — durable backup on every valid access write
         await message.channel.send(f"Pairing required. Ask the owner to run:\n`/discord:access pair {code}`")
         print(f"  Pairing requested: @{username} ({sender_id}) code={code}")
         return
@@ -2830,7 +3200,7 @@ async def _handle_discord_message(message, force=False):
             if parts:
                 fwd_text = "\n".join(parts)
                 text = (text + "\n" + fwd_text).strip() if text else fwd_text.strip()
-                print(f"  [forward] extracted: {text[:100]}", flush=True)
+                print(f"  [forward] extracted: {filter_chat_secrets(text).text[:100]}", flush=True)  # pragma: no cover
 
     # Handle embeds (link previews, rich content, pasted images)
     embed_text = ""
@@ -2908,24 +3278,42 @@ async def _handle_discord_message(message, force=False):
     # which earlier answer the user is responding to. Without this the
     # bot sees only the new reply text in isolation.
     reply_context = ""
+    reply_chain_ids_line = ""   # `reply_chain_ids:` metadata (root-first) for thread reconstruction
     if message.reference and message.reference.message_id:
         try:
             ref_msg = message.reference.resolved
             if ref_msg is None:
                 ref_msg = await message.channel.fetch_message(message.reference.message_id)
             if ref_msg is not None:
-                # Include reply context for all messages so the core agent
-                # understands what the user is responding to.
-                ref_author = str(ref_msg.author)
-                ref_content = (ref_msg.content or "").strip()
-                # Strip bot-id mentions so the context doesn't show raw id soup
-                ref_content = ref_content.replace(f"<@{client.user.id}>", "")
-                snippet = ref_content[:400].replace("\n", " ").strip()
-                if snippet:
-                    reply_context = (
-                        f"\n\n[Replying to {ref_author} "
-                        f"({ref_msg.created_at.strftime('%Y-%m-%d %H:%M')}): {snippet}]"
-                    )
+                # Walk the reply chain to the root (Chi 2026-07-25). The old
+                # `ref_content[:400]` snippet silently truncated the parent.
+                # Lean design: inline only the FULL immediate parent (no cut) via
+                # format_reply_chain(chain[0]); the walk's purpose here is to
+                # collect the ancestor IDS for the `reply_chain_ids` spine, so a
+                # deeper ancestor can be fetched precisely on demand rather than
+                # bloating every task file with the whole thread's content.
+                # Keep collecting ids toward the root past the CONTENT cap so the
+                # `reply_chain_ids` spine reaches the root question, not just the
+                # nearest REPLY_CHAIN_MAX_DEPTH ancestors. Content is only kept
+                # for the inlined depth; ids continue to REPLY_CHAIN_IDS_MAX_DEPTH.
+                #
+                # The walk itself lives in reply_chain.walk_reply_chain so the
+                # depth-cap and unfetchable-ancestor paths are unit-testable —
+                # inline here they sat behind `pragma: no cover`, so the two
+                # cases where context is silently lost were the only ones never
+                # exercised (PR #2310 review 2).
+                chain, chain_ids, reached_root = await walk_reply_chain(
+                    ref_msg,
+                    message.channel.fetch_message,
+                    max_content_depth=REPLY_CHAIN_MAX_DEPTH,
+                    max_ids_depth=REPLY_CHAIN_IDS_MAX_DEPTH,
+                    strip_mention=f"<@{client.user.id}>",
+                )
+                reply_context = format_reply_chain(chain)  # pragma: no cover
+                reply_context += format_reply_chain_truncation(  # pragma: no cover
+                    reached_root, chain_ids[-1] if chain_ids else None
+                )
+                reply_chain_ids_line = format_reply_chain_ids(chain_ids)  # pragma: no cover
                 # Also download attachments that live on the replied-to
                 # message. Without this, a file shared on a parent message
                 # and then acted on via an @-mention *reply* is silently
@@ -2995,7 +3383,10 @@ async def _handle_discord_message(message, force=False):
     # raw print lands the secret in discord-bridge.log even though the intercept
     # below (L~2939) would store/redact it — a plaintext-secret leak to the log.
     # (2026-06-23 incident: an owner's telegram bot token leaked here.)
-    print(f"  @{username}: {redact_vault_commands(text)}{attachment_note}")
+    safe_detail_log = filter_chat_secrets(
+        f"{redact_vault_commands(text)}{attachment_note}"
+    ).text
+    print(f"  @{username}: {safe_detail_log}")
 
     # Determine access tier
     access_tier = "other"
@@ -3009,9 +3400,26 @@ async def _handle_discord_message(message, force=False):
     # owner. Scope is strictly per-channel (keyed on the serving channel_id).
     is_collaborator = False
     if sender_id in allowed:
-        access_tier = "owner"
-        # Record owner activity for status-aware-pivot in proactive loop
-        write_owner_activity("discord", text, channel_id=getattr(message.channel, "id", None))
+        # Global-allowlist members are owner ONLY if a successfully-persisted
+        # tierMap says so. Seed-on-first-run grandfathers everyone currently
+        # trusted; any newly-added allowFrom id is missing from tierMap and
+        # resolves to "team" (read-only, sandboxed) — the owner-requested
+        # default. Owner comes strictly from map MEMBERSHIP: if the seed could
+        # not persist/read (empty/unconfirmed map), fail CLOSED to team rather
+        # than granting owner off the empty map (#2161 CR — a transient error
+        # must not silently escalate every allowlisted sender to owner).
+        seeded_ok = ensure_tier_map_seeded()
+        _tier_map = load_tier_map()
+        if sender_id in _tier_map:
+            access_tier = _tier_map[sender_id]
+        else:  # pragma: no cover — fail-closed branch inside the async handler mega-function; the seed-failure→team resolution logic is unit-tested in tests/bridges-allowlist-default-readonly.test.py
+            access_tier = "team"
+            if not seeded_ok and not _tier_map:
+                print(f"  [tier-map] WARNING: grandfather seed unavailable; @{username} resolved read-only (team), not owner", flush=True)
+        if access_tier == "owner":
+            # Record owner activity for status-aware-pivot in proactive loop
+            write_owner_activity("discord", filter_chat_secrets(text).text,
+                                 channel_id=getattr(message.channel, "id", None))
     else:
         # Check if team member (from channel allowlists)
         try:
@@ -3073,6 +3481,10 @@ async def _handle_discord_message(message, force=False):
         print(f"  [tier-ownership] dropping {access_tier}-tier task from @{username} — owner is {TEAM_TIER_OWNER}, this node is {LOCAL_MACHINE or 'unknown'}")
         return
 
+    # Owner easy-restart command (sonichi#2401) — see _handle_restart_command.
+    if await _handle_restart_command(message, text, access_tier, username, str(REPO)):
+        return
+
     # Write as task
     ts = int(time.time() * 1000)
     task_id = f"task-{ts}"
@@ -3101,6 +3513,20 @@ async def _handle_discord_message(message, force=False):
                 print(f"  [vault] intercept errored ({type(_vault_exc).__name__}: {_vault_exc}) — redacted, NOT stored", flush=True)
         else:
             text = redact_vault_commands(text)
+
+    # Redact ordinary pasted tokens after explicit vault interception so named
+    # `vault set` values can still be stored. Include reply context and voice
+    # transcripts: both are user-derived and both are persisted in the task.
+    filtered_text = filter_chat_secrets(text)
+    filtered_attachment = filter_chat_secrets(attachment_note)
+    filtered_reply_context = filter_chat_secrets(reply_context)
+    text = filtered_text.text
+    attachment_note = filtered_attachment.text
+    reply_context = filtered_reply_context.text
+    detected_secret_types.update(filtered_text.secret_types)
+    detected_secret_types.update(filtered_attachment.secret_types)
+    detected_secret_types.update(filtered_reply_context.secret_types)
+    secret_notice = secret_handling_instruction("Discord", detected_secret_types)
 
     # Inject tier-specific in-band instructions so the core agent cannot
     # accidentally process a non-owner task with full capabilities.
@@ -3185,6 +3611,10 @@ async def _handle_discord_message(message, force=False):
             # `===SUTANDO SYSTEM INSTRUCTIONS===` content that lands in the task
             # file header verbatim. confine_user_content is idempotent so the
             # already-ZWSP-prefixed original user_task_text is unaffected.
+            filtered_enriched = filter_chat_secrets(enriched)  # pragma: no cover
+            detected_secret_types.update(filtered_enriched.secret_types)  # pragma: no cover
+            secret_notice = secret_handling_instruction("Discord", detected_secret_types)  # pragma: no cover
+            enriched = filtered_enriched.text  # pragma: no cover
             user_task_text = confine_user_content(enriched)
             # Rewrite the prompt file with the enriched body. quoted_task
             # already points to `"$(cat {prompt_path})"` — keep the heredoc
@@ -3337,6 +3767,20 @@ async def _handle_discord_message(message, force=False):
         if getattr(message, "reference", None) and message.reference.message_id
         else ""
     )
+    # Full walked ancestor id spine (root-first) for thread reconstruction —
+    # handles to re-fetch any ancestor the inlined chain clipped/dropped past
+    # the depth/size guard. Only emitted for a real chain (>=2 ids); a single
+    # parent is already covered by parent_message_id above. (Chi 2026-07-25.)
+    parent_msg_line += reply_chain_ids_line
+    # Also emit the replied-to author as a STRUCTURED header, not just the
+    # opaque parent_message_id. In a multi-bot channel a consumer must be able
+    # to tell WHO the sender was addressing (e.g. a reply aimed at another bot)
+    # without parsing the lossy `[Replying to ...]` body snippet. parent_message_id
+    # alone is an unresolvable id; reply_to_author makes the addressee legible so
+    # the receiving bot can gate on it. (Chi 2026-07-20: "the task file content
+    # needs to be right" — a reply to sutando#9708 reached Pro with no legible
+    # addressee, so Pro acted as if addressed.)
+    parent_msg_line += _reply_author_header(message)
     # Inject skill instructions for owner tasks so the agent follows the
     # notify-before-work and transcription protocol after compaction.
     # Only injected when the referenced skills are installed on this node.
@@ -3440,6 +3884,7 @@ async def _handle_discord_message(message, force=False):
             f"task: {user_task_text}\n"
             f"{tier_instructions.get(rulebook_key, tier_instructions['other'])}"
             f"{discord_skill_hints}"
+            f"{secret_notice}"
         )
 
     if not _write_task_file(task_file, _build_task_content, username, channel_name,
@@ -3473,20 +3918,6 @@ async def _handle_discord_message(message, force=False):
     # Typing indicator
     async with message.channel.typing():
         await asyncio.sleep(0.5)
-
-
-def save_to_allowlist(sender_id):
-    """Add sender to access.json allowFrom."""
-    try:
-        data = json.loads(ACCESS_FILE.read_text())
-    except Exception:
-        data = {"dmPolicy": "pairing", "allowFrom": [], "groups": {}, "pending": {}}
-
-    if sender_id not in data.get("allowFrom", []):
-        data.setdefault("allowFrom", []).append(sender_id)
-        ACCESS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        ACCESS_FILE.write_text(json.dumps(data, indent=2))
-        os.chmod(ACCESS_FILE, 0o600)  # don't inherit umask 644 — file holds owner's Discord user IDs
 
 
 async def poll_approved():
@@ -3651,6 +4082,12 @@ def _mark_delivered(task_id: str) -> None:
     result_audit.record(task_id, "delivered", "discord")
 
 
+def _record_skip_audit(task_id: str, skip_value: str) -> None:
+    """Record §7 audit disposition for a skip-marked result (no_send / deduped)."""
+    _disp = "deduped" if skip_value == "deduped" else "no_send"
+    result_audit.record(task_id, _disp, "discord")
+
+
 def _is_delivered(task_id: str) -> bool:
     """True iff the sentinel for `task_id` exists."""
     try:
@@ -3665,6 +4102,77 @@ def _clear_delivered(task_id: str) -> None:
         _delivered_sentinel_path(task_id).unlink(missing_ok=True)
     except Exception:
         pass
+
+
+async def _report_delivery_failure(channel, task_id: str, task_tier: str, error: Exception) -> None:
+    """Make a failed Discord result visible instead of only printing a log.
+
+    Result Router §9.3 requires every delivery failure to produce both a
+    ``failed`` audit row and an owner DM.  The originating owner DM is the
+    safest first choice; for channel and non-owner tasks, resolve the canonical
+    owner using the same config chain as proactive delivery.
+
+    This helper deliberately never raises.  It runs inside ``poll_results``'s
+    delivery exception path, where a second exception must not kill the bridge.
+    """
+    error_text = str(error) or type(error).__name__
+    failure = result_router.DeliveryFailure(
+        task_id=task_id,
+        tier=task_tier,
+        surface="discord",
+        error=error_text,
+    )
+    result_audit.record(task_id, "failed", "discord")
+    try:
+        _emit_channel(
+            "discord",
+            "out",
+            channel_id=str(getattr(channel, "id", "")),
+            access_tier=task_tier,
+            outcome="error",
+            data={"task_id": task_id, "error": error_text[:1000]},
+        )
+    except Exception:
+        pass
+
+    try:
+        owner_dm = None
+        if task_tier == "owner" and isinstance(channel, discord.DMChannel):
+            owner_dm = channel
+        else:
+            try:
+                access_data = json.loads(ACCESS_FILE.read_text())
+            except Exception:
+                access_data = {}
+            allow_list = access_data.get("allowFrom") or []
+            owner_id = discord_config.resolve_owner_id(access_data)
+            if owner_id is None:
+                for uid in allow_list:
+                    try:
+                        user = await client.fetch_user(int(uid))
+                        if not user.bot:
+                            owner_id = str(uid)
+                            break
+                    except Exception:
+                        continue
+            if owner_id is not None:
+                user = await client.fetch_user(int(owner_id))
+                owner_dm = await user.create_dm()
+
+        if owner_dm is None:
+            print(
+                f"  [delivery-failure] no owner DM available for {task_id}: {error_text}",
+                flush=True,
+            )
+            return
+        await owner_dm.send(result_router.delivery_failure_notice(failure))
+        print(f"  [delivery-failure] owner notified for {task_id}: {error_text}", flush=True)
+    except Exception as notice_error:
+        print(
+            f"  [delivery-failure] owner notice failed for {task_id}: {notice_error}; "
+            f"original error: {error_text}",
+            flush=True,
+        )
 
 
 PENDING_REPLIES_FILE = REPO / "state" / "discord-pending-replies.json"
@@ -3841,6 +4349,9 @@ async def poll_results():
                             # Best-effort; never block the archive of this result.
                             print(f"  [dedup] cross-channel reject/requeue failed: {e}", flush=True)
                     print(f"  Skipped (already replied or deduped): {task_id}")
+                    # §7 audit: skip-marked results are resolved deliveries, not
+                    # silent voids — one line per resolved result per spec.
+                    _record_skip_audit(task_id, _skip.value)
                     archive_file(result_file, "results", task_id)
                     task_file = find_task_file(TASKS_DIR, task_id) or TASKS_DIR / f"{task_id}.txt"
                     archive_file(task_file, "tasks", task_id)
@@ -4062,6 +4573,7 @@ async def poll_results():
                     )
                 except Exception as e:
                     print(f"  Reply failed: {e}", flush=True)
+                    await _report_delivery_failure(channel, task_id, _task_tier, e)
                 # Archive (not delete) so we can mine patterns later.
                 archive_file(result_file, "results", task_id)
                 task_file = TASKS_DIR / f"{task_id}.txt"
@@ -4076,6 +4588,36 @@ async def poll_results():
 # In-memory placeholder registry for the progress-streamer:
 #   task_id -> {"msg": discord.Message, "first": float(created_epoch_s), "last_edit": float}
 _progress_msgs: dict = {}
+
+
+def _newest_alive_mtime():
+    """Newest per-host core heartbeat mtime (state/cores/*.alive), or None
+    when no heartbeat file exists (graceful shutdown unlinks it)."""
+    try:
+        return max((p.stat().st_mtime for p in (STATE_DIR / "cores").glob("*.alive")),
+                   default=None)
+    except Exception:
+        return None
+
+
+def _queued_task_count():
+    """Live (unarchived) task files waiting in tasks/."""
+    try:
+        return sum(1 for _ in TASKS_DIR.glob("task-*.txt"))
+    except Exception:
+        return 0
+
+
+def _render_progress_content(now, elapsed):
+    """Placeholder body for poll_progress: the live core step normally, or the
+    honest outage copy (frozen status + stale heartbeat + queue depth) when the
+    core looks dead (sonichi#2398 — the 2026-07-30 'restart in flight (1625s)'
+    class: never narrate progress the core is not making)."""
+    status = progress_stream.read_core_status(STATE_DIR)
+    if progress_stream.core_looks_down(status, _newest_alive_mtime(), now):
+        return progress_stream.format_outage(
+            progress_stream.status_age_s(status, now), _queued_task_count())
+    return progress_stream.format_progress(progress_stream.current_step(status), elapsed)
 
 
 async def poll_progress():
@@ -4135,12 +4677,9 @@ async def poll_progress():
                         _progress_msgs[task_id] = {"expired": True}  # terminal
                         continue
                     if progress_stream.should_edit(now, info["last_edit"]):
-                        step = progress_stream.current_step(
-                            progress_stream.read_core_status(STATE_DIR)
-                        )
                         try:
                             await info["msg"].edit(
-                                content=progress_stream.format_progress(step, elapsed)
+                                content=_render_progress_content(now, elapsed)
                             )
                             info["last_edit"] = now
                         except Exception:
@@ -4168,12 +4707,9 @@ async def poll_progress():
                     created = now
                 elapsed = now - created
                 if progress_stream.should_post_placeholder(elapsed):
-                    step = progress_stream.current_step(
-                        progress_stream.read_core_status(STATE_DIR)
-                    )
                     try:
                         msg = await channel.send(
-                            progress_stream.format_progress(step, elapsed)
+                            _render_progress_content(now, elapsed)
                         )
                         _progress_msgs[task_id] = {
                             "msg": msg,
@@ -4756,7 +5292,7 @@ def _send_via_rest(channel_id: str, message: str):
         data = json.dumps({"content": chunk}).encode()
         req = urllib.request.Request(url, data=data, headers=headers)
         try:
-            urllib.request.urlopen(req)
+            urllib.request.urlopen(req, timeout=10)
         except Exception as e:
             print(f"Send failed (chunk {i}/{len(chunks)}): {e}")
             sys.exit(1)

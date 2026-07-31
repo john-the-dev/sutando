@@ -50,7 +50,14 @@ fi
 # channel .env explicitly, which this honors.
 REMOTE_TASK_TOKEN="${REMOTE_TASK_TOKEN:-${AG2_REMOTE_TOKEN:-}}"
 REMOTE_TASK_TIER="${REMOTE_TASK_TIER:-${AG2_REMOTE_TIER:-owner}}"
-export REMOTE_TASK_TOKEN REMOTE_TASK_TIER
+# AG2 Space tags inbound image/file markers `ag2space-media`; the provider-
+# neutral bridge defaults to `remote-media`, so without this the marker never
+# matches and media URLs land unresolved in task bodies (owner-reported
+# 2026-07-25; fixed on main in startup.sh's launch block). launchd jobs never
+# see startup.sh's exports, so this AG2-specific launch site must default it
+# too. Explicit REMOTE_MEDIA_MARKER from the channel .env still wins.
+REMOTE_MEDIA_MARKER="${REMOTE_MEDIA_MARKER:-ag2space-media}"
+export REMOTE_TASK_TOKEN REMOTE_TASK_TIER REMOTE_MEDIA_MARKER
 
 # If there's still no token, the bridge would FATAL-exit and KeepAlive would
 # crash-loop. Exit 0 quietly instead — the install path only loads this job when
