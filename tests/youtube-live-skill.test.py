@@ -244,6 +244,39 @@ class CmdStartBranchTests(unittest.TestCase):
         self.assertIn("Connection refused", out["ffmpeg_stderr"])
         self.assertFalse(os.path.exists(go_live.PID_FILE))  # no pid written for a dead stream
 
+    def test_start_failure_redacts_stream_key_from_ffmpeg_stderr(self):
+        # bassil CR 2026-07-31: ffmpeg echoes the full rtmp target (key
+        # included) into stderr on connect failures, and the ffmpeg_stderr
+        # diagnostics path surfaced it raw — the key-is-never-printed
+        # contract must hold on the failure path, not just --dry-run.
+        import json as _json
+        from unittest import mock
+
+        class DeadProc:
+            pid = 4242
+            returncode = 1
+
+            def poll(self):
+                return 1
+
+        secret = "sk-live-STREAMKEY-4242"
+
+        def fake_popen(*a, **k):
+            Path(go_live.FFMPEG_LOG).write_text(
+                f"[tcp] rtmp://a.rtmp.youtube.com/live2/{secret}: Connection refused\n"
+                + "x" * 900  # push the first mention past the 800-char tail slice
+                + f" retry rtmp://a.rtmp.youtube.com/live2/{secret} failed")
+            return DeadProc()
+
+        with mock.patch.object(go_live, "_running_pid", return_value=None), \
+             mock.patch.object(go_live, "_ffmpeg_bin", return_value="/x/ffmpeg"), \
+             mock.patch.object(go_live, "_resolve_stream_key", return_value=secret), \
+             mock.patch.object(go_live.subprocess, "Popen", side_effect=fake_popen):
+            rc, out = _capture(go_live.cmd_start, _Args())
+        self.assertEqual(rc, 1)
+        self.assertNotIn(secret, _json.dumps(out))  # nowhere in the emitted JSON
+        self.assertIn(go_live._REDACTION, out["ffmpeg_stderr"])  # scrubbed, not dropped
+
 
 class CmdStopStatusTests(unittest.TestCase):
     def setUp(self):

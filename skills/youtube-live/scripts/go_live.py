@@ -197,12 +197,22 @@ def _write_pidfile(pid) -> None:
         f.write(str(pid))
 
 
-def _log_tail(path, limit: int = 800) -> str:
-    """Last `limit` chars of a log file, for surfacing ffmpeg's failure reason."""
+def _log_tail(path, limit: int = 800, redact=None) -> str:
+    """Last `limit` chars of a log file, for surfacing ffmpeg's failure reason.
+
+    `redact` scrubs the stream key from the surfaced content: ffmpeg echoes
+    the full rtmp target (key included) into stderr on connect failures — the
+    exact content this helper forwards to stdout JSON, which must honor the
+    key-is-never-printed contract (bassil CR 2026-07-31). Redaction happens
+    BEFORE the tail slice so a key straddling the boundary can't leak a
+    fragment.
+    """
     try:
         data = Path(path).read_text(errors="replace")
     except OSError:
         return ""
+    if redact:
+        data = data.replace(redact, _REDACTION)
     return data[-limit:].strip()
 
 
@@ -244,7 +254,7 @@ def cmd_start(args):
     time.sleep(args.startup_grace)
     if proc.poll() is not None:
         log_fh.close()
-        tail = _log_tail(FFMPEG_LOG)
+        tail = _log_tail(FFMPEG_LOG, redact=key)
         print(json.dumps({"ok": False, "error": "ffmpeg exited immediately "
                           f"(rc={proc.returncode}) — stream not started", "ffmpeg_stderr": tail}))
         return 1

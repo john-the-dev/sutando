@@ -40,7 +40,11 @@ python3 skills/youtube-live/scripts/go_live.py start --source test --dry-run
 
 That's all the skill needs to go live. The key is read as
 `--stream-key` > `$YOUTUBE_STREAM_KEY` > vault `YOUTUBE_STREAM_KEY`, and is
-**never printed** — logs and the `--dry-run` command are redacted to `<STREAM_KEY>`.
+**never printed** — the `--dry-run` command and the `ffmpeg_stderr` failure
+diagnostics are redacted to `<STREAM_KEY>` before anything reaches stdout.
+Known limitation: the raw ffmpeg log at `<workspace>/state/youtube-live.ffmpeg.log`
+retains unredacted output at rest (the state dir is `0700`, owner-only); scrub or
+delete it if you share diagnostics from that file directly.
 
 ## Sources
 
