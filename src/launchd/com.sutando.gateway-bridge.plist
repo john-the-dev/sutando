@@ -30,12 +30,13 @@
     __REPO__               — absolute path to the sutando repo checkout
     __WORKSPACE__          — absolute path to the resolved workspace
     __HOME__               — $HOME
-    __BREW_BIN__           — /opt/homebrew/bin or /usr/local/bin
+    __BREW_BIN__           — the Homebrew bin dir (Apple-Silicon or Intel prefix)
     __CLAUDE_CONFIG_DIR__  — resolved CLAUDE_CONFIG_DIR (sutando-config.sh
                              claude-home-path). launchd does NOT inherit the
                              login-shell env, so without this baked in the
                              wrapper's claude-home-path resolution falls back to
-                             ~/.claude/ and reads the WRONG channels/ag2space/.env
+                             the default Claude config dir and reads the WRONG
+                             channels/ag2space/.env
                              on claude-sutando installs → no token → clean exit →
                              KeepAlive never restarts → the supervisor silently
                              no-ops (the exact failure this job exists to prevent).

@@ -81,9 +81,18 @@ checks:
       - '~/.claude'
       - '~/.sutando'
     # ...unless the path token also matches one of these (fixtures / system noise).
+    # Path-like allows match at the token START, so a scoped entry cannot mask a
+    # real machine-specific path (e.g. a /Users/... token) on the same line.
     allow:
       - '/nonexistent'
       - '/usr/fake'
       - '/tmp/'
       - 'example.com'
+      # Homebrew's canonical bin prefix. launchd hands its jobs a minimal PATH
+      # that omits Homebrew, so the bridge wrappers/installers must probe the
+      # fixed brew location for python3 — first-match-wins with graceful fallback
+      # to /usr/local/bin, /usr/bin, then bare `python3` on PATH. This is the
+      # correct cross-host pattern (the prefix is identical on every Apple-Silicon
+      # host, and the probe degrades on Intel), not a machine-specific literal.
+      - '/opt/homebrew/bin'
 ```
