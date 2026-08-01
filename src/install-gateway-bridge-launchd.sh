@@ -44,10 +44,16 @@ fi
 unset __HELPER
 
 resolve_brew_bin() {
-    if [ -d /opt/homebrew/bin ]; then
-        echo /opt/homebrew/bin
-    elif [ -d /usr/local/bin ]; then
-        echo /usr/local/bin
+    # Resolve the interpreter's bin dir from the installer's OWN PATH. The
+    # installer runs in the user's login shell, so `command -v python3` finds the
+    # real interpreter regardless of host architecture or Homebrew prefix — no
+    # clone-, arch-, or user-specific literal. The resolved dir is substituted
+    # into the plist PATH (__BREW_BIN__) at install time, so the launchd wrapper
+    # gets a working `python3` on PATH without re-probing at runtime.
+    local py
+    py="$(command -v python3 2>/dev/null)" || py=""
+    if [ -n "$py" ]; then
+        dirname "$py"
     else
         echo /usr/bin
     fi

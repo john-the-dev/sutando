@@ -19,19 +19,15 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO"
 
-# Heal python3 onto PATH. launchd's plist PATH is a fixed guess and may miss the
-# interpreter the bridge was validated with; resolve one explicitly, first match
-# wins, and prepend its dir so `python3` in the exec below is found.
-for _py_cand in \
-    /opt/homebrew/bin/python3 \
-    /usr/local/bin/python3 \
-    /usr/bin/python3
-do
-    [ -x "$_py_cand" ] || continue
-    _py_dir="$(dirname "$_py_cand")"
-    case ":$PATH:" in *":$_py_dir:"*) ;; *) PATH="$_py_dir:$PATH"; export PATH ;; esac
-    break
-done
+# python3 resolves via PATH. The launchd plist sets PATH to
+# "__BREW_BIN__:/usr/bin:/bin:/usr/sbin:/sbin", where __BREW_BIN__ is the
+# interpreter dir the installer resolved from its own `command -v python3` — so
+# the bridge runs under the same interpreter the installer validated, with no
+# clone-, arch-, or user-specific fallback probe baked into this committed file.
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "[gateway-bridge-wrapper] no python3 on PATH (check the plist PATH)" >&2
+    exit 1
+fi
 
 # Resolve + load the ag2space channel .env (holds REMOTE_TASK_TOKEN). Honor
 # $CLAUDE_CONFIG_DIR if the plist exports it (claude-sutando installs); the

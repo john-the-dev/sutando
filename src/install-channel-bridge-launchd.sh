@@ -44,10 +44,12 @@ case "$ACTION" in
     CLAUDE_CFG="$(SUTANDO_SUPPRESS_CCD_FALLBACK_BANNER=1 bash "$REPO/scripts/sutando-config.sh" claude-home-path 2>/dev/null)"
     [ -n "$CLAUDE_CFG" ] || CLAUDE_CFG="$CLAUDE_CONFIG_DIR"
     [ -n "$CLAUDE_CFG" ] || CLAUDE_CFG="$HOME/.claude"
-    if [ -d /opt/homebrew/bin ]; then BREW_BIN=/opt/homebrew/bin
-    elif [ -d /usr/local/bin ]; then BREW_BIN=/usr/local/bin
-    else BREW_BIN=/usr/bin
-    fi
+    # Resolve the interpreter's bin dir from the installer's own PATH — host-
+    # agnostic, no arch/user-specific literal (see install-gateway's resolve_brew_bin).
+    # Substituted into the plist PATH (__BREW_BIN__) so the launchd wrapper finds
+    # python3 without re-probing hardcoded locations at runtime.
+    _py="$(command -v python3 2>/dev/null)" || _py=""
+    if [ -n "$_py" ]; then BREW_BIN="$(dirname "$_py")"; else BREW_BIN=/usr/bin; fi
     mkdir -p "$HOME/Library/LaunchAgents" "$WORKSPACE/logs" "$WORKSPACE/state/channel-bridge-supervisor"
     # Suppress the intentional installer reload from looking like a crash.
     rm -f "$WORKSPACE/state/channel-bridge-supervisor/$CHANNEL.started"

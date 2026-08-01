@@ -28,18 +28,18 @@ if [ -z "$TOKEN" ]; then
   while :; do sleep 300; done
 fi
 
+# Interpreter: honor an explicit override, else the PATH-resolved python3. The
+# launchd plist sets PATH to "__BREW_BIN__:/usr/bin:...", where __BREW_BIN__ is
+# the dir the installer resolved via its own `command -v python3` — so a bare
+# `python3` here is the interpreter the installer validated, with no clone-,
+# arch-, or user-specific candidate list baked into this committed file.
 PYTHON="${SUTANDO_CHANNEL_BRIDGE_PYTHON:-}"
-if [ -z "$PYTHON" ]; then
-  for candidate in /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
-    command -v "$candidate" >/dev/null 2>&1 || continue
-    if [ -n "$MODULE" ]; then
-      "$candidate" -c "import $MODULE" >/dev/null 2>&1 || continue
-    else
-      "$candidate" -c 'import urllib.request as u; u.urlopen("https://api.telegram.org", timeout=8)' >/dev/null 2>&1 || continue
-    fi
-    PYTHON="$candidate"
-    break
-  done
+if [ -z "$PYTHON" ] && command -v python3 >/dev/null 2>&1; then
+  if [ -n "$MODULE" ]; then
+    python3 -c "import $MODULE" >/dev/null 2>&1 && PYTHON=python3
+  else
+    python3 -c 'import urllib.request as u; u.urlopen("https://api.telegram.org", timeout=8)' >/dev/null 2>&1 && PYTHON=python3
+  fi
 fi
 if [ -z "$PYTHON" ]; then
   echo "[$CHANNEL-bridge-wrapper] no usable Python interpreter" >&2
