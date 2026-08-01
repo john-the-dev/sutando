@@ -2467,6 +2467,83 @@ def check_quota_telemetry(proxy_status: str) -> dict:
     return check
 
 
+def _fmt_quota_reset(epoch_str: Optional[str]) -> str:
+    """Human-readable local time for a unix-epoch reset string; '' if unusable."""
+    try:
+        return time.strftime("%H:%M %Z", time.localtime(int(epoch_str)))
+    except (TypeError, ValueError):
+        return ""
+
+
+def check_core_quota_exhausted(fresh_sec: int = 1800) -> dict:
+    """FAIL (loudly, to the remote owner surface) when the core's model quota is
+    exhausted — the 'stuck silently' condition.
+
+    Why this exists (owner-reported 2026-08-01): the core was on a model, ran
+    OVER QUOTA, and then every task stalled with no report — the agent went dark
+    with no signal to the owner. `check_quota_telemetry` above only warns on the
+    ABSENCE of quota-state.json; it deliberately never reads the values, so an
+    *exhausted* quota reads as "ok, quota state present" and the outage stays
+    invisible. This check closes that gap by reading the state and failing when
+    the unified rate-limit status is not "allowed".
+
+    Delivery is automatic and core-independent: a `fail` here is picked up by
+    `_slack_failures()` → `notify_slack_for_failures()`, the remote owner DM that
+    runs from the launchd health-check-fallback and does NOT depend on the (now
+    stuck) core agent being able to speak. Dedup is the shared transition-hash
+    contract, so the owner is told once per episode, not every tick.
+
+    Staleness guard (fail-safe): quota-state.json is written by the credential
+    proxy from upstream rate-limit headers. An *actively* over-quota core keeps
+    hitting the API (429s carry the headers), so a genuine exhaustion reads
+    FRESH + not-available. A stale not-available reading is ambiguous (an old
+    snapshot from a long-quiet host), so we DON'T raise an owner alert on it —
+    only on a fresh exhaustion. Absence/staleness of telemetry is already the
+    `quota-telemetry` check's job; this one must not false-alarm on old data.
+    """
+    check = {"name": "core-quota", "status": "ok"}
+    path = status_read_path("quota-state.json", WORKSPACE_DIR)
+    if not path.exists():
+        check["detail"] = "no quota-state.json (absence handled by quota-telemetry)"
+        return check
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        check["status"] = "warn"
+        check["detail"] = "quota-state.json present but unreadable"
+        return check
+
+    headers = data.get("headers") or {}
+    status = headers.get("anthropic-ratelimit-unified-status", "unknown")
+    available = bool(data.get("available", True)) and status == "allowed"
+    if available:
+        check["detail"] = f"core quota available (status={status})"
+        return check
+
+    # Not available. Only alert if the reading is FRESH — stale exhaustion is
+    # ambiguous and must not page the owner (fail-safe: silent, informational).
+    try:
+        age_sec = time.time() - path.stat().st_mtime
+    except OSError:
+        age_sec = 0
+    if age_sec > fresh_sec:
+        check["detail"] = (
+            f"quota-state reports exhausted (status={status}) but the reading is "
+            f"stale ({int(age_sec / 60)}m old) — not alerting on ambiguous old data"
+        )
+        return check
+
+    reset = _fmt_quota_reset(headers.get("anthropic-ratelimit-unified-5h-reset"))
+    reset_note = f" 5h window resets {reset}." if reset else ""
+    check["status"] = "fail"
+    check["detail"] = (
+        f"CORE IS OVER QUOTA (rate-limit status={status}).{reset_note} The core "
+        "cannot process tasks until quota resets or you switch models (/model) — "
+        "this is the 'stuck silently' condition; tasks will queue undelivered."
+    )
+    return check
+
+
 def check_bodhi_dist() -> dict:
     """Verify the installed bodhi-realtime-agent dist has the Gemini 3.1
     wire-format fixes applied. Greps the Gemini sendAudio/sendFile bodies
@@ -3911,6 +3988,10 @@ def run_all_checks() -> list[dict]:
 
     # Quota telemetry — only meaningful when the proxy is actually up.
     checks.append(check_quota_telemetry(proxy_check["status"]))
+
+    # Core over-quota — fail loudly to the remote owner surface so an exhausted
+    # model no longer stalls every task silently (owner-reported 2026-08-01).
+    checks.append(check_core_quota_exhausted())
 
     # G1.5: which Node would JS services resolve to (bundled/app-bundle/
     # system), red when none — the silent-dead-services failure class.
