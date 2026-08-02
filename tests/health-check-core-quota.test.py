@@ -25,6 +25,7 @@ import time
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -183,6 +184,22 @@ class TestCoreQuotaExhausted(unittest.TestCase):
         self.hc.notify_slack_for_failures([c], state_file=state, sender=fake_sender)
         self.assertEqual(len(sent), 1, "over-quota must DM the owner exactly once per unchanged episode")
         self.assertIn("core-quota", sent[0])
+
+    def test_run_all_checks_wires_core_quota_probe(self):
+        sentinel = {
+            "name": "core-quota",
+            "status": "ok",
+            "detail": "integration sentinel",
+        }
+        with mock.patch.object(
+            self.hc,
+            "check_core_quota_exhausted",
+            return_value=sentinel,
+        ) as probe:
+            checks = self.hc.run_all_checks()
+
+        probe.assert_called_once_with()
+        self.assertIn(sentinel, checks)
 
 
 if __name__ == "__main__":

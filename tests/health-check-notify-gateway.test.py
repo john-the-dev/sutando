@@ -16,12 +16,16 @@ Run: python3 tests/health-check-notify-gateway.test.py
 """
 from __future__ import annotations
 
+import io
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -212,6 +216,22 @@ class TestGatewayNotify(unittest.TestCase):
             [self._fail()], state_file=st, sender=lambda t: (sent.append(t) or True))
         self.assertEqual(len(sent), 1)
         self.assertIsInstance(json.loads(st.read_text()), dict)
+
+    def test_main_notify_gateway_flag_dispatches_failures(self):
+        checks = [self._fail()]
+        with (
+            mock.patch.object(self.hc, "run_all_checks", return_value=checks),
+            mock.patch.object(self.hc, "notify_gateway_for_failures") as notify,
+            mock.patch.object(
+                sys,
+                "argv",
+                ["health-check.py", "--notify-gateway", "--json"],
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.hc.main()
+
+        notify.assert_called_once_with(checks)
 
 
 class TestLaunchdMinimalEnvWiring(unittest.TestCase):
