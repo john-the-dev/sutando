@@ -2484,8 +2484,9 @@ def check_core_quota_exhausted(fresh_sec: int = 1800) -> dict:
     with no signal to the owner. `check_quota_telemetry` above only warns on the
     ABSENCE of quota-state.json; it deliberately never reads the values, so an
     *exhausted* quota reads as "ok, quota state present" and the outage stays
-    invisible. This check closes that gap by reading the state and failing when
-    the unified rate-limit status is not "allowed".
+    invisible. This check closes that gap by reading the state and failing on an
+    EXPLICIT exhaustion signal (unified status "rejected" or available:false),
+    while leaving unknown/missing/corrupt state non-paging (fail-safe).
 
     Delivery is automatic and core-independent: a `fail` here is picked up by
     `_slack_failures()` → `notify_slack_for_failures()`, the remote owner DM that
@@ -2513,18 +2514,42 @@ def check_core_quota_exhausted(fresh_sec: int = 1800) -> dict:
         check["detail"] = "quota-state.json present but unreadable"
         return check
 
-    headers = data.get("headers") or {}
+    # Validate the persisted shape before touching it. quota-state.json is
+    # written by a separate process; a corrupt/foreign payload (a JSON list,
+    # null, or a non-object `headers`) must yield a bounded warn — NEVER crash
+    # the whole health-check run via `.get` on a non-dict, especially since this
+    # check runs from the fallback health checker while the core may be down.
+    if not isinstance(data, dict):
+        check["status"] = "warn"
+        check["detail"] = "quota-state.json is not a JSON object"
+        return check
+    headers = data.get("headers")
+    if not isinstance(headers, dict):
+        headers = {}
     status = headers.get("anthropic-ratelimit-unified-status", "unknown")
-    available = bool(data.get("available", True)) and status == "allowed"
-    if available:
-        check["detail"] = f"core quota available (status={status})"
+
+    # Page ONLY on an explicit exhaustion signal. The unified status header is
+    # "allowed" or "rejected" (skills/quota-tracker/SKILL.md) and the proxy also
+    # writes a top-level `available` bool. Exhaustion = an explicit "rejected"
+    # status OR an explicit available:false. Ambiguous state — unknown/missing
+    # status, e.g. a fresh partial response carrying available:true with status
+    # "unknown" — is NOT exhaustion and must not raise a false owner page.
+    exhausted = status == "rejected" or data.get("available") is False
+    if not exhausted:
+        check["detail"] = f"core quota not exhausted (status={status})"
         return check
 
-    # Not available. Only alert if the reading is FRESH — stale exhaustion is
-    # ambiguous and must not page the owner (fail-safe: silent, informational).
-    # mtime is safe to read here: path.exists() + read_text() above already
-    # succeeded, so the file is present this call.
-    age_sec = time.time() - path.stat().st_mtime
+    # Explicit exhaustion. Only alert if the reading is FRESH — a stale OR
+    # age-unknown reading is ambiguous and must not page the owner (fail-safe).
+    try:
+        age_sec = time.time() - path.stat().st_mtime
+    except OSError:
+        # An unreadable age is NOT "fresh" — do not page on an age we can't read.
+        check["detail"] = (
+            "quota reports exhausted but the file age is unreadable — "
+            "not alerting (fail-safe)"
+        )
+        return check
     if age_sec > fresh_sec:
         check["detail"] = (
             f"quota-state reports exhausted (status={status}) but the reading is "

@@ -62,6 +62,9 @@ class TestCoreQuotaExhausted(unittest.TestCase):
             import os
             os.utime(self.qpath, (old, old))
 
+    def _write_raw(self, text: str):
+        self.qpath.write_text(text)
+
     # --- the core signal --------------------------------------------------
 
     def test_fresh_exhausted_fails_with_actionable_detail(self):
@@ -109,6 +112,60 @@ class TestCoreQuotaExhausted(unittest.TestCase):
     def test_unreadable_is_warn(self):
         self.qpath.write_text("{not json")
         self.assertEqual(self.hc.check_core_quota_exhausted()["status"], "warn")
+
+    # --- fail-safe: ambiguous / corrupt / age-unknown must NOT page --------
+
+    def test_available_true_with_unknown_status_does_not_page(self):
+        # A fresh partial response: available:true, status header absent.
+        # Ambiguous -> must not raise a false OVER QUOTA page (qingyun P1).
+        self._write_raw(json.dumps({"available": True, "headers": {}}))
+        c = self.hc.check_core_quota_exhausted()
+        self.assertEqual(c["status"], "ok", c)
+        self.assertNotIn("core-quota", [f["name"] for f in self.hc._slack_failures([c])])
+
+    def test_missing_available_and_status_does_not_page(self):
+        self._write_raw(json.dumps({"headers": {}}))
+        self.assertEqual(self.hc.check_core_quota_exhausted()["status"], "ok")
+
+    def test_non_dict_json_is_bounded_warn_not_crash(self):
+        # A list or null payload must not AttributeError-crash the health run.
+        for raw in ("[]", "null", '"a string"'):
+            self._write_raw(raw)
+            c = self.hc.check_core_quota_exhausted()
+            self.assertEqual(c["status"], "warn", f"{raw!r} -> {c}")
+
+    def test_non_dict_headers_does_not_crash(self):
+        # headers as a list must degrade to {} (no .get crash); available:false
+        # is still an explicit exhaustion so this fails cleanly, not by raising.
+        self._write_raw(json.dumps({"available": False, "headers": []}))
+        c = self.hc.check_core_quota_exhausted()
+        self.assertEqual(c["status"], "fail", c)
+
+    def test_unreadable_age_does_not_page(self):
+        # Explicit exhaustion but the file age can't be read -> fail-safe: no page.
+        # Inject a path whose exists()/read_text() work but stat() raises, so the
+        # early exists() check still passes and only the age read fails.
+        payload = json.dumps({"available": False, "headers": {
+            "anthropic-ratelimit-unified-status": "rejected"}})
+
+        class FakePath:
+            def exists(self_):
+                return True
+
+            def read_text(self_):
+                return payload
+
+            def stat(self_):
+                raise OSError("stat failed")
+
+        orig = self.hc.status_read_path
+        self.hc.status_read_path = lambda *a, **k: FakePath()
+        try:
+            c = self.hc.check_core_quota_exhausted()
+        finally:
+            self.hc.status_read_path = orig
+        self.assertEqual(c["status"], "ok", c)
+        self.assertIn("unreadable", c["detail"])
 
     # --- delivery: reaches the owner, core-independent, deduped ------------
 
