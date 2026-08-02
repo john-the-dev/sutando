@@ -22,7 +22,7 @@
   Behavior:
     - Fires every 300s (StartInterval).
     - Runs `python3 src/health-check.py --emit-task --notify-on-fail
-      --notify-slack --quiet`.
+      --notify-slack --notify-gateway --quiet`.
     - Surfaces failures as tasks/task-health-*.txt, macOS notifications, AND
       a direct Slack DM to the owner (remote-visible; fires even when the core
       session is wedged but its heartbeat process still ticks). The Slack DM
@@ -56,6 +56,7 @@
         <string>--emit-task</string>
         <string>--notify-on-fail</string>
         <string>--notify-slack</string>
+        <string>--notify-gateway</string>
         <string>--quiet</string>
     </array>
 

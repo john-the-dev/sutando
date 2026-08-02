@@ -9,6 +9,7 @@ Usage:
   python3 src/health-check.py --emit-task      # write tasks/task-health-*.txt on failure
   python3 src/health-check.py --notify-on-fail # macOS notification on failure
   python3 src/health-check.py --notify-slack   # DM the owner on Slack on failure (remote, core-independent)
+  python3 src/health-check.py --notify-gateway # DM the owner on ag2.space/gateway on failure (remote, core-independent)
   python3 src/health-check.py --recover-core   # auto-restart the core when alive-but-wedged (guarded)
 
 Checks:
@@ -4689,6 +4690,78 @@ def _default_slack_sender(text: str) -> bool:
         return False
 
 
+def _env_file_dict(path: Path) -> dict:
+    """Parse a KEY=VALUE .env file into a dict (launchd-minimal-env safe).
+    Returns {} if unreadable. Strips surrounding quotes; ignores comments."""
+    out: dict = {}
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return out
+
+
+def _gateway_owner_room(source: str = "ag2space") -> "str | None":
+    """The ag2.space room to post an owner alert to. Prefers an explicit
+    REMOTE_ALERT_ROOM in the channel .env; else the owner's most-recent DM room
+    from state/last-owner-activity.json (only trusted when it looks like a
+    gateway room or the last activity was on this source). None if unresolved."""
+    room = (_env_file_dict(claude_home_path("channels", source, ".env")).get("REMOTE_ALERT_ROOM") or "").strip()
+    if room:
+        return room
+    try:
+        act = json.loads((WORKSPACE_DIR / "state" / "last-owner-activity.json").read_text())
+    except (OSError, ValueError):
+        return None
+    cid = str(act.get("channel_id") or "").strip()
+    if cid and (cid.endswith(":ag2.space") or str(act.get("channel") or "") == source):
+        return cid
+    return None
+
+
+def _gateway_creds(source: str = "ag2space") -> "tuple[str, str] | None":
+    """(url, token) for the gateway op:message endpoint, or None. Supports the
+    one-token onboarding form (REMOTE_TASK_TOKEN='https://gw|secret')."""
+    env = _env_file_dict(claude_home_path("channels", source, ".env"))
+    url = (os.environ.get("REMOTE_TASK_URL") or env.get("REMOTE_TASK_URL") or "").strip().rstrip("/")
+    token = (os.environ.get("REMOTE_TASK_TOKEN") or env.get("REMOTE_TASK_TOKEN") or "").strip()
+    if "|" in token:
+        _u, token = token.split("|", 1)
+        url = url or _u.strip().rstrip("/")
+    return (url, token) if url and token else None
+
+
+def _default_gateway_sender(text: str) -> bool:
+    """Post `text` to the owner's ag2.space room via the gateway op:message —
+    the same transport notify.py uses (POST {url}/v1/room, op:message), so it
+    reaches the owner even when the core is wedged. Returns True on a 2xx."""
+    room = _gateway_owner_room()
+    creds = _gateway_creds()
+    if not room or not creds:
+        return False
+    url, token = creds
+    try:
+        req = urllib.request.Request(
+            f"{url}/v1/room",
+            data=json.dumps({"op": "message", "room_id": room, "body": text}).encode(),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "User-Agent": "sutando-health-check/1.0",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            code = getattr(resp, "status", None) or resp.getcode()
+            return 200 <= code < 300
+    except Exception:
+        return False
+
+
 def notify_slack_for_failures(
     checks: list[dict],
     state_file: Optional[Path] = None,
@@ -4743,6 +4816,64 @@ def notify_slack_for_failures(
     )
 
     send = sender or _default_slack_sender
+    if not send(text):
+        # Send failed — don't record dedup, so the next tick retries.
+        return
+
+    history[hash_key] = now_ms
+    history[_LAST_HASH_KEY] = hash_key
+    cutoff = now_ms - (24 * 3600 * 1000)
+    history = {k: v for k, v in history.items() if k == _LAST_HASH_KEY or v >= cutoff}
+    try:
+        state_file.write_text(json.dumps(history))
+    except Exception:
+        pass
+
+
+def notify_gateway_for_failures(
+    checks: list[dict],
+    state_file: Optional[Path] = None,
+    sender=None,
+) -> None:
+    """DM the owner on ag2.space (the gateway) when health checks fail — the
+    remote-visible surface the owner actually watches, and one that does NOT
+    depend on the core agent being alive (posts straight to the gateway
+    op:message endpoint from the launchd fallback).
+
+    Owner-requested 2026-08-01: the over-quota alert must land where the owner
+    is (ag2.space), not only Slack. Same transition-hash dedup contract as
+    notify_slack_for_failures, but a SEPARATE state file so the gateway and
+    Slack surfaces never suppress each other, and dedup is recorded only on a
+    SUCCESSFUL send so a transient gateway blip doesn't silence the alert.
+    `sender` is injected by tests to avoid real network calls.
+    """
+    failures = _slack_failures(checks)
+    if not failures:
+        return
+
+    if state_file is None:
+        state_file = WORKSPACE_DIR / "state" / "health-last-gateway.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+
+    set_key = "|".join(sorted(c["name"] for c in failures))
+    hash_key = hashlib.sha256(set_key.encode()).hexdigest()[:16]
+    now_ms = int(time.time() * 1000)
+
+    history: dict = {}
+    try:
+        if state_file.exists():
+            history = json.loads(state_file.read_text())
+    except Exception:
+        history = {}
+
+    if history.get(_LAST_HASH_KEY) == hash_key:
+        return
+
+    lines = [f"• {c['name']}: {c['status']} ({c['detail']})" for c in failures[:5]]
+    extra = f"\n…(+{len(failures) - 5} more)" if len(failures) > 5 else ""
+    text = "⚠️ Sutando health check — " + f"{len(failures)} issue(s):\n" + "\n".join(lines) + extra
+
+    send = sender or _default_gateway_sender
     if not send(text):
         # Send failed — don't record dedup, so the next tick retries.
         return
@@ -5427,6 +5558,7 @@ def main():
     do_emit = "--emit-task" in sys.argv
     do_notify = "--notify-on-fail" in sys.argv
     do_notify_slack = "--notify-slack" in sys.argv
+    do_notify_gateway = "--notify-gateway" in sys.argv
     do_recover = "--recover-core" in sys.argv
     quiet = "--quiet" in sys.argv or "-q" in sys.argv
 
@@ -5461,6 +5593,13 @@ def main():
     # the launchd-supervised fallback invocation so outages self-report.
     if do_notify_slack:
         notify_slack_for_failures(checks)
+
+    # Optional: remote ag2.space (gateway) DM surface — the channel the owner
+    # actually watches. Same core-independent guarantee as --notify-slack, via
+    # the gateway op:message endpoint. Intended for the launchd fallback so an
+    # over-quota / wedged core self-reports where the owner will see it.
+    if do_notify_gateway:
+        notify_gateway_for_failures(checks)
 
     # Optional: auto-recover a wedged core (alive-but-stuck) by restarting it.
     # Independent of the checks list — keys off the queue-drain + heartbeat

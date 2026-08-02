@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""`notify_gateway_for_failures` DMs the owner on ag2.space (the gateway) on a
+failing health check — the surface the owner actually watches, core-independent.
+
+Owner-requested 2026-08-01 (#2487 follow-up): route the over-quota / wedge alert
+to ag2.space, not only Slack. This suite pins:
+
+  - room resolution: REMOTE_ALERT_ROOM env wins; else last-owner-activity room;
+    else None (no false target).
+  - creds resolution: url+token from the channel .env, incl. one-token form.
+  - delivery: a failure DMs the owner exactly once per unchanged episode (dedup);
+    a failed send does NOT record dedup (so the next tick retries).
+  - a clean run sends nothing.
+
+Run: python3 tests/health-check-notify-gateway.test.py
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+def _load():
+    spec = importlib.util.spec_from_file_location("hc_gw_test", REPO / "src" / "health-check.py")
+    hc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hc)
+    return hc
+
+
+class TestGatewayNotify(unittest.TestCase):
+    def setUp(self):
+        self.hc = _load()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.hc.WORKSPACE_DIR = self.root
+        # Redirect claude_home_path to a temp channels tree.
+        self.cfg = self.root / "cfg"
+        (self.cfg / "channels" / "ag2space").mkdir(parents=True)
+        self.hc.claude_home_path = lambda *p: self.cfg.joinpath(*p)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_env(self, text):
+        (self.cfg / "channels" / "ag2space" / ".env").write_text(text)
+
+    def _write_activity(self, cid):
+        (self.root / "state").mkdir(exist_ok=True)
+        (self.root / "state" / "last-owner-activity.json").write_text(
+            json.dumps({"channel": "ag2space", "channel_id": cid}))
+
+    # --- room resolution --------------------------------------------------
+
+    def test_room_prefers_explicit_env(self):
+        self._write_env("REMOTE_ALERT_ROOM=!explicit:ag2.space\n")
+        self._write_activity("!other:ag2.space")
+        self.assertEqual(self.hc._gateway_owner_room(), "!explicit:ag2.space")
+
+    def test_room_falls_back_to_last_activity(self):
+        self._write_env("REMOTE_TASK_URL=https://gw\n")
+        self._write_activity("!wWEybMgQgJTsCsALdA:ag2.space")
+        self.assertEqual(self.hc._gateway_owner_room(), "!wWEybMgQgJTsCsALdA:ag2.space")
+
+    def test_room_none_when_unresolvable(self):
+        self._write_env("REMOTE_TASK_URL=https://gw\n")
+        self.assertIsNone(self.hc._gateway_owner_room())
+
+    def test_room_none_when_activity_room_does_not_match(self):
+        # A last-activity room that isn't a gateway room (and channel != source)
+        # must not be used as the ag2.space alert target.
+        self._write_env("REMOTE_TASK_URL=https://gw\n")
+        (self.root / "state").mkdir(exist_ok=True)
+        (self.root / "state" / "last-owner-activity.json").write_text(
+            json.dumps({"channel": "discord", "channel_id": "123456789"}))
+        self.assertIsNone(self.hc._gateway_owner_room())
+
+    def test_env_parsing_skips_comments_blanks_and_missing_file(self):
+        # Comments + blank lines are ignored; a missing .env yields no creds.
+        self._write_env("# gateway creds\n\nREMOTE_TASK_URL=https://gw\nREMOTE_TASK_TOKEN=s\n")
+        self.assertEqual(self.hc._gateway_creds(), ("https://gw", "s"))
+        (self.cfg / "channels" / "ag2space" / ".env").unlink()
+        self.assertIsNone(self.hc._gateway_creds())
+
+    # --- creds ------------------------------------------------------------
+
+    def test_creds_split_form(self):
+        self._write_env("REMOTE_TASK_URL=https://gw/\nREMOTE_TASK_TOKEN=secret\n")
+        self.assertEqual(self.hc._gateway_creds(), ("https://gw", "secret"))
+
+    def test_creds_one_token_form(self):
+        self._write_env("REMOTE_TASK_TOKEN=https://gw|secret\n")
+        self.assertEqual(self.hc._gateway_creds(), ("https://gw", "secret"))
+
+    def test_creds_none_when_missing(self):
+        self._write_env("AGENT_ID=x\n")
+        self.assertIsNone(self.hc._gateway_creds())
+
+    # --- delivery ---------------------------------------------------------
+
+    def _fail(self, name="core-quota", detail="CORE IS OVER QUOTA"):
+        return {"name": name, "status": "fail", "detail": detail}
+
+    def test_dms_owner_once_per_episode(self):
+        sent = []
+        st = self.root / "state" / "gw-slacked.json"
+        c = self._fail()
+        self.hc.notify_gateway_for_failures([c], state_file=st, sender=lambda t: (sent.append(t) or True))
+        self.hc.notify_gateway_for_failures([c], state_file=st, sender=lambda t: (sent.append(t) or True))
+        self.assertEqual(len(sent), 1, "over-quota must DM ag2.space exactly once per unchanged episode")
+        self.assertIn("core-quota", sent[0])
+
+    def test_clean_run_sends_nothing(self):
+        sent = []
+        st = self.root / "state" / "gw2.json"
+        self.hc.notify_gateway_for_failures(
+            [{"name": "x", "status": "ok", "detail": "fine"}],
+            state_file=st, sender=lambda t: (sent.append(t) or True))
+        self.assertEqual(sent, [])
+
+    def test_default_sender_posts_on_2xx(self):
+        # Cover the real sender's happy path without a network call.
+        self._write_env("REMOTE_TASK_URL=https://gw\nREMOTE_TASK_TOKEN=secret\n")
+        self._write_activity("!room:ag2.space")
+        captured = {}
+
+        class FakeResp:
+            status = 200
+
+            def __enter__(self_):
+                return self_
+
+            def __exit__(self_, *a):
+                return False
+
+        import urllib.request as u
+        orig = u.urlopen
+        u.urlopen = lambda req, timeout=10: (captured.update(
+            url=req.full_url, body=req.data), FakeResp())[1]
+        try:
+            ok = self.hc._default_gateway_sender("hello owner")
+        finally:
+            u.urlopen = orig
+        self.assertTrue(ok)
+        self.assertEqual(captured["url"], "https://gw/v1/room")
+        self.assertIn(b'"op": "message"', captured["body"])
+        self.assertIn(b'!room:ag2.space', captured["body"])
+
+    def test_default_sender_false_when_unconfigured(self):
+        # No room / no creds -> False, no network attempt.
+        self._write_env("AGENT_ID=x\n")
+        self.assertFalse(self.hc._default_gateway_sender("x"))
+
+    def test_default_sender_false_on_network_error(self):
+        self._write_env("REMOTE_TASK_URL=https://gw\nREMOTE_TASK_TOKEN=secret\n")
+        self._write_activity("!room:ag2.space")
+        import urllib.request as u
+        orig = u.urlopen
+
+        def boom(*a, **k):
+            raise OSError("network down")
+
+        u.urlopen = boom
+        try:
+            self.assertFalse(self.hc._default_gateway_sender("x"))
+        finally:
+            u.urlopen = orig
+
+    def test_uses_default_state_file(self):
+        # state_file omitted -> defaults under WORKSPACE_DIR/state; still sends once.
+        sent = []
+        self.hc.notify_gateway_for_failures([self._fail()], sender=lambda t: (sent.append(t) or True))
+        self.assertEqual(len(sent), 1)
+        self.assertTrue((self.root / "state" / "health-last-gateway.json").exists())
+
+    def test_survives_unreadable_and_unwritable_state(self):
+        # A state path that is a directory: read + write both raise, but the
+        # alert must still be delivered (defensive excepts, no crash).
+        st = self.root / "state" / "adir"
+        st.mkdir(parents=True)
+        sent = []
+        self.hc.notify_gateway_for_failures([self._fail()], state_file=st, sender=lambda t: (sent.append(t) or True))
+        self.assertEqual(len(sent), 1)
+
+    def test_failed_send_is_not_deduped(self):
+        # A failed send must NOT record dedup, so the next tick retries.
+        st = self.root / "state" / "gw3.json"
+        c = self._fail()
+        calls = []
+        self.hc.notify_gateway_for_failures([c], state_file=st, sender=lambda t: (calls.append(t) or False))
+        self.hc.notify_gateway_for_failures([c], state_file=st, sender=lambda t: (calls.append(t) or False))
+        self.assertEqual(len(calls), 2, "a failed gateway send must be retried, not silently deduped")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
