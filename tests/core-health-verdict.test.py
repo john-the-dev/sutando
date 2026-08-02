@@ -137,6 +137,55 @@ with tempfile.TemporaryDirectory() as d:
     check("confirm: corrupt prior -> 1", rh._confirm_count(d, "offline", "critical") == 1)
 
 
+# ── _host_label_safe + _heartbeat_fresh: cover the defensive branches ─────────
+sys.path.insert(0, str(REPO / "src"))  # so `from util_paths import _host_label` resolves
+check("_host_label_safe returns a label", bool(rh._host_label_safe()))
+
+# both resolution paths fail -> None
+_saved = sys.modules.get("util_paths")
+_orig_gethostname = rh.socket.gethostname
+try:
+    sys.modules["util_paths"] = None  # makes `from util_paths import ...` raise
+    def _boom():
+        raise OSError("no hostname")
+    rh.socket.gethostname = _boom
+    check("_host_label_safe both-paths-fail -> None", rh._host_label_safe() is None)
+finally:
+    rh.socket.gethostname = _orig_gethostname
+    if _saved is not None:
+        sys.modules["util_paths"] = _saved
+    else:
+        sys.modules.pop("util_paths", None)
+
+# _heartbeat_fresh: host unresolved -> None
+_orig_hls = rh._host_label_safe
+try:
+    rh._host_label_safe = lambda: None
+    check("_heartbeat_fresh unresolved host -> None", rh._heartbeat_fresh("/tmp") is None)
+finally:
+    rh._host_label_safe = _orig_hls
+
+# _heartbeat_fresh: fresh / stale / missing .alive
+with tempfile.TemporaryDirectory() as ws:
+    _host = rh._host_label_safe() or "h"
+    _orig_hls2 = rh._host_label_safe
+    rh._host_label_safe = lambda: _host
+    try:
+        cores = os.path.join(ws, "state", "cores")
+        os.makedirs(cores)
+        alive = os.path.join(cores, _host + ".alive")
+        with open(alive, "w") as f:
+            f.write("{}")
+        check("_heartbeat_fresh fresh .alive -> True", rh._heartbeat_fresh(ws) is True)
+        old = os.path.getmtime(alive) - (rh.HEARTBEAT_STALE_SECONDS + 30)
+        os.utime(alive, (old, old))
+        check("_heartbeat_fresh stale .alive -> False", rh._heartbeat_fresh(ws) is False)
+        os.remove(alive)
+        check("_heartbeat_fresh missing .alive -> False", rh._heartbeat_fresh(ws) is False)
+    finally:
+        rh._host_label_safe = _orig_hls2
+
+
 if failures:
     print(f"\n{len(failures)} FAILED: {failures}")
     sys.exit(1)
