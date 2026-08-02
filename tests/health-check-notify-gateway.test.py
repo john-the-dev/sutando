@@ -237,6 +237,15 @@ class TestLaunchdMinimalEnvWiring(unittest.TestCase):
         self.assertIn("could not resolve canonical Claude config directory", inst,
                       "a failed canonical lookup must stop the install clearly")
 
+    def test_protocol_documents_explicit_owner_only_room(self):
+        docs = (REPO / "docs" / "remote-gateway-protocol.md").read_text()
+        row = next(line for line in docs.splitlines() if "`REMOTE_ALERT_ROOM`" in line)
+        self.assertIn("none (gateway alert disabled)", row,
+                      "docs must not promise the removed last-activity fallback")
+        self.assertIn("owner-only", row,
+                      "docs must identify the privacy requirement for the configured room")
+        self.assertNotIn("latest ag2.space owner room", row)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
