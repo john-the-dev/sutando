@@ -197,8 +197,11 @@ finally:
     rh.TMUX_SOCKET = _orig_socket
 
 # 7) Defensive branches (the degrade-not-crash paths).
+# A command that cannot execute returns rc None (UNKNOWN — distinct from a
+# command that ran and returned non-zero) so a probe outage is never counted as
+# a positive "down" observation (qingyun CR on #2527).
 rc, out = rh._run(["/nonexistent-rh-binary-xyz"])
-check("_run: missing binary -> (127, '')", rc == 127 and out == "")
+check("_run: missing binary -> (None, '')", rc is None and out == "")
 
 
 def _fake_run_gw(cmd):

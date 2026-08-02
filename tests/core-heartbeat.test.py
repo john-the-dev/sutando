@@ -204,5 +204,78 @@ class TestHeartbeatCli(unittest.TestCase):
         self.assertFalse(alive.exists(), ".alive should have been unlinked on SIGTERM")
 
 
+class TestOrphanWriterGuard(unittest.TestCase):
+    """qingyun CR on #2527 (2nd P1): a dead core must not leave a fresh orphan
+    heartbeat. core_heartbeat.py binds to the core's tmux session and stops
+    beating once the session it saw has gone away."""
+
+    def _mod(self):
+        sys.modules.pop("core_heartbeat", None)
+        import core_heartbeat  # noqa
+        return core_heartbeat
+
+    def test_should_stop_transitions(self):
+        m = self._mod()
+        f = m._should_stop_beating
+        # alive True -> never stop; remember seen; reset misses.
+        self.assertEqual(f(True, False, 5), (False, True, 0))
+        # alive None (probe unavailable) -> keep beating, carry state unchanged.
+        self.assertEqual(f(None, True, 1), (False, True, 1))
+        self.assertEqual(f(None, False, 0), (False, False, 0))
+        # alive False before ever seeing the core -> startup grace, keep beating.
+        self.assertEqual(f(False, False, 0), (False, False, 0))
+        # alive False after seen -> count misses; stop only at the limit.
+        self.assertEqual(f(False, True, 0), (False, True, 1))   # 1st miss
+        self.assertEqual(f(False, True, 1), (True, True, 2))    # 2nd miss -> stop
+        # miss_limit override -> stop on first miss.
+        self.assertEqual(f(False, True, 0, miss_limit=1), (True, True, 1))
+
+    def test_core_session_alive_probe_states(self):
+        m = self._mod()
+
+        class _P:
+            def __init__(self, rc):
+                self.returncode = rc
+
+        # ran, session present -> True
+        m.subprocess.run = lambda *a, **k: _P(0)
+        self.assertIs(m._core_session_alive("/tmp/sock"), True)
+        # ran, session absent -> False
+        m.subprocess.run = lambda *a, **k: _P(1)
+        self.assertIs(m._core_session_alive("/tmp/sock"), False)
+        # probe could not execute -> None (fail open; never stop on a glitch)
+        def _boom(*a, **k):
+            raise FileNotFoundError("tmux missing")
+        m.subprocess.run = _boom
+        self.assertIsNone(m._core_session_alive("/tmp/sock"))
+
+    def test_run_forever_stops_when_seen_core_disappears(self):
+        m = self._mod()
+        # A .alive to be cleaned up on stop.
+        tmp = Path(tempfile.mkdtemp(prefix="orphan-guard-"))
+        cores = tmp / "state" / "cores"
+        cores.mkdir(parents=True, exist_ok=True)
+        alive = cores / "orphan-test.alive"
+        alive.write_text("{}")
+        m._alive_path = lambda: alive
+        # Session seen once, then gone twice -> stop at miss_limit=2.
+        seq = iter([True, False, False])
+        m._core_session_alive = lambda *a, **k: next(seq, False)
+        beats = {"n": 0}
+        m.write_beat = lambda status="running": beats.__setitem__("n", beats["n"] + 1)
+        m.time.sleep = lambda *_a, **_k: None
+        m._SHUTDOWN_REQUESTED = False
+        m.signal.signal = lambda *a, **k: None  # avoid touching real handlers
+
+        rc = m.run_forever(interval=0.01)
+
+        self.assertEqual(rc, 0)
+        self.assertFalse(alive.exists(), "orphan .alive should be unlinked on stop")
+        # Two beats: the 'seen' tick, then the first (debounced) miss tick still
+        # beats; the SECOND consecutive miss reaches miss_limit and stops before
+        # writing. A lone transient miss therefore never kills a live heartbeat.
+        self.assertEqual(beats["n"], 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -186,6 +186,57 @@ with tempfile.TemporaryDirectory() as ws:
         rh._host_label_safe = _orig_hls2
 
 
+# ── P1-1 (qingyun CR on #2527): probe-unavailable must be UNKNOWN, never a
+#    down-vote. Exercised through the REAL probe boundary — patch subprocess.run
+#    so the real _run/_core_running/_gateway_running exception path executes. ────
+_orig_run = rh.subprocess.run
+
+
+def _raise_missing(*a, **k):
+    raise FileNotFoundError("probe binary missing")
+
+
+try:
+    rh.subprocess.run = _raise_missing
+    check("_run -> (None, '') when the command cannot execute", rh._run(["nope"]) == (None, ""))
+    check("_core_running -> None when the probe is unavailable", rh._core_running() is None)
+    check("_gateway_running -> None when BOTH probes are unavailable", rh._gateway_running() is None)
+
+    # Full pipeline under a total probe outage + a fresh heartbeat — qingyun's
+    # exact attack. derive() must yield an UNKNOWN verdict whose signals carry no
+    # False, so even at confirm=2 the gate can only report.
+    _orig_hb = rh._heartbeat_fresh
+    rh._heartbeat_fresh = lambda ws: True
+    try:
+        v = rh.derive()
+    finally:
+        rh._heartbeat_fresh = _orig_hb
+    check("derive() probe outage -> health 'unknown'", v["health"] == "unknown", repr(v["health"]))
+    check("derive() probe outage -> process signal None", v["signals"]["process"] is None)
+    check("derive() probe outage -> gateway signal None", v["signals"]["gateway"] is None)
+    v_confirmed = dict(v)
+    v_confirmed["confirm"] = 2
+    _gate = rh.severity_gate(v_confirmed)
+    check("correlated probe outage + fresh heartbeat -> report, NEVER act (qingyun P1-1)",
+          _gate == "report", f"gate={_gate!r}")
+finally:
+    rh.subprocess.run = _orig_run
+
+# A probe that RAN and genuinely found nothing still reads False (a real miss is
+# not the same as an unavailable probe).
+_orig_run2 = rh._run
+try:
+    rh._run = lambda cmd: (1, "")
+    check("_core_running -> False when has-session ran and missed", rh._core_running() is False)
+    check("_gateway_running -> False when probes ran but found nothing", rh._gateway_running() is False)
+    rh._run = lambda cmd: (0, "") if cmd and cmd[0] == "pgrep" else (1, "")
+    check("_gateway_running -> True via pgrep", rh._gateway_running() is True)
+    rh._run = lambda cmd: (1, "") if cmd and cmd[0] == "pgrep" else (0, "gateway\n")
+    check("_gateway_running -> True via tmux window fallback", rh._gateway_running() is True)
+finally:
+    rh._run = _orig_run2
+
+
 if failures:
     print(f"\n{len(failures)} FAILED: {failures}")
     sys.exit(1)

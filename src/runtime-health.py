@@ -98,7 +98,14 @@ def _heartbeat_fresh(workspace):
     heartbeat=False → 2 votes → act), while a single mis-probe (e.g. bad PATH
     making the pgrep read False on a live core) still beats (heartbeat fresh →
     1 vote → report), so a lingering gateway can no longer make a dead core
-    unrecoverable, and a mis-probe still can't kill a live one."""
+    unrecoverable, and a mis-probe still can't kill a live one.
+
+    The orphan-writer risk (a dead core leaving a fresh heartbeat because the
+    standalone core_heartbeat.py sidecar kept running) is resolved at the SOURCE:
+    core_heartbeat.py now binds to the core's tmux session and stops beating
+    (unlinking .alive) once the session it saw has gone away — so a fresh .alive
+    genuinely means the core lived within the window (qingyun CR on #2527, 2nd
+    P1)."""
     host = _host_label_safe()
     if not host:
         return None
@@ -165,18 +172,28 @@ _LOGIN_MARKERS = (
 
 
 def _run(cmd):
-    """Run a command, returning (rc, stdout). Never raises."""
+    """Run a command, returning (rc, stdout). Never raises.
+
+    rc is None when the command could not be EXECUTED at all (binary missing,
+    broken PATH, timeout) — distinct from a command that ran and returned
+    non-zero. Callers must treat None as "unknown", never as a positive
+    negative observation (qingyun CR on #2527): collapsing an unexecutable probe
+    to a False "down" reading let a correlated probe outage masquerade as a dead
+    core."""
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
         return p.returncode, p.stdout
     except (OSError, subprocess.SubprocessError):
-        return 127, ""
+        return None, ""
 
 
 def _core_running():
-    # has-session returns non-zero (and _run yields 127 if tmux is absent), so a
-    # missing tmux or socket degrades cleanly to "not running".
+    # rc None = the probe itself could not run (tmux absent / PATH broken) → that
+    # is UNKNOWN, not "not running". A real has-session miss returns rc 1, which
+    # stays False. (qingyun CR on #2527: probe-unavailable must not be a down-vote.)
     rc, _ = _run(["tmux", "-S", TMUX_SOCKET, "has-session", "-t", SESSION])
+    if rc is None:
+        return None
     return rc == 0
 
 
@@ -185,8 +202,15 @@ def _gateway_running():
     if rc == 0:
         return True
     # Fallback: a window named "gateway" in the core session.
-    rc, out = _run(["tmux", "-S", TMUX_SOCKET, "list-windows", "-t", SESSION, "-F", "#{window_name}"])
-    return rc == 0 and any(w.strip() == "gateway" for w in out.splitlines())
+    rc2, out = _run(["tmux", "-S", TMUX_SOCKET, "list-windows", "-t", SESSION, "-F", "#{window_name}"])
+    if rc2 == 0 and any(w.strip() == "gateway" for w in out.splitlines()):
+        return True
+    # Neither probe confirmed the gateway. Only report "down" if at least one
+    # probe actually RAN; if BOTH were unavailable we cannot tell (None), so it is
+    # never counted as a down-vote (qingyun CR on #2527).
+    if rc is None and rc2 is None:
+        return None
+    return False
 
 
 def _pane_text():
@@ -237,11 +261,20 @@ def derive():
     gateway = _gateway_running()
 
     # Raw signals, captured for the audited verdict. Defaults hold for the
-    # offline branch (core gone → status/login unknowable).
+    # offline / unknown branches (core gone or unprobeable → status/login
+    # unknowable).
     status_fresh = None
     pane_login = False
 
-    if not core:
+    if core is None:
+        # The process probe could not run (tmux/pgrep unavailable, broken PATH).
+        # This is NOT evidence the core is down — treat it as unknown and fail
+        # closed: no signal here is set False, so the gate sees zero down-votes
+        # from a correlated probe outage and can only report, never act
+        # (qingyun CR on #2527). Genuine down-signals from probes that DID run
+        # (e.g. a real gateway miss + stale heartbeat) still count normally.
+        health, authed, detail = "unknown", None, "Core liveness unknown (process probe unavailable)"
+    elif not core:
         health, authed, detail = "offline", None, "Agent is not running"
     else:
         # Read the status FIRST. The login probe used to short-circuit ahead of

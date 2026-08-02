@@ -40,6 +40,7 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -57,6 +58,10 @@ from workspace_default import resolve_workspace  # noqa: E402
 WORKSPACE = resolve_workspace()
 
 CORES_DIR = WORKSPACE / "state" / "cores"
+
+# The core session this heartbeat belongs to. Matches runtime-health.py's
+# SESSION so the orphan-writer guard binds to the same identity readers trust.
+SESSION = os.environ.get("SUTANDO_TMUX_SESSION", "sutando-core")
 
 
 def _hostname() -> str:
@@ -145,11 +150,69 @@ def _handle_signal(signum: int, frame) -> None:
         pass
 
 
+def _core_session_alive(socket_path: str, session: str = SESSION):
+    """Is the core's tmux session present? True / False / None (= can't tell).
+
+    None when the probe itself cannot run (tmux absent / PATH broken / timeout):
+    we must NOT read an unprobeable tmux as "core dead" and stop beating on a
+    glitch — fail OPEN (keep beating), the mirror of runtime-health's
+    fail-CLOSED probe handling (qingyun CR on #2527)."""
+    try:
+        p = subprocess.run(["tmux", "-S", socket_path, "has-session", "-t", session],
+                           capture_output=True, timeout=8)
+        return p.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _should_stop_beating(alive, seen_core: bool, misses: int, *, miss_limit: int = 2):
+    """Pure decision for the orphan-writer guard. Given the core-session probe
+    result, return (stop, seen_core, misses) — whether to stop beating plus the
+    updated state to carry to the next tick.
+
+      alive True  -> core present: remember we've seen it; reset the miss count.
+      alive None  -> probe couldn't run: keep beating, don't count a miss.
+      alive False -> core absent. Meaningful ONLY after we've seen it (startup
+                     grace — before the first sighting the session may simply not
+                     be up yet, and a heartbeat that never sees its core just
+                     keeps beating, exactly as before). Count consecutive misses
+                     and stop once >= miss_limit, so a single transient
+                     false-negative cannot kill a live core's heartbeat.
+
+    Stopping (unlinking .alive) is what prevents a dead core from leaving a fresh
+    orphan heartbeat that masks its death (qingyun CR on #2527, 2nd P1)."""
+    if alive is True:
+        return False, True, 0
+    if alive is None:
+        return False, seen_core, misses
+    # alive is False
+    if not seen_core:
+        return False, False, 0
+    misses += 1
+    return (misses >= miss_limit), True, misses
+
+
 def run_forever(interval: float = 30.0, status: str = "running") -> int:
     """Heartbeat loop. Returns the exit code (0 on graceful shutdown)."""
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
+    socket_path = os.environ.get("SUTANDO_TMUX_SOCKET", "/tmp/sutando-tmux.sock")
+    seen_core = False
+    misses = 0
     while not _SHUTDOWN_REQUESTED:
+        # Orphan-writer guard: if the core session we were launched for has gone
+        # away, stop beating and remove our .alive, so a dead core cannot leave a
+        # fresh heartbeat that masks its death (qingyun CR on #2527).
+        stop, seen_core, misses = _should_stop_beating(
+            _core_session_alive(socket_path), seen_core, misses)
+        if stop:
+            try:
+                _alive_path().unlink(missing_ok=True)
+            except Exception:  # pragma: no cover — best-effort cleanup
+                pass
+            print("core_heartbeat: core session gone — stopping to avoid an orphan heartbeat",
+                  file=sys.stderr, flush=True)
+            return 0
         try:
             write_beat(status=status)
         except Exception as e:
