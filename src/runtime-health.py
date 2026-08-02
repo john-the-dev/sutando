@@ -42,6 +42,69 @@ TMUX_SOCKET = os.environ.get("SUTANDO_TMUX_SOCKET", "/tmp/sutando-tmux.sock")
 # while still catching a genuinely wedged loop (stale for far longer).
 STALE_STATUS_SECONDS = 90
 
+# ── Severity layer (design: docs/design-core-health-verdict.md) ──────────────
+# One authoritative, severity-tagged verdict every consumer reads, so "report
+# vs restart" is decided in ONE place instead of re-derived per consumer. This
+# is additive: derive()'s existing `health`/`detail` keys are unchanged; the
+# severity + signals + the gate are layered on top.
+#
+#   ok        working | idle           → no action
+#   escalate  needs_login              → tell the human; NEVER auto-restart
+#   critical  unknown(wedged) | offline→ restart, but only through severity_gate
+#   warn      (reserved: 'degraded' soft-warnings folded in a later slice)
+_SEVERITY = {
+    "working": "ok",
+    "idle": "ok",
+    "degraded": "warn",
+    "needs_login": "escalate",
+    "unknown": "critical",   # status-stale wedge
+    "offline": "critical",   # process/session gone
+}
+
+
+def severity_of(health):
+    """Map a derive() health state to its severity bucket. Unknown states are
+    treated as `critical` (fail toward noticing, not toward silence)."""
+    return _SEVERITY.get(health, "critical")
+
+
+def severity_gate(verdict, *, confirm_min=2, freshly_booted=False):
+    """The ONE place that turns a verdict into an action. Returns one of:
+
+        none      severity ok — nothing to do
+        report    a soft (warn) issue — surface it, do not touch the core
+        escalate  a human-only blocker (needs_login) — notify the human, NEVER
+                  auto-restart (no seed/restart can clear a real /login)
+        act       restart is warranted — ONLY for a `critical` verdict that has
+                  (a) persisted >= confirm_min cycles, (b) >= 2 independent live
+                  signals agreeing it is down, and (c) is not freshly booted.
+                  Anything short of all three downgrades to `report` so a merely
+                  slow / idle / mis-probed (but alive) core is never killed.
+
+    This is the structural form of the owner's rule (2026-08-02): report health
+    issues, restart only when critical AND confirmed."""
+    sev = verdict.get("severity") or severity_of(verdict.get("health", ""))
+    if sev == "ok":
+        return "none"
+    if sev == "warn":
+        return "report"
+    if sev == "escalate":
+        return "escalate"
+    # critical
+    confirm = int(verdict.get("confirm") or 0)
+    signals = verdict.get("signals") or {}
+    # Corroboration: count the independent signals that positively indicate the
+    # core is NOT usefully alive. A single wrong probe (bad PATH, idle→unknown)
+    # must not be enough on its own — generalizes #2404's compound gate.
+    down_votes = sum(1 for k in ("process", "status_fresh", "gateway")
+                     if signals.get(k) is False)
+    if freshly_booted:
+        return "report"
+    if confirm >= confirm_min and down_votes >= 2:
+        return "act"
+    return "report"
+
+
 # Markers that mean the bundled claude CLI is sitting at its auth prompt and the
 # core therefore cannot act. Kept broad on purpose — the failure mode is a user
 # staring at an unresponsive agent, so a false "needs_login" (rare) is far less
@@ -129,6 +192,11 @@ def derive():
     core = _core_running()
     gateway = _gateway_running()
 
+    # Raw signals, captured for the audited verdict. Defaults hold for the
+    # offline branch (core gone → status/login unknowable).
+    status_fresh = None
+    pane_login = False
+
     if not core:
         health, authed, detail = "offline", None, "Agent is not running"
     else:
@@ -146,6 +214,10 @@ def derive():
         # same absence-of-evidence mistake in the other direction.
         acting = status in ("running", "idle") and ts is not None and not stale
         login = needs_login(_pane_text())
+        # status_fresh: True = advanced within the window, False = stale,
+        # None = no record to judge (can't prove either way).
+        status_fresh = None if ts is None else (not stale)
+        pane_login = login
 
         if login and not acting:
             # Marker AND no evidence of progress. A genuine sign-in prompt stops
@@ -183,13 +255,37 @@ def derive():
 
     return {
         "health": health,
+        "severity": severity_of(health),
         "authenticated": authed,
         "core_running": core,
         "gateway_running": gateway,
         "tmux_socket": TMUX_SOCKET,
         "session": SESSION,
         "detail": detail,
+        # Raw inputs behind the verdict, so a wrong call is auditable instead of
+        # shipping as yet another "consumer disagreed" fix.
+        "signals": {
+            "process": core,
+            "gateway": gateway,
+            "status_fresh": status_fresh,
+            "pane_login": pane_login,
+        },
     }
+
+
+def _confirm_count(state_dir, health, severity):
+    """How many consecutive cycles this (health, severity) has held, read from
+    the prior core-verdict.json. Powers the gate's persistence requirement so a
+    one-cycle blip can never reach `act`. Best-effort: any read failure resets to
+    a fresh count of 1 (fail toward re-confirming, not toward acting)."""
+    try:
+        with open(os.path.join(state_dir, "core-verdict.json")) as f:
+            prev = json.load(f)
+        if prev.get("health") == health and prev.get("severity") == severity:
+            return int(prev.get("confirm") or 0) + 1
+    except (OSError, ValueError):
+        pass
+    return 1
 
 
 def main():
@@ -203,6 +299,14 @@ def main():
         os.makedirs(state_dir, exist_ok=True)
         with open(os.path.join(state_dir, "runtime-health.json"), "w") as f:
             json.dump(result, f, indent=2)
+        # The authoritative verdict (design: docs/design-core-health-verdict.md):
+        # same facts as runtime-health.json plus the persistence count the gate
+        # needs. Additive — consumers migrate to this file one PR at a time.
+        verdict = dict(result)
+        verdict["ts"] = int(time.time())
+        verdict["confirm"] = _confirm_count(state_dir, result["health"], result["severity"])
+        with open(os.path.join(state_dir, "core-verdict.json"), "w") as f:
+            json.dump(verdict, f, indent=2)
     except OSError:
         pass
     print(json.dumps(result, indent=2))

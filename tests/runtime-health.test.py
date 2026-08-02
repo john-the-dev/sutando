@@ -68,8 +68,8 @@ check("offline: authenticated is null", out.get("authenticated") is None)
 check("offline: core_running is false", out.get("core_running") is False)
 check(
     "contract keys present",
-    set(out) == {"health", "authenticated", "core_running", "gateway_running",
-                 "tmux_socket", "session", "detail"},
+    set(out) == {"health", "severity", "authenticated", "core_running",
+                 "gateway_running", "tmux_socket", "session", "detail", "signals"},
 )
 
 # 4) derive() maps every state correctly — drive it by patching the probes so we

@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""One authoritative severity-tagged verdict + severity gate (runtime-health.py).
+
+Design: docs/design-core-health-verdict.md (items #1 + #2 of the watchdog
+systematic-fix analysis, owner-approved 2026-08-02).
+
+The load-bearing property: a merely slow / idle / mis-probed BUT ALIVE core is
+NEVER restarted. Restart (`act`) requires a `critical` verdict that persisted
+>= confirm_min cycles AND has >= 2 independent signals agreeing it is down AND
+is not freshly booted. Everything softer is `report`/`escalate`/`none`. This is
+the fixture wall against the false-positive-restart class that produced ~15
+separate historical fixes (#2114 idle->hung, #2072 bad-PATH->crashed, etc.).
+"""
+import importlib.util
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+_spec = importlib.util.spec_from_file_location("rh", REPO / "src" / "runtime-health.py")
+rh = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(rh)
+
+failures = []
+
+
+def check(name, cond, detail=""):
+    print(("ok   " if cond else "FAIL ") + name + (f" — {detail}" if detail and not cond else ""))
+    if not cond:
+        failures.append(name)
+
+
+# ── severity_of: every derive() state maps to the intended bucket ────────────
+check("working -> ok", rh.severity_of("working") == "ok")
+check("idle -> ok", rh.severity_of("idle") == "ok")
+check("needs_login -> escalate", rh.severity_of("needs_login") == "escalate")
+check("unknown(wedged) -> critical", rh.severity_of("unknown") == "critical")
+check("offline -> critical", rh.severity_of("offline") == "critical")
+check("degraded -> warn (reserved)", rh.severity_of("degraded") == "warn")
+check("unmapped -> critical (fail toward noticing)", rh.severity_of("weird") == "critical")
+
+
+# ── severity_gate: the action decision ───────────────────────────────────────
+check("ok -> none", rh.severity_gate({"severity": "ok"}) == "none")
+check("warn -> report", rh.severity_gate({"severity": "warn"}) == "report")
+
+# needs_login NEVER auto-restarts — it is a human-only blocker.
+check("escalate -> escalate (never act)",
+      rh.severity_gate({"severity": "escalate", "confirm": 99,
+                        "signals": {"process": False, "status_fresh": False, "gateway": False}}) == "escalate")
+
+# critical, fully corroborated + persisted + not fresh -> act
+act_v = {"severity": "critical", "confirm": 2,
+         "signals": {"process": False, "status_fresh": False, "gateway": True}}
+check("critical + confirm>=2 + 2 down-votes -> act", rh.severity_gate(act_v) == "act")
+
+# critical but only ONE signal down (a single mis-probe) -> report, NOT act
+one_probe = {"severity": "critical", "confirm": 9,
+             "signals": {"process": True, "status_fresh": False, "gateway": True}}
+check("critical + only 1 down-vote -> report (single mis-probe can't kill)",
+      rh.severity_gate(one_probe) == "report")
+
+# critical + corroborated but only ONE cycle (a blip) -> report, NOT act
+blip = {"severity": "critical", "confirm": 1,
+        "signals": {"process": False, "status_fresh": False, "gateway": False}}
+check("critical + confirm=1 (blip) -> report", rh.severity_gate(blip) == "report")
+
+# freshly booted -> report even if critical + confirmed + all down
+fresh = {"severity": "critical", "confirm": 9,
+         "signals": {"process": False, "status_fresh": False, "gateway": False}}
+check("critical but freshly_booted -> report",
+      rh.severity_gate(fresh, freshly_booted=True) == "report")
+
+
+# ── "healthy-but-looks-dead" fixtures: must NEVER reach `act` ─────────────────
+# An IDLE core routinely reads status_fresh=None (idle writes status rarely) and
+# is classified idle -> ok. It must be `none`, never a restart.
+idle_v = {"health": "idle", "severity": rh.severity_of("idle"),
+          "confirm": 50, "signals": {"process": True, "status_fresh": None, "gateway": True}}
+check("idle core (looks quiet) -> none", rh.severity_gate(idle_v) == "none")
+
+# A stale-but-ALIVE core: status_fresh False but the process + gateway are up
+# (only ONE down-vote) -> report, never act, no matter how long it persists.
+stale_alive = {"health": "unknown", "severity": "critical", "confirm": 100,
+               "signals": {"process": True, "status_fresh": False, "gateway": True}}
+check("stale-but-alive (process+gateway up) -> report, never act",
+      rh.severity_gate(stale_alive) == "report")
+
+# A single bad-PATH mis-probe that makes process read False while the gateway is
+# clearly serving (one down-vote) -> report, never act.
+badpath = {"health": "offline", "severity": "critical", "confirm": 100,
+           "signals": {"process": False, "status_fresh": True, "gateway": True}}
+check("bad-PATH mis-probe (gateway serving) -> report, never act",
+      rh.severity_gate(badpath) == "report")
+
+
+# ── derive() return shape carries the verdict fields ─────────────────────────
+v = rh.derive()
+check("derive() includes severity", "severity" in v and v["severity"] in
+      {"ok", "warn", "escalate", "critical"}, repr(v.get("severity")))
+check("derive() includes signals block",
+      isinstance(v.get("signals"), dict) and
+      {"process", "gateway", "status_fresh", "pane_login"} <= set(v["signals"]),
+      repr(v.get("signals")))
+check("derive() keeps legacy health key", "health" in v)
+
+
+# ── _confirm_count: increments on repeat, resets on change ───────────────────
+with tempfile.TemporaryDirectory() as d:
+    # no prior file -> 1
+    check("confirm: fresh -> 1", rh._confirm_count(d, "offline", "critical") == 1)
+    json.dump({"health": "offline", "severity": "critical", "confirm": 3},
+              open(os.path.join(d, "core-verdict.json"), "w"))
+    check("confirm: same (health,sev) -> +1",
+          rh._confirm_count(d, "offline", "critical") == 4)
+    check("confirm: health changed -> reset 1",
+          rh._confirm_count(d, "working", "ok") == 1)
+    # corrupt prior file -> reset 1 (fail toward re-confirming)
+    open(os.path.join(d, "core-verdict.json"), "w").write("{not json")
+    check("confirm: corrupt prior -> 1", rh._confirm_count(d, "offline", "critical") == 1)
+
+
+if failures:
+    print(f"\n{len(failures)} FAILED: {failures}")
+    sys.exit(1)
+print("\nall passed")
