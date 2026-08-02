@@ -5,8 +5,8 @@ failing health check — the surface the owner actually watches, core-independen
 Owner-requested 2026-08-01 (#2487 follow-up): route the over-quota / wedge alert
 to ag2.space, not only Slack. This suite pins:
 
-  - room resolution: REMOTE_ALERT_ROOM env wins; else last-owner-activity room;
-    else None (no false target).
+  - room resolution: an EXPLICIT owner-only REMOTE_ALERT_ROOM only (never
+    inferred from a possibly-shared last-owner-activity room); else None.
   - creds resolution: url+token from the channel .env, incl. one-token form.
   - delivery: a failure DMs the owner exactly once per unchanged episode (dedup);
     a failed send does NOT record dedup (so the next tick retries).
@@ -63,33 +63,22 @@ class TestGatewayNotify(unittest.TestCase):
 
     # --- room resolution --------------------------------------------------
 
-    def test_room_prefers_explicit_env(self):
+    def test_room_requires_explicit_config(self):
         self._write_env("REMOTE_ALERT_ROOM=!explicit:ag2.space\n")
-        self._write_activity("!other:ag2.space")
         self.assertEqual(self.hc._gateway_owner_room(), "!explicit:ag2.space")
 
-    def test_room_falls_back_to_last_activity(self):
-        self._write_env("REMOTE_TASK_URL=https://gw\n")
-        self._write_activity("!wWEybMgQgJTsCsALdA:ag2.space")
-        self.assertEqual(self.hc._gateway_owner_room(), "!wWEybMgQgJTsCsALdA:ag2.space")
-
-    def test_room_none_when_unresolvable(self):
+    def test_room_none_when_unset(self):
         self._write_env("REMOTE_TASK_URL=https://gw\n")
         self.assertIsNone(self.hc._gateway_owner_room())
 
-    def test_room_none_when_activity_room_does_not_match(self):
-        # A last-activity room that isn't a gateway room (and channel != source)
-        # must not be used as the ag2.space alert target.
+    def test_room_ignores_last_activity_room_privacy(self):
+        # PRIVACY (qingyun #2487 P1): the room must NOT be inferred from
+        # last-owner-activity — that can be a SHARED room, and a health alert
+        # could leak host/config details there. Without an explicit
+        # REMOTE_ALERT_ROOM, resolution MUST be None even if a (shared-looking)
+        # activity room exists.
         self._write_env("REMOTE_TASK_URL=https://gw\n")
-        (self.root / "state").mkdir(exist_ok=True)
-        (self.root / "state" / "last-owner-activity.json").write_text(
-            json.dumps({"channel": "discord", "channel_id": "123456789"}))
-        self.assertIsNone(self.hc._gateway_owner_room())
-
-    def test_room_none_for_non_object_activity(self):
-        self._write_env("REMOTE_TASK_URL=https://gw\n")
-        (self.root / "state").mkdir(exist_ok=True)
-        (self.root / "state" / "last-owner-activity.json").write_text("[]")
+        self._write_activity("!shared-team-room:ag2.space")
         self.assertIsNone(self.hc._gateway_owner_room())
 
     def test_env_parsing_skips_comments_blanks_and_missing_file(self):
@@ -145,8 +134,7 @@ class TestGatewayNotify(unittest.TestCase):
 
     def test_default_sender_posts_on_2xx(self):
         # Cover the real sender's happy path without a network call.
-        self._write_env("REMOTE_TASK_URL=https://gw\nREMOTE_TASK_TOKEN=secret\n")
-        self._write_activity("!room:ag2.space")
+        self._write_env("REMOTE_ALERT_ROOM=!room:ag2.space\nREMOTE_TASK_URL=https://gw\nREMOTE_TASK_TOKEN=secret\n")
         captured = {}
 
         class FakeResp:
@@ -177,8 +165,7 @@ class TestGatewayNotify(unittest.TestCase):
         self.assertFalse(self.hc._default_gateway_sender("x"))
 
     def test_default_sender_false_on_network_error(self):
-        self._write_env("REMOTE_TASK_URL=https://gw\nREMOTE_TASK_TOKEN=secret\n")
-        self._write_activity("!room:ag2.space")
+        self._write_env("REMOTE_ALERT_ROOM=!room:ag2.space\nREMOTE_TASK_URL=https://gw\nREMOTE_TASK_TOKEN=secret\n")
         import urllib.request as u
         orig = u.urlopen
 
@@ -225,6 +212,26 @@ class TestGatewayNotify(unittest.TestCase):
             [self._fail()], state_file=st, sender=lambda t: (sent.append(t) or True))
         self.assertEqual(len(sent), 1)
         self.assertIsInstance(json.loads(st.read_text()), dict)
+
+
+class TestLaunchdMinimalEnvWiring(unittest.TestCase):
+    """P1 (qingyun #2487): the launchd fallback runs with a minimal env, so the
+    gateway config dir must be baked into the plist — otherwise claude_home_path
+    falls back to the legacy default and the gateway-notify path can't find the
+    channel creds on a workspace-scoped install. The monkeypatched unit tests
+    can't catch that, so pin the wiring at the template/installer layer."""
+
+    def test_plist_exports_claude_config_dir(self):
+        plist = (REPO / "src" / "launchd" / "com.sutando.health-check-fallback.plist").read_text()
+        self.assertIn("<key>CLAUDE_CONFIG_DIR</key>", plist,
+                      "fallback plist must export CLAUDE_CONFIG_DIR so the minimal "
+                      "launchd env resolves the canonical channels/ config dir")
+        self.assertIn("__CLAUDE_CONFIG_DIR__", plist, "placeholder must be present for substitution")
+
+    def test_installer_substitutes_claude_config_dir(self):
+        inst = (REPO / "src" / "install-health-check-launchd.sh").read_text()
+        self.assertIn("__CLAUDE_CONFIG_DIR__", inst, "installer must substitute the config-dir placeholder")
+        self.assertIn("claude-home-path", inst, "installer must resolve the canonical config dir")
 
 
 if __name__ == "__main__":

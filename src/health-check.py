@@ -4949,23 +4949,16 @@ def _env_file_dict(path: Path) -> dict:
 
 
 def _gateway_owner_room(source: str = "ag2space") -> "str | None":
-    """The ag2.space room to post an owner alert to. Prefers an explicit
-    REMOTE_ALERT_ROOM in the channel .env; else the owner's most-recent DM room
-    from state/last-owner-activity.json (only trusted when it looks like a
-    gateway room or the last activity was on this source). None if unresolved."""
-    room = (_env_file_dict(claude_home_path("channels", source, ".env")).get("REMOTE_ALERT_ROOM") or "").strip()
-    if room:
-        return room
-    try:
-        act = json.loads((WORKSPACE_DIR / "state" / "last-owner-activity.json").read_text())
-    except (OSError, ValueError):
-        return None
-    if not isinstance(act, dict):
-        return None
-    cid = str(act.get("channel_id") or "").strip()
-    if cid and (cid.endswith(":ag2.space") or str(act.get("channel") or "") == source):
-        return cid
-    return None
+    """The room to post owner alerts to — an EXPLICITLY configured, owner-only
+    room (REMOTE_ALERT_ROOM in channels/<source>/.env). None if unset.
+
+    We deliberately do NOT infer the room from state/last-owner-activity.json:
+    that records wherever the owner *last spoke*, which may be a SHARED room, and
+    a health alert can carry host/config/outage details that must never leak into
+    a team room (qingyun #2487 P1-privacy). Requiring an explicit config entry
+    makes the target owner-controlled and owner-only by construction; unset means
+    no gateway post at all (the Slack surface stays as the backup)."""
+    return (_env_file_dict(claude_home_path("channels", source, ".env")).get("REMOTE_ALERT_ROOM") or "").strip() or None
 
 
 def _gateway_creds(source: str = "ag2space") -> "tuple[str, str] | None":

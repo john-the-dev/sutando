@@ -123,10 +123,15 @@ case "$cmd" in
         fi
         PYTHON_BIN="$(resolve_python)"
         BREW_BIN="$(resolve_homebrew_bin)"
+        # Canonical config dir, baked into the plist so the minimal launchd env
+        # resolves channels/ag2space/.env the same way startup does (#2487 P1).
+        CLAUDE_CFG="$(SUTANDO_SUPPRESS_CCD_FALLBACK_BANNER=1 bash "$REPO/scripts/sutando-config.sh" claude-home-path 2>/dev/null)"
+        [ -n "$CLAUDE_CFG" ] || CLAUDE_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
         echo "Installing $LABEL"
         echo "  repo:    $REPO"
         echo "  python:  $PYTHON_BIN"
         echo "  brew:    $BREW_BIN"
+        echo "  config:  $CLAUDE_CFG"
         mkdir -p "$HOME/Library/LaunchAgents"
         mkdir -p "$WORKSPACE/logs"
         # Render the template. Use a delimiter unlikely to appear in paths.
@@ -135,6 +140,7 @@ case "$cmd" in
             -e "s|__WORKSPACE__|$WORKSPACE|g" \
             -e "s|__PYTHON__|$PYTHON_BIN|g" \
             -e "s|__HOMEBREW_BIN__|$BREW_BIN|g" \
+            -e "s|__CLAUDE_CONFIG_DIR__|$CLAUDE_CFG|g" \
             "$TEMPLATE" > "$DEST"
         bootout_if_loaded
         launchctl bootstrap "$DOMAIN" "$DEST"
