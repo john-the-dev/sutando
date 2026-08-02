@@ -4718,6 +4718,8 @@ def _gateway_owner_room(source: str = "ag2space") -> "str | None":
         act = json.loads((WORKSPACE_DIR / "state" / "last-owner-activity.json").read_text())
     except (OSError, ValueError):
         return None
+    if not isinstance(act, dict):
+        return None
     cid = str(act.get("channel_id") or "").strip()
     if cid and (cid.endswith(":ag2.space") or str(act.get("channel") or "") == source):
         return cid
@@ -4726,10 +4728,15 @@ def _gateway_owner_room(source: str = "ag2space") -> "str | None":
 
 def _gateway_creds(source: str = "ag2space") -> "tuple[str, str] | None":
     """(url, token) for the gateway op:message endpoint, or None. Supports the
-    one-token onboarding form (REMOTE_TASK_TOKEN='https://gw|secret')."""
+    one-token onboarding form (REMOTE_TASK_TOKEN='https://gw|secret') and the
+    legacy AG2_REMOTE_URL / AG2_REMOTE_TOKEN aliases honored by startup.sh."""
     env = _env_file_dict(claude_home_path("channels", source, ".env"))
-    url = (os.environ.get("REMOTE_TASK_URL") or env.get("REMOTE_TASK_URL") or "").strip().rstrip("/")
-    token = (os.environ.get("REMOTE_TASK_TOKEN") or env.get("REMOTE_TASK_TOKEN") or "").strip()
+
+    def get(key: str) -> str:
+        return os.environ.get(key) or env.get(key) or ""
+
+    url = (get("REMOTE_TASK_URL") or get("AG2_REMOTE_URL")).strip().rstrip("/")
+    token = (get("REMOTE_TASK_TOKEN") or get("AG2_REMOTE_TOKEN")).strip()
     if "|" in token:
         _u, token = token.split("|", 1)
         url = url or _u.strip().rstrip("/")
@@ -4864,6 +4871,8 @@ def notify_gateway_for_failures(
         if state_file.exists():
             history = json.loads(state_file.read_text())
     except Exception:
+        history = {}
+    if not isinstance(history, dict):
         history = {}
 
     if history.get(_LAST_HASH_KEY) == hash_key:

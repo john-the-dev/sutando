@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,6 +35,8 @@ def _load():
 
 class TestGatewayNotify(unittest.TestCase):
     def setUp(self):
+        self._env_keys = ("REMOTE_TASK_URL", "REMOTE_TASK_TOKEN", "AG2_REMOTE_URL", "AG2_REMOTE_TOKEN")
+        self._saved_env = {k: os.environ.pop(k, None) for k in self._env_keys}
         self.hc = _load()
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
@@ -45,6 +48,10 @@ class TestGatewayNotify(unittest.TestCase):
 
     def tearDown(self):
         self._tmp.cleanup()
+        for key in self._env_keys:
+            os.environ.pop(key, None)
+            if self._saved_env[key] is not None:
+                os.environ[key] = self._saved_env[key]
 
     def _write_env(self, text):
         (self.cfg / "channels" / "ag2space" / ".env").write_text(text)
@@ -79,6 +86,12 @@ class TestGatewayNotify(unittest.TestCase):
             json.dumps({"channel": "discord", "channel_id": "123456789"}))
         self.assertIsNone(self.hc._gateway_owner_room())
 
+    def test_room_none_for_non_object_activity(self):
+        self._write_env("REMOTE_TASK_URL=https://gw\n")
+        (self.root / "state").mkdir(exist_ok=True)
+        (self.root / "state" / "last-owner-activity.json").write_text("[]")
+        self.assertIsNone(self.hc._gateway_owner_room())
+
     def test_env_parsing_skips_comments_blanks_and_missing_file(self):
         # Comments + blank lines are ignored; a missing .env yields no creds.
         self._write_env("# gateway creds\n\nREMOTE_TASK_URL=https://gw\nREMOTE_TASK_TOKEN=s\n")
@@ -95,6 +108,14 @@ class TestGatewayNotify(unittest.TestCase):
     def test_creds_one_token_form(self):
         self._write_env("REMOTE_TASK_TOKEN=https://gw|secret\n")
         self.assertEqual(self.hc._gateway_creds(), ("https://gw", "secret"))
+
+    def test_creds_legacy_split_form(self):
+        self._write_env("AG2_REMOTE_URL=https://legacy-gw/\nAG2_REMOTE_TOKEN=legacy-secret\n")
+        self.assertEqual(self.hc._gateway_creds(), ("https://legacy-gw", "legacy-secret"))
+
+    def test_creds_legacy_one_token_form(self):
+        self._write_env("AG2_REMOTE_TOKEN=https://legacy-gw|legacy-secret\n")
+        self.assertEqual(self.hc._gateway_creds(), ("https://legacy-gw", "legacy-secret"))
 
     def test_creds_none_when_missing(self):
         self._write_env("AGENT_ID=x\n")
@@ -194,6 +215,16 @@ class TestGatewayNotify(unittest.TestCase):
         self.hc.notify_gateway_for_failures([c], state_file=st, sender=lambda t: (calls.append(t) or False))
         self.hc.notify_gateway_for_failures([c], state_file=st, sender=lambda t: (calls.append(t) or False))
         self.assertEqual(len(calls), 2, "a failed gateway send must be retried, not silently deduped")
+
+    def test_non_object_history_is_reset_not_crashed(self):
+        st = self.root / "state" / "gw-list.json"
+        st.parent.mkdir(exist_ok=True)
+        st.write_text("[]")
+        sent = []
+        self.hc.notify_gateway_for_failures(
+            [self._fail()], state_file=st, sender=lambda t: (sent.append(t) or True))
+        self.assertEqual(len(sent), 1)
+        self.assertIsInstance(json.loads(st.read_text()), dict)
 
 
 if __name__ == "__main__":

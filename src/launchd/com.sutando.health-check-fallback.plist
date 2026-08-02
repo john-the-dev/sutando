@@ -23,11 +23,11 @@
     - Fires every 300s (StartInterval).
     - Runs `python3 src/health-check.py --emit-task --notify-on-fail
       --notify-slack --notify-gateway --quiet`.
-    - Surfaces failures as tasks/task-health-*.txt, macOS notifications, AND
-      a direct Slack DM to the owner (remote-visible; fires even when the core
-      session is wedged but its heartbeat process still ticks). The Slack DM
-      no-ops cleanly if SLACK_BOT_TOKEN (channel .env / $REPO/.env / env) or the
-      owner id in ~/.claude/channels/slack/access.json is missing.
+    - Surfaces failures as tasks/task-health-*.txt, macOS notifications, and
+      direct Slack + gateway owner messages (remote-visible; fire even when the
+      core session is wedged but its heartbeat process still ticks). Each
+      remote sender no-ops cleanly when its credentials or owner target are
+      unavailable.
     - NOTE (#2246): --recover-core was REMOVED from the default args. It decided
       "core wedged" almost entirely from core-status.json ts freshness — a
       best-effort *voluntary* signal — and false-positived when the core was
