@@ -126,7 +126,10 @@ case "$cmd" in
         # Canonical config dir, baked into the plist so the minimal launchd env
         # resolves channels/ag2space/.env the same way startup does (#2487 P1).
         CLAUDE_CFG="$(SUTANDO_SUPPRESS_CCD_FALLBACK_BANNER=1 bash "$REPO/scripts/sutando-config.sh" claude-home-path 2>/dev/null)"
-        [ -n "$CLAUDE_CFG" ] || CLAUDE_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+        # Helper already resolves the ~/.claude default internally; a bare
+        # $CLAUDE_CONFIG_DIR is the only extra fallback (no inline :-default —
+        # banned by scripts/lint-claude-home-path.sh).
+        [ -n "$CLAUDE_CFG" ] || CLAUDE_CFG="$CLAUDE_CONFIG_DIR"
         echo "Installing $LABEL"
         echo "  repo:    $REPO"
         echo "  python:  $PYTHON_BIN"
