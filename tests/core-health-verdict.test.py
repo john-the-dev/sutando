@@ -56,6 +56,16 @@ act_v = {"severity": "critical", "confirm": 2,
          "signals": {"process": False, "status_fresh": False, "gateway": True}}
 check("critical + confirm>=2 + 2 down-votes -> act", rh.severity_gate(act_v) == "act")
 
+# qingyun CR on #2527: a genuinely offline core with a LINGERING gateway. derive()
+# yields process=False, gateway=True, status_fresh=None — but the heartbeat has
+# stopped (dead), so heartbeat_fresh=False gives the 2nd independent down-vote.
+# Must reach `act` (a surviving gateway must not make a dead core unrecoverable).
+offline_lingering_gw = {"health": "offline", "severity": "critical", "confirm": 2,
+                        "signals": {"process": False, "gateway": True,
+                                    "status_fresh": None, "heartbeat_fresh": False}}
+check("offline + lingering gateway + heartbeat stale -> act (#2527 CR)",
+      rh.severity_gate(offline_lingering_gw) == "act")
+
 # critical but only ONE signal down (a single mis-probe) -> report, NOT act
 one_probe = {"severity": "critical", "confirm": 9,
              "signals": {"process": True, "status_fresh": False, "gateway": True}}
@@ -81,18 +91,23 @@ idle_v = {"health": "idle", "severity": rh.severity_of("idle"),
           "confirm": 50, "signals": {"process": True, "status_fresh": None, "gateway": True}}
 check("idle core (looks quiet) -> none", rh.severity_gate(idle_v) == "none")
 
-# A stale-but-ALIVE core: status_fresh False but the process + gateway are up
-# (only ONE down-vote) -> report, never act, no matter how long it persists.
+# A stale-but-ALIVE core: status_fresh False but process + gateway up AND the
+# heartbeat still beats (only ONE down-vote) -> report, never act.
 stale_alive = {"health": "unknown", "severity": "critical", "confirm": 100,
-               "signals": {"process": True, "status_fresh": False, "gateway": True}}
-check("stale-but-alive (process+gateway up) -> report, never act",
+               "signals": {"process": True, "status_fresh": False, "gateway": True,
+                           "heartbeat_fresh": True}}
+check("stale-but-alive (process+gateway up, still beating) -> report, never act",
       rh.severity_gate(stale_alive) == "report")
 
-# A single bad-PATH mis-probe that makes process read False while the gateway is
-# clearly serving (one down-vote) -> report, never act.
+# A single bad-PATH mis-probe: process reads False on a LIVE core, but the
+# independent heartbeat still beats (fresh) and the gateway serves — only one
+# down-vote -> report, never act. This is the case that must stay protected even
+# though it shares process=False/gateway=True with a real offline; the heartbeat
+# is what distinguishes them.
 badpath = {"health": "offline", "severity": "critical", "confirm": 100,
-           "signals": {"process": False, "status_fresh": True, "gateway": True}}
-check("bad-PATH mis-probe (gateway serving) -> report, never act",
+           "signals": {"process": False, "status_fresh": True, "gateway": True,
+                       "heartbeat_fresh": True}}
+check("bad-PATH mis-probe (live core still beating) -> report, never act",
       rh.severity_gate(badpath) == "report")
 
 
@@ -102,7 +117,7 @@ check("derive() includes severity", "severity" in v and v["severity"] in
       {"ok", "warn", "escalate", "critical"}, repr(v.get("severity")))
 check("derive() includes signals block",
       isinstance(v.get("signals"), dict) and
-      {"process", "gateway", "status_fresh", "pane_login"} <= set(v["signals"]),
+      {"process", "gateway", "status_fresh", "pane_login", "heartbeat_fresh"} <= set(v["signals"]),
       repr(v.get("signals")))
 check("derive() keeps legacy health key", "health" in v)
 

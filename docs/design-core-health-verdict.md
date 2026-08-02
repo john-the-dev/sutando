@@ -34,8 +34,14 @@ producer and emit a durable artifact every cycle:
       "severity": "ok|warn|escalate|critical",
       "authed":   true|false|null,
       "detail":   "<human string>",
-      "signals":  { "process": true, "tmux": true, "status_fresh": true,
-                    "pane_login": false, "gateway": true },   # the raw inputs, for audit
+      "signals":  { "process": true, "gateway": true, "status_fresh": true,
+                    "pane_login": false, "heartbeat_fresh": true },  # raw inputs, for audit
+      # heartbeat_fresh reads state/cores/<host>.alive, written every ~30s by a
+      # SEPARATE process (core_heartbeat.py). It is the process-INDEPENDENT
+      # corroborator: a genuinely offline core stops beating (process=False AND
+      # heartbeat_fresh=False → 2 down-votes → act), while a lone mis-probe on a
+      # live core still beats (1 vote → report). Without it, a lingering gateway
+      # could make a dead core unrecoverable (qingyun CR on #2527).
       "ts":       <epoch>,
       "confirm":  <consecutive cycles this (state,severity) has held>
     }

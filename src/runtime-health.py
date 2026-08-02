@@ -26,6 +26,7 @@ observer; it starts nothing and kills nothing.
 """
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -41,6 +42,11 @@ TMUX_SOCKET = os.environ.get("SUTANDO_TMUX_SOCKET", "/tmp/sutando-tmux.sock")
 # core-heartbeat ~90s); 90s tolerates a normal long step between status writes
 # while still catching a genuinely wedged loop (stale for far longer).
 STALE_STATUS_SECONDS = 90
+
+# The per-host core heartbeat (state/cores/<host>.alive) is rewritten every ~30s
+# by a SEPARATE process (src/core_heartbeat.py); >90s means it stopped beating.
+# Matches the documented staleness threshold every other reader of that file uses.
+HEARTBEAT_STALE_SECONDS = 90
 
 # ── Severity layer (design: docs/design-core-health-verdict.md) ──────────────
 # One authoritative, severity-tagged verdict every consumer reads, so "report
@@ -66,6 +72,41 @@ def severity_of(health):
     """Map a derive() health state to its severity bucket. Unknown states are
     treated as `critical` (fail toward noticing, not toward silence)."""
     return _SEVERITY.get(health, "critical")
+
+
+def _host_label_safe():
+    try:
+        from util_paths import _host_label
+        return _host_label()
+    except Exception:
+        try:
+            return socket.gethostname().split(".")[0]
+        except OSError:
+            return None
+
+
+def _heartbeat_fresh(workspace):
+    """Independent liveness signal: the per-host core heartbeat
+    `<ws>/state/cores/<host>.alive`, rewritten every ~30s by a SEPARATE process
+    (src/core_heartbeat.py). Returns:
+        True   beating (mtime within HEARTBEAT_STALE_SECONDS) — core is alive
+        False  missing or stale — core stopped beating (dead)
+        None   host/path can't be resolved — can't tell (never a down-vote)
+
+    This is the process-INDEPENDENT corroborator the gate needs (qingyun CR on
+    #2527): a genuinely offline core stops beating (process=False AND
+    heartbeat=False → 2 votes → act), while a single mis-probe (e.g. bad PATH
+    making the pgrep read False on a live core) still beats (heartbeat fresh →
+    1 vote → report), so a lingering gateway can no longer make a dead core
+    unrecoverable, and a mis-probe still can't kill a live one."""
+    host = _host_label_safe()
+    if not host:
+        return None
+    try:
+        p = os.path.join(workspace, "state", "cores", f"{host}.alive")
+        return (time.time() - os.path.getmtime(p)) <= HEARTBEAT_STALE_SECONDS
+    except OSError:
+        return False  # missing/unreadable .alive == not beating
 
 
 def severity_gate(verdict, *, confirm_min=2, freshly_booted=False):
@@ -96,7 +137,10 @@ def severity_gate(verdict, *, confirm_min=2, freshly_booted=False):
     # Corroboration: count the independent signals that positively indicate the
     # core is NOT usefully alive. A single wrong probe (bad PATH, idle→unknown)
     # must not be enough on its own — generalizes #2404's compound gate.
-    down_votes = sum(1 for k in ("process", "status_fresh", "gateway")
+    # `heartbeat_fresh` is process-independent (a separate writer), so a truly
+    # offline core (process=False AND heartbeat=False) clears the >=2 bar while a
+    # lone mis-probe on a still-beating core does not (qingyun CR on #2527).
+    down_votes = sum(1 for k in ("process", "status_fresh", "gateway", "heartbeat_fresh")
                      if signals.get(k) is False)
     if freshly_booted:
         return "report"
@@ -269,6 +313,9 @@ def derive():
             "gateway": gateway,
             "status_fresh": status_fresh,
             "pane_login": pane_login,
+            # Process-independent liveness (separate writer) — the offline
+            # corroborator that a lingering gateway can't fake (#2527 CR).
+            "heartbeat_fresh": _heartbeat_fresh(workspace),
         },
     }
 
