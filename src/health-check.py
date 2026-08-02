@@ -2522,10 +2522,9 @@ def check_core_quota_exhausted(fresh_sec: int = 1800) -> dict:
 
     # Not available. Only alert if the reading is FRESH — stale exhaustion is
     # ambiguous and must not page the owner (fail-safe: silent, informational).
-    try:
-        age_sec = time.time() - path.stat().st_mtime
-    except OSError:
-        age_sec = 0
+    # mtime is safe to read here: path.exists() + read_text() above already
+    # succeeded, so the file is present this call.
+    age_sec = time.time() - path.stat().st_mtime
     if age_sec > fresh_sec:
         check["detail"] = (
             f"quota-state reports exhausted (status={status}) but the reading is "

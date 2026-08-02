@@ -73,6 +73,19 @@ class TestCoreQuotaExhausted(unittest.TestCase):
         # It must survive the remote-DM filter (this is the whole point).
         self.assertIn("core-quota", [f["name"] for f in self.hc._slack_failures([c])])
 
+    def test_fresh_exhausted_without_reset_header_still_fails(self):
+        # No reset header -> _fmt_quota_reset returns "" and the message omits
+        # the reset clause, but it must still fail with the actionable core text.
+        self._write(available=False, status="rejected")  # reset=None
+        c = self.hc.check_core_quota_exhausted()
+        self.assertEqual(c["status"], "fail", c)
+        self.assertIn("OVER QUOTA", c["detail"])
+        self.assertNotIn("window resets", c["detail"])  # no reset-time clause
+
+    def test_fmt_quota_reset_bad_input(self):
+        self.assertEqual(self.hc._fmt_quota_reset(None), "")
+        self.assertEqual(self.hc._fmt_quota_reset("not-an-epoch"), "")
+
     def test_available_is_ok(self):
         self._write(available=True, status="allowed")
         self.assertEqual(self.hc.check_core_quota_exhausted()["status"], "ok")
