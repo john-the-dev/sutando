@@ -232,6 +232,10 @@ class TestLaunchdMinimalEnvWiring(unittest.TestCase):
         inst = (REPO / "src" / "install-health-check-launchd.sh").read_text()
         self.assertIn("__CLAUDE_CONFIG_DIR__", inst, "installer must substitute the config-dir placeholder")
         self.assertIn("claude-home-path", inst, "installer must resolve the canonical config dir")
+        self.assertNotIn('CLAUDE_CFG="$CLAUDE_CONFIG_DIR"', inst,
+                         "a failed canonical lookup must not continue with an empty ambient value")
+        self.assertIn("could not resolve canonical Claude config directory", inst,
+                      "a failed canonical lookup must stop the install clearly")
 
 
 if __name__ == "__main__":
