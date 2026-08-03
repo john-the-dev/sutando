@@ -197,7 +197,37 @@ def _core_running():
     return rc == 0
 
 
+def _gateway_configured():
+    """Whether the ag2.space mobile gateway is provisioned on THIS host.
+
+    The gateway bridge only runs where a remote task token is configured (env or
+    channels/ag2space/.env). Returns True (configured), False (config readable,
+    no token), or None (can't tell — no CLAUDE_CONFIG_DIR / unreadable .env).
+    Mirrors health-check.check_gateway_bridge's detection."""
+    if os.environ.get("REMOTE_TASK_TOKEN") or os.environ.get("AG2_REMOTE_TOKEN"):
+        return True
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not cfg:
+        return None
+    try:
+        with open(os.path.join(cfg, "channels", "ag2space", ".env")) as f:
+            for ln in f:
+                if ln.startswith(("REMOTE_TASK_TOKEN=", "AG2_REMOTE_TOKEN=")):
+                    return True
+    except OSError:
+        return None
+    return False
+
+
 def _gateway_running():
+    # A host with no gateway provisioned has `remote-gateway-bridge` CORRECTLY
+    # absent — that is not-applicable, never a down-vote. Only a *configured*
+    # gateway that is missing counts as down, or the gate would restart a
+    # perfectly live core just for lacking an optional component (bassil CR on
+    # #2527, mirroring health-check.check_gateway_bridge + the #2554 comm-sweep
+    # single-owner-lane fix). Not-configured / can't-tell -> None.
+    if _gateway_configured() is not True:
+        return None
     rc, _ = _run(["pgrep", "-f", "remote-gateway-bridge"])
     if rc == 0:
         return True
@@ -361,7 +391,11 @@ def _confirm_count(state_dir, health, severity):
     try:
         with open(os.path.join(state_dir, "core-verdict.json")) as f:
             prev = json.load(f)
-        if prev.get("health") == health and prev.get("severity") == severity:
+        # A malformed verdict (valid JSON but not an object — e.g. `[]`) must not
+        # crash the count: `.get` on a list raises AttributeError, which the
+        # OSError/ValueError guard below does NOT catch and would propagate out of
+        # main() (bassil CR on #2527). Non-dict -> treat as no prior, reset to 1.
+        if isinstance(prev, dict) and prev.get("health") == health and prev.get("severity") == severity:
             return int(prev.get("confirm") or 0) + 1
     except (OSError, ValueError):
         pass

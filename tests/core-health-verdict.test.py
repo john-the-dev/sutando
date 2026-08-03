@@ -135,6 +135,14 @@ with tempfile.TemporaryDirectory() as d:
     # corrupt prior file -> reset 1 (fail toward re-confirming)
     open(os.path.join(d, "core-verdict.json"), "w").write("{not json")
     check("confirm: corrupt prior -> 1", rh._confirm_count(d, "offline", "critical") == 1)
+    # valid JSON but NOT an object (a list) must not raise AttributeError out of
+    # main() — the OSError/ValueError guard doesn't catch it (bassil CR on #2527).
+    json.dump([], open(os.path.join(d, "core-verdict.json"), "w"))
+    check("confirm: non-dict prior ([]) -> 1 (no crash)",
+          rh._confirm_count(d, "offline", "critical") == 1)
+    json.dump("a string", open(os.path.join(d, "core-verdict.json"), "w"))
+    check("confirm: non-dict prior (str) -> 1 (no crash)",
+          rh._confirm_count(d, "offline", "critical") == 1)
 
 
 # ── _host_label_safe + _heartbeat_fresh: cover the defensive branches ─────────
@@ -190,6 +198,12 @@ with tempfile.TemporaryDirectory() as ws:
 #    down-vote. Exercised through the REAL probe boundary — patch subprocess.run
 #    so the real _run/_core_running/_gateway_running exception path executes. ────
 _orig_run = rh.subprocess.run
+# These blocks exercise _gateway_running's PROBE logic, which only runs when the
+# gateway is configured on this host (bassil CR on #2527). Force configured=True
+# so the probe path is what's under test here; the not-configured short-circuit
+# is covered separately below.
+_orig_gwc = rh._gateway_configured
+rh._gateway_configured = lambda: True
 
 
 def _raise_missing(*a, **k):
@@ -235,6 +249,58 @@ try:
     check("_gateway_running -> True via tmux window fallback", rh._gateway_running() is True)
 finally:
     rh._run = _orig_run2
+    rh._gateway_configured = _orig_gwc
+
+
+# ── P1 (bassil CR on #2527): a host with NO gateway configured must read the
+#    absent bridge as not-applicable (None), never a down-vote — else the gate
+#    restarts a live core just for lacking an optional component. The short-circuit
+#    must fire WITHOUT ever probing. ────────────────────────────────────────────
+_orig_run3 = rh._run
+_orig_gwc2 = rh._gateway_configured
+try:
+    # If the probe were reached it would say "running" — assert we still get None,
+    # proving _gateway_running short-circuited on not-configured.
+    rh._run = lambda cmd: (0, "gateway\n")
+    rh._gateway_configured = lambda: False
+    check("_gateway_running -> None when gateway not configured (no down-vote)",
+          rh._gateway_running() is None)
+    rh._gateway_configured = lambda: None
+    check("_gateway_running -> None when gateway config can't be determined",
+          rh._gateway_running() is None)
+finally:
+    rh._run = _orig_run3
+    rh._gateway_configured = _orig_gwc2
+
+# _gateway_configured itself: env token, .env token, none.
+_env_keys = ("REMOTE_TASK_TOKEN", "AG2_REMOTE_TOKEN", "CLAUDE_CONFIG_DIR")
+_saved_env = {k: os.environ.get(k) for k in _env_keys}
+try:
+    for k in _env_keys:
+        os.environ.pop(k, None)
+    os.environ["REMOTE_TASK_TOKEN"] = "x"
+    check("_gateway_configured: env token -> True", rh._gateway_configured() is True)
+    os.environ.pop("REMOTE_TASK_TOKEN")
+    check("_gateway_configured: no env, no CLAUDE_CONFIG_DIR -> None",
+          rh._gateway_configured() is None)
+    with tempfile.TemporaryDirectory() as cfg:
+        os.environ["CLAUDE_CONFIG_DIR"] = cfg
+        check("_gateway_configured: config dir, no .env -> None",
+              rh._gateway_configured() is None)
+        ch = os.path.join(cfg, "channels", "ag2space")
+        os.makedirs(ch)
+        open(os.path.join(ch, ".env"), "w").write("OTHER=1\n")
+        check("_gateway_configured: .env without token -> False",
+              rh._gateway_configured() is False)
+        open(os.path.join(ch, ".env"), "w").write("REMOTE_TASK_TOKEN=abc\n")
+        check("_gateway_configured: .env with token -> True",
+              rh._gateway_configured() is True)
+finally:
+    for k, val in _saved_env.items():
+        if val is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = val
 
 
 if failures:
