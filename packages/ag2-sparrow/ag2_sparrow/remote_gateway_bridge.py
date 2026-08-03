@@ -334,6 +334,21 @@ def _token_from_ag2space_env():
             # is empty, so without this the URL chain has nothing and the bridge
             # fatals on "no gateway URL" in the exact scenario this fix targets.
             url = vals.get("REMOTE_TASK_URL") or vals.get("AG2_REMOTE_URL") or ""
+            # Carry REMOTE_MEDIA_MARKER from the same file too. The bridge derives
+            # its marker tag from os.environ at import (MEDIA_MARKER_TAG below), and
+            # a bare/desktop launch reaches config ONLY through this file — it never
+            # sees startup.sh's env exports, which is the one place the AG2 default
+            # is otherwise set. Without this, such a launch falls back to the
+            # provider-neutral default, the marker never matches the gateway's
+            # `[ag2space-media: …]`, and inbound image/file URLs stay unresolved in
+            # the task body — the core can't see owner-sent screenshots (owner-
+            # reported 2026-08-03). This runs at import, before MEDIA_MARKER_TAG is
+            # computed, so the tag picks it up. Provider-neutral: the VALUE lives in
+            # the channel .env, not in this generic package; and a real env var
+            # still wins (we only fill it when unset).
+            _mm = vals.get("REMOTE_MEDIA_MARKER")
+            if _mm and not os.environ.get("REMOTE_MEDIA_MARKER"):
+                os.environ["REMOTE_MEDIA_MARKER"] = _mm
             return tok, url
     return "", ""
 

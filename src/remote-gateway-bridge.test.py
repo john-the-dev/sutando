@@ -652,10 +652,10 @@ def main() -> int:
     # imports.
     _saved = {k: os.environ.get(k) for k in
               ("REMOTE_TASK_TOKEN", "AG2_REMOTE_TOKEN", "REMOTE_TASK_URL", "AG2_REMOTE_URL",
-               "CLAUDE_CONFIG_DIR", "AG2_DEVICE_ENV")}
+               "CLAUDE_CONFIG_DIR", "AG2_DEVICE_ENV", "REMOTE_MEDIA_MARKER")}
     try:
         for _k in ("REMOTE_TASK_TOKEN", "AG2_REMOTE_TOKEN", "REMOTE_TASK_URL", "AG2_REMOTE_URL",
-                   "CLAUDE_CONFIG_DIR", "AG2_DEVICE_ENV"):
+                   "CLAUDE_CONFIG_DIR", "AG2_DEVICE_ENV", "REMOTE_MEDIA_MARKER"):
             os.environ.pop(_k, None)
         _cfg = tempfile.mkdtemp()
         _chan = Path(_cfg) / "channels" / "ag2space"
@@ -737,6 +737,39 @@ def main() -> int:
         _sspec.loader.exec_module(_srtc)
         check(_srtc.TOKEN == "splitsecret" and _srtc.URL == "https://split.example/relay",
               "env-fallback: split-layout file (bare token + REMOTE_TASK_URL) resolves BOTH token and URL")
+
+        # REMOTE_MEDIA_MARKER carried from the channel .env on a bare/desktop launch.
+        # The bridge derives MEDIA_MARKER_TAG from os.environ at import; a desktop
+        # launch reaches config ONLY through this file (never startup.sh's env
+        # exports, the one place the AG2 marker default is otherwise set), so
+        # without carrying it the tag falls back to the provider-neutral default and
+        # never matches the gateway's `[ag2space-media: …]` — inbound media URLs stay
+        # unresolved (owner-reported 2026-08-03). Provider-neutral: the value lives
+        # in the .env, not this package.
+        os.environ.pop("REMOTE_TASK_TOKEN", None)
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        os.environ.pop("REMOTE_MEDIA_MARKER", None)
+        _mm_chan = Path(tempfile.mkdtemp()) / "channels" / "ag2space"
+        _mm_chan.mkdir(parents=True)
+        (_mm_chan / ".env").write_text(
+            "AG2_REMOTE_TOKEN='https://gw.example/relay|mmsecret'\nREMOTE_MEDIA_MARKER=ag2space-media\n")
+        os.environ["AG2_DEVICE_ENV"] = str(_mm_chan / ".env")
+        _mmspec = importlib.util.spec_from_file_location(
+            "rtc_marker", Path(__file__).resolve().parent / "remote-gateway-bridge.py")
+        _mmrtc = importlib.util.module_from_spec(_mmspec)
+        _mmspec.loader.exec_module(_mmrtc)
+        check(_mmrtc.MEDIA_MARKER_TAG == "ag2space-media",
+              "env-fallback: REMOTE_MEDIA_MARKER carried from the channel .env sets the marker tag (bare/desktop launch)")
+
+        # env still wins: an explicit REMOTE_MEDIA_MARKER is not overridden by the file.
+        os.environ["REMOTE_MEDIA_MARKER"] = "env-marker"
+        os.environ["AG2_DEVICE_ENV"] = str(_mm_chan / ".env")
+        _mmwspec = importlib.util.spec_from_file_location(
+            "rtc_marker_envwins", Path(__file__).resolve().parent / "remote-gateway-bridge.py")
+        _mmwrtc = importlib.util.module_from_spec(_mmwspec)
+        _mmwspec.loader.exec_module(_mmwrtc)
+        check(_mmwrtc.MEDIA_MARKER_TAG == "env-marker",
+              "env-fallback: explicit REMOTE_MEDIA_MARKER in env wins over the channel .env value")
     finally:
         for _k, _v in _saved.items():
             if _v is None:
