@@ -91,7 +91,10 @@ if [ "$BUNDLED_MODE" = "1" ]; then
   # one (external review on #2182): a missing voice/proxy/etc artifact would
   # otherwise fail inside a background job while boot still prints ✓.
   _MISSING_DIST=""
-  for _artifact in web-client voice-agent conversation-server credential-proxy boot emit-call-tiers; do
+  # web-voice-transport.browser is the browser-side artifact the web UI loads
+  # for voice; it is built by the same build:bundle contract but is NOT a node
+  # service, so it has no run_node_service entry to catch its absence later.
+  for _artifact in web-client voice-agent conversation-server credential-proxy boot emit-call-tiers web-voice-transport.browser; do
     [ -f "$REPO/dist/$_artifact.js" ] || _MISSING_DIST="$_MISSING_DIST $_artifact.js"
   done
   if [ -n "$_MISSING_DIST" ]; then
@@ -237,6 +240,16 @@ json.dump({'source':'env','env_var':v,'carried_at':datetime.datetime.now(datetim
     exit 1
   fi
   rm -f "$_ccd_err"
+fi
+
+# Boot gate (#2396): verify the resolved CLAUDE_CONFIG_DIR can boot the CLI
+# authenticated BEFORE any service launches. A logged-out CLI (locked keychain
+# on SSH boots, fresh config dir) otherwise yields a half-up core — tmux +
+# bridges alive, CLI parked at /login, processing nothing (2026-07-30 outage).
+# The gate fails loud (stderr + notification + pending-questions + proactive
+# DM file) and aborts; SUTANDO_SKIP_AUTH_PREFLIGHT=1 is the escape hatch.
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+  bash "$REPO/src/auth-preflight-gate.sh" "$CLAUDE_CONFIG_DIR" || exit $?
 fi
 
 # Git committer attribution: REMOVED (2026-05-21). This block used to set

@@ -101,6 +101,7 @@ def validate_twilio_signature(handler, body: str) -> bool:
 #               stay aligned with these writes.
 REPO_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
+from git_binary import git_argv  # noqa: E402
 from workspace_default import resolve_workspace, status_read_path  # noqa: E402
 import local_task_protocol  # noqa: E402
 
@@ -113,6 +114,25 @@ PORT = 7843
 # over the public workspace.
 from util_paths import personal_path  # noqa: E402
 from task_body_guard import confine_user_content  # noqa: E402
+
+
+def _emit_task_processed(content: str) -> None:
+    """Anonymous, opt-out product telemetry for tasks this API creates —
+    relay-voice (POST /delegation/tasks), local web/API chat (the ``api``
+    surface), and the Twilio voice/SMS/voicemail surfaces. Mirrors the discord/slack/
+    telegram bridges, which emit at their own accept points; those surfaces are
+    counted, these weren't. Source is read from the task body's own ``source:``
+    header. Fire-and-forget: never blocks or breaks task creation; no-op when
+    telemetry is opted out / unconfigured. Never carries task content or ids.
+    """
+    try:  # pragma: no cover — fire-and-forget glue; logic tested in tests/telemetry.test.py
+        from telemetry import task_processed  # sibling module (src/ on sys.path)
+
+        m = re.search(r"^source:\s*(\S+)", content, re.MULTILINE)
+        task_processed(m.group(1) if m else "unknown")
+    except Exception:  # pragma: no cover — telemetry must never break the API
+        pass
+
 
 # Simple token auth — set SUTANDO_API_TOKEN in .env for remote access security
 API_TOKEN = os.environ.get("SUTANDO_API_TOKEN", "")
@@ -418,6 +438,7 @@ def delegation_submit_task(data: dict):
             except FileNotFoundError:
                 pass
         os.close(task_dir_fd)
+    _emit_task_processed(content)
     return 200, {"ok": True, "task_id": tid}
 
 
@@ -749,8 +770,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Recent activity: git commits + processed tasks
             activity = []
             try:
+                # git_argv raises GitUnavailable (an OSError) on a host with no
+                # runnable git — absorbed by the `except Exception` below, which
+                # already degrades this endpoint to "no commit activity". Never
+                # hardcode /usr/bin/git: on a Mac without developer tools it is
+                # the CLT shim and raises a modal install dialog.
                 git_log = subprocess.run(
-                    ["/usr/bin/git", "-C", str(REPO_DIR), "log", "--oneline", "--since=24 hours ago", "-10"],
+                    git_argv("-C", str(REPO_DIR), "log", "--oneline", "--since=24 hours ago", "-10"),
                     capture_output=True, text=True, timeout=5
                 ).stdout.strip()
                 for line in git_log.split("\n"):
@@ -891,6 +917,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             f"task: Incoming phone call from {safe_caller}\n"
         )
         (TASK_DIR / f"{task_id}.txt").write_text(task_content)
+        _emit_task_processed(task_content)
 
         # TwiML: greet caller, record message
         self.send_twiml(
@@ -925,6 +952,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             f"task: SMS from {safe_sender}: {confine_user_content(body)}\n"
         )
         (TASK_DIR / f"{task_id}.txt").write_text(task_content)
+        _emit_task_processed(task_content)
 
         # Reply with acknowledgment
         self.send_twiml(
@@ -951,6 +979,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 f"task: Voicemail from {safe_caller}: {confine_user_content(text)}\n"
             )
             (TASK_DIR / f"{task_id}.txt").write_text(task_content)
+            _emit_task_processed(task_content)
         self.send_json(200, {"ok": True})
 
     def do_POST(self):
@@ -1180,6 +1209,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             f"task: {confine_user_content(task)}\n"
         )
         (TASK_DIR / f"{task_id}.txt").write_text(task_content)
+        _emit_task_processed(task_content)
 
         # Register webhook callback if provided
         if callback_url:
