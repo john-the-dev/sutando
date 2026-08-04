@@ -65,7 +65,7 @@ symptom of the same missing layer.
    swallowed failures and returned `{ok:true}` — silently dropping signups. This
    is the write-path analogue: privileged mutations (`db:write`) execute with no
    uniform "did this actually succeed / is it recorded" contract. The audit +
-   fail-closed execution the layer standardizes (see #118's log-before-mutate)
+   fail-closed execution the layer standardizes (see AG2Platform/agent-universe#118's log-before-mutate)
    would have surfaced it.
 
 Common root cause: authority is answered ad hoc per surface, so each surface
@@ -126,15 +126,18 @@ enforces mechanically.
 
 - **Input:** the existing `access_tier` set + `src/task_priority.py`-style source
   metadata become the `principal`.
-- **Credential backing:** `credential-resolver.ts` is the reference resolver for
-  `credential:*`; vault (`vault_intercept`) is the backing store for
-  `secret:read`. The layer wraps them; their tier-walk logic is unchanged.
+- **Credential backing:** `src/credential-resolver.ts` (shipped, with
+  `tests/credential-resolver.test.ts`) is the reference resolver for
+  `credential:*`, and its capability-first design should converge with the
+  pending spec in #2533 (`docs/design-credential-capability-resolver.md`);
+  vault (`vault_intercept`) is the backing store for `secret:read`. The layer
+  wraps them; their tier-walk logic is unchanged.
 - **Delegation:** the `delegate` decision is today's `codex exec --sandbox
   read-only` path, promoted from ad hoc to a first-class outcome.
 - **Escalation:** `needs-authorization` reuses `pending-questions.md` + the
   macOS-notify path already used for owner decisions.
 - **Audit:** one append-only record per request (who / capability / decision /
-  outcome), same shape the admin audit-log work (#118) landed for staff actions —
+  outcome), same shape the admin audit-log work (AG2Platform/agent-universe#118) landed for staff actions —
   log-before-mutate, fail-closed.
 
 ## Why now / value
@@ -168,5 +171,5 @@ enforces mechanically.
    (`src/capability-policy.*` + a test that the matrix is total).
 3. Wrap `credential-resolver` + a `github:*` capability behind
    `mediate(capability, principal)`; route one real consumer through it.
-4. Add the append-only audit record (reuse #118's log-before-mutate shape).
+4. Add the append-only audit record (reuse AG2Platform/agent-universe#118's log-before-mutate shape).
 5. Iterate surfaces (email, payment, fs, config) onto the matrix.
