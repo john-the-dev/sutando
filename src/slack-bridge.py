@@ -958,7 +958,7 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
     event_thread_ts = event.get("thread_ts")
     reply_thread_ts = (
         event_thread_ts
-        if event_thread_ts and event_thread_ts != event.get("ts")
+        if thread_ts and event_thread_ts and event_thread_ts != event.get("ts")
         else None
     )
 

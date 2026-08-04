@@ -282,6 +282,35 @@ if task_path and task_path.exists():
     check("DM: no reply_thread_ts header", "reply_thread_ts:" not in dm_body)
     check("DM: progress update has no thread flag", "--thread-ts" not in dm_body)
 
+
+def call_threaded_dm(text: str) -> Path | None:
+    event = {
+        "user": "U_OWNER",
+        "channel": "DFAKE",
+        "channel_type": "im",
+        "ts": "2002.002",
+        "thread_ts": "2000.000",
+    }
+    with patch.object(mod, "load_allowed", lambda: {"U_OWNER"}), \
+         patch.object(mod, "_ensure_tier_map_seeded", lambda: True), \
+         patch.object(mod, "load_tier_map", lambda: {"U_OWNER": "owner"}), \
+         patch.object(mod, "write_owner_activity", lambda *a, **k: None):
+        task_id = mod._write_task(event, "DM", text, "testowner")
+    if task_id is None:
+        return None
+    candidates = list(TASKS_DIR.glob(f"{task_id}.txt"))
+    return candidates[0] if candidates else None
+
+
+threaded_dm_path = call_threaded_dm("threaded DM")
+check("threaded DM: task file written", threaded_dm_path is not None)
+if threaded_dm_path and threaded_dm_path.exists():
+    threaded_dm_body = threaded_dm_path.read_text()
+    check("threaded DM: no reply_thread_ts header",
+          "reply_thread_ts:" not in threaded_dm_body)
+    check("threaded DM: progress update stays top-level",
+          "--thread-ts" not in threaded_dm_body)
+
 # Exception path — API failure swallowed; task still written (best-effort)
 _root_resp_err = Exception("simulated slack API error")
 
