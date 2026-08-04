@@ -303,6 +303,25 @@ finally:
             os.environ[k] = val
 
 
+# ── severity_gate is defined, exported, and tested but has NO production caller
+#    yet: slice 1 is additive by design (Mini cold-review on #2527). Pin the
+#    unwired state so the day someone wires it this test fails and forces a
+#    deliberate update, rather than the wiring landing unremarked and the gate
+#    quietly turning into a live action path no test noticed. ──────────────────
+_src_dir = REPO / "src"
+_gate_callers = []
+for _py in sorted(_src_dir.rglob("*.py")):
+    for _i, _line in enumerate(_py.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+        if _line.lstrip().startswith("#"):
+            continue  # a comment mentioning it is not a call
+        if "def severity_gate(" in _line:
+            continue  # the definition itself
+        if "severity_gate(" in _line:
+            _gate_callers.append(f"{_py.relative_to(REPO)}:{_i}")
+check("severity_gate has NO production call site under src/ (slice 1 additive; Mini #2527)",
+      not _gate_callers, f"unexpected callers: {_gate_callers}")
+
+
 if failures:
     print(f"\n{len(failures)} FAILED: {failures}")
     sys.exit(1)
