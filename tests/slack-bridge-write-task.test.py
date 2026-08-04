@@ -255,6 +255,7 @@ def call_top_level_mention(text: str) -> Path | None:
         "channel": "CFAKE",
         "channel_type": "channel",
         "ts": "1010.010",
+        "thread_ts": "1010.010",  # Slack root shape: equal to ts, not a reply
     }
     with patch.object(mod, "load_allowed", lambda: {"U_OWNER"}), \
          patch.object(mod, "_ensure_tier_map_seeded", lambda: True), \
