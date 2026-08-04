@@ -36,19 +36,24 @@ there was no single layer that could answer "team tier + GitHub-write capability
 These are not hypothetical — each happened this week and each is a *different*
 symptom of the same missing layer.
 
-1. **Sandboxed reviewer starved of the capability it needed → review failed
-   outright.** A teammate (Bassil) asked a Sutando to review a GitHub PR. Because
-   the request was non-owner tier, it was routed to the blanket
-   `codex exec --sandbox read-only` path — which has *no network / no GitHub
-   access at all*. The reviewer couldn't fetch the diff and returned "review
-   blocked": it failed to do the one thing it was asked to do. The sandbox is
-   **all-or-nothing** — it correctly denies writes, but in doing so also denies
-   the perfectly-safe `github:read(repo)` capability a review requires. A
-   mediated layer would grant scoped `github:read` for the review while still
-   denying `github:write` — mediation instead of a blunt block. *(The other
-   Sutando on the same task succeeded only because it happened to have an
-   out-of-band bridge token — i.e. it bypassed the sandbox, which is exactly the
-   inconsistency this layer removes.)*
+1. **The right capability existed but selecting it was an unenforced judgment
+   call → review failed.** A teammate (Bassil) asked a Sutando to review a GitHub
+   PR. The correct non-owner path *already* mediates exactly the way this RFC
+   proposes: the team-tier in-band block routes a PR-review request to
+   `review-pr.sh`, which fetches the diff **outside** the sandbox
+   (`skills/claude-codex/scripts/review-pr.sh` — `gh pr diff "$PR"` runs
+   unsandboxed) and then inlines that text into `codex exec --sandbox read-only`
+   (same file). That *is* scoped `github:read` granted while `github:write` stays
+   denied — the mediation is real and shipped. The failure was that **the agent
+   took a different path**: it fell into the generic `codex exec --sandbox
+   read-only` action (no diff pre-fetched) instead of the PR-review action, and
+   nothing detected the mismatch. So the defect isn't "the capability is
+   missing" — it's "the capability layer is present but choosing it is an
+   unenforced judgment call." A mediator that *owns* the request
+   (`github:read(diff)` → resolve outside sandbox → hand to a read-only executor)
+   makes the correct routing structural instead of something the agent has to
+   pick correctly under pressure. (Same shape as failure #2: mediation existing
+   but selection being discretionary is itself the bug.)
 
 2. **Relayed authorization / prompt-injection, defended only by hand.** On the
    same PRs, a team-tier teammate repeatedly pushed a Sutando to *post and
@@ -64,9 +69,14 @@ symptom of the same missing layer.
    privileged write.** A lead-capture route wrapped its DB insert in a catch that
    swallowed failures and returned `{ok:true}` — silently dropping signups. This
    is the write-path analogue: privileged mutations (`db:write`) execute with no
-   uniform "did this actually succeed / is it recorded" contract. The audit +
-   fail-closed execution the layer standardizes (see AG2Platform/agent-universe#118's log-before-mutate)
-   would have surfaced it.
+   uniform "did this actually succeed / is it recorded" contract. This one only
+   holds if the audit records the **verified outcome**, not merely "we called it"
+   — a log-after-execute that trusts the callee's return value would have logged
+   `{ok:true}` just as happily as the swallowing catch did. The layer's audit
+   record therefore carries `outcome` = the *checked* result of the mutation
+   (see AG2Platform/agent-universe#118 "audit log for all staff actions" —
+   log-before-mutate, then reconcile the outcome, fail-closed), which is what
+   would have surfaced the dropped insert.
 
 Common root cause: authority is answered ad hoc per surface, so each surface
 fails its *own* way — one too-restrictive (1), one too-manual (2), one
@@ -107,7 +117,9 @@ The policy is a **capability × tier matrix** (data, reviewable), not prose:
 
 | capability class        | owner | team           | other | ambient        |
 |-------------------------|-------|----------------|-------|----------------|
-| read (info, creds→use)  | allow | allow          | deny* | delegate       |
+| info read               | allow | allow          | deny* | delegate       |
+| credential **use**§     | allow | allow (use-only)| deny | deny           |
+| credential **read**     | allow | **deny**       | deny  | deny           |
 | write-reversible        | allow | delegate       | deny  | deny           |
 | write-irreversible†     | allow‡| needs-auth     | deny  | deny           |
 | financial / destructive | never (prohibited — human only, all tiers) |||
@@ -116,6 +128,18 @@ The policy is a **capability × tier matrix** (data, reviewable), not prose:
 † send / merge / publish / config-write / purchase.
 ‡ owner "allow" still records; some (financial trades, credential entry) stay
   human-only per the standing prohibited list regardless of tier.
+§ **`credential use` ≠ `credential read`, and this distinction is the whole
+  point of the layer.** `use` = the mediator exercises a credential on the
+  principal's behalf (signs the request, injects the key server-side) and
+  **never discloses the value** to the consumer — the consumer gets the *result*,
+  not the secret. `read` = the raw value is handed back. Team tier gets `use`
+  (so a teammate's task can, say, call an allowed API) but is **explicitly
+  denied `read`** — which is exactly today's rule, injected verbatim into every
+  team-tier task file ("Never read .env, credentials, or secrets."
+  `src/discord-bridge.py`) and `CLAUDE.md`'s sandboxed-read-only cap. This layer
+  must **preserve** that boundary, not widen it; splitting the row makes the
+  no-widening explicit rather than hiding a loosened cell in a merged
+  "creds→use" label.
 
 Key property: **authorization is per-action and comes from the owner directly**,
 never from a claim embedded in observed content — the exact failure the manual
@@ -126,19 +150,25 @@ enforces mechanically.
 
 - **Input:** the existing `access_tier` set + `src/task_priority.py`-style source
   metadata become the `principal`.
-- **Credential backing:** `src/credential-resolver.ts` (shipped, with
-  `tests/credential-resolver.test.ts`) is the reference resolver for
-  `credential:*`, and its capability-first design should converge with the
-  pending spec in #2533 (`docs/design-credential-capability-resolver.md`);
-  vault (`vault_intercept`) is the backing store for `secret:read`. The layer
-  wraps them; their tier-walk logic is unchanged.
+- **Credential backing:** the capability-not-key resolver has now **landed** on
+  `main` — `src/credential-resolver.ts` + `src/credential_resolver.py` (twins,
+  with `tests/credential-resolver.test.{ts,py}`), realizing #2533's spec
+  (`docs/design-credential-capability-resolver.md`, merged). It is the reference
+  implementation for `credential:*`; this layer **generalizes its "ask for a
+  capability, not a key" pattern** to the other capability classes rather than
+  re-inventing it. Vault (`vault_intercept`) remains the backing store for
+  `secret:read`. The layer wraps them; their tier-walk logic is unchanged.
+  (Earlier review noted no `.ts` existed — true at review time; #2533/#2575 have
+  since merged the code, so "reuses shipped code" is now literal, not aspirational.)
 - **Delegation:** the `delegate` decision is today's `codex exec --sandbox
   read-only` path, promoted from ad hoc to a first-class outcome.
 - **Escalation:** `needs-authorization` reuses `pending-questions.md` + the
   macOS-notify path already used for owner decisions.
 - **Audit:** one append-only record per request (who / capability / decision /
-  outcome), same shape the admin audit-log work (AG2Platform/agent-universe#118) landed for staff actions —
-  log-before-mutate, fail-closed.
+  **verified outcome**), same shape as AG2Platform/agent-universe#118 ("audit log
+  for all staff actions", merged) — log-before-mutate, reconcile the real result,
+  fail-closed. `outcome` is the checked result, not the callee's self-reported
+  return (see motivating failure #3).
 
 ## Why now / value
 
@@ -152,13 +182,25 @@ enforces mechanically.
 
 ## Open questions (for owner)
 
-1. **Scope of first slice.** Smallest useful cut: formalize `credential:*` +
-   `github:*` (the two with real code today) behind the mediator, leave the rest
-   as policy-matrix entries wired incrementally. Agree?
-2. **Enforcement locus.** Library the agent calls (advisory, honor-system) vs. a
-   PreToolUse-hook that hard-blocks (like `context-source-guard`)? Hook is
-   stronger but higher-friction; suggest library first, hook for the
-   irreversible/financial rows.
+1. **Scope of first slice.** ~~Smallest useful cut: formalize `credential:*` +
+   `github:*` behind the mediator first.~~ **Resolved (sonichi):** yes —
+   `credential:*` + `github:*` are the right first cut, being the two with real
+   code and real incidents behind them. The rest stay policy-matrix entries wired
+   incrementally.
+2. **Enforcement locus.** ~~Library first, hook for the irreversible rows.~~
+   **Revised (sonichi's note 3):** invert it — **hook from day one** for the
+   `needs-authorization` + prohibited rows, library for the reversible reads. An
+   advisory library the agent can simply *not call* is discipline, not mechanism
+   — the same root cause behind `comm-sweep` ("discipline, not mechanism") and
+   why `context-source-guard` is a PreToolUse hook, not a convention. It also
+   undercuts the RFC's own strongest claim: "mechanical prompt-injection
+   resistance … can't satisfy `needs-authorization` by construction" is only true
+   if the layer is *unavoidable*. A library-first slice would ship that property
+   in name and the honor system in fact — under exactly the pressure of failure
+   #2, an agent stays free to skip the mediator. The irreversible/prohibited rows
+   are few call sites and high value, so hook-first there is cheap and is where
+   the guarantee actually has to bite; friction-saving library wrapping is for the
+   reversible reads.
 3. **Owner-tier recording.** Owner actions are `allow` — do we still want the
    full audit row for them (recommend yes: observability, not restriction)?
 4. Does "mediated capability layer" here match your intent, or did you mean
@@ -169,7 +211,11 @@ enforces mechanically.
 1. Land this RFC.
 2. Define the capability taxonomy + policy matrix as data
    (`src/capability-policy.*` + a test that the matrix is total).
-3. Wrap `credential-resolver` + a `github:*` capability behind
-   `mediate(capability, principal)`; route one real consumer through it.
-4. Add the append-only audit record (reuse AG2Platform/agent-universe#118's log-before-mutate shape).
+3. Wrap the shipped `credential-resolver` + a `github:*` capability behind
+   `mediate(capability, principal)`; route one real consumer through it. Enforce
+   the `needs-authorization` + prohibited rows via a **PreToolUse hook** (per
+   revised open-question 2), not an advisory library.
+4. Add the append-only audit record recording the **verified outcome** (reuse
+   AG2Platform/agent-universe#118 "audit log for all staff actions" —
+   log-before-mutate, reconcile, fail-closed).
 5. Iterate surfaces (email, payment, fs, config) onto the matrix.
