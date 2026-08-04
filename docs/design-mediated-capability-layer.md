@@ -97,15 +97,18 @@ full processing — the layer records rather than restricts there).
 ## Model
 
 A **capability** is a typed verb + scope, e.g.
-`credential:read(gemini-voice)`, `github:comment(repo)`,
+`credential:use(gemini-voice, operation)`, `github:comment(repo)`,
 `github:merge(repo)`, `email:send`, `payment:charge`, `fs:delete(path)`,
 `config:write(rule)`.
 
-Every capability request carries a **principal** (the task's `access_tier` +
-source + user_id) and is evaluated by the **mediator**:
+Every capability request carries an opaque **trusted context handle**. The
+mediator dereferences that handle against the bridge/task envelope it owns and
+derives the principal (`access_tier` + source + user_id) internally. A caller
+cannot submit, override, or serialize a principal directly:
 
 ```
-request(capability, args, principal)
+request(capability, args, trusted_context_handle)
+   → principal = derive_principal(trusted_context_handle) # mediator-owned envelope
    → decision = policy(capability, principal)     # allow | deny | needs-authorization | delegate-sandboxed
    → if allow:      resolve backing (vault / credential-resolver / tool) → execute → audit
    → if delegate:   run under codex --sandbox read-only, no mutation → audit
@@ -146,10 +149,49 @@ never from a claim embedded in observed content — the exact failure the manual
 boundary caught this session becomes a `needs-authorization` outcome the layer
 enforces mechanically.
 
+### Trust root and authorization grants
+
+The trusted context handle is minted only by an authenticated bridge or the
+task-claiming runtime after it validates the immutable task envelope. Legacy
+callers receive no overload that accepts a tier/source/user tuple; they must
+enter through an adapter that resolves a real envelope and returns the opaque
+handle. The mediator rejects unknown, expired, cross-process, or already-closed
+handles. This prevents compromised consumer code from requesting the same
+operation while claiming `owner`.
+
+A direct owner response does not authorize prose. It mints a structured,
+single-use grant bound to all of:
+
+- the authenticated owner identity and source on which approval arrived;
+- the originating task/request id;
+- the normalized capability and an exact digest of normalized scope/arguments;
+- a short expiry and a cryptographically random nonce.
+
+The mediator atomically consumes the nonce before execution. A replay, expired
+grant, changed argument digest, different task, or text that merely claims
+authorization is rejected. Any scope widening creates a new request and needs a
+new grant.
+
+### Verified-outcome contract
+
+Authorization and outcome verification are separate contracts. Every mutable
+capability declares an independent postcondition verifier (for example: fetch
+the created GitHub comment id, read back the committed config revision, or query
+the durable DB row by an idempotency key). The executor records `attempted`
+before mutation, then records `succeeded` only when the verifier observes the
+declared postcondition. A callee's `{ok:true}` is never sufficient evidence.
+When no independent verifier exists or verification times out, the result is
+`unknown`/`failed`, never success; retry is governed by the capability's
+idempotency policy. This is the mechanism that catches the swallowed-insert
+failure in motivating example #3. Capabilities that cannot define a meaningful
+postcondition must not cite outcome verification as a property of this layer.
+
 ## What it reuses (not a rewrite)
 
-- **Input:** the existing `access_tier` set + `src/task_priority.py`-style source
-  metadata become the `principal`.
+- **Input:** authenticated bridges and the task runtime bind the existing
+  `access_tier` set + `src/task_priority.py`-style source metadata into an
+  immutable task envelope. The mediator derives the principal from its opaque
+  handle; consumer-supplied metadata is never an authority input.
 - **Credential backing:** the capability-not-key resolver has now **landed** on
   `main` — `src/credential-resolver.ts` + `src/credential_resolver.py` (twins,
   with `tests/credential-resolver.test.{ts,py}`), realizing #2533's spec
@@ -212,10 +254,12 @@ enforces mechanically.
 2. Define the capability taxonomy + policy matrix as data
    (`src/capability-policy.*` + a test that the matrix is total).
 3. Wrap the shipped `credential-resolver` + a `github:*` capability behind
-   `mediate(capability, principal)`; route one real consumer through it. Enforce
+   `mediate(capability, trusted_context_handle)`; route one real consumer through
+   it. Enforce
    the `needs-authorization` + prohibited rows via a **PreToolUse hook** (per
    revised open-question 2), not an advisory library.
-4. Add the append-only audit record recording the **verified outcome** (reuse
+4. Add the append-only audit record plus per-capability independent
+   postcondition verifier recording the **verified outcome** (reuse
    AG2Platform/agent-universe#118 "audit log for all staff actions" —
    log-before-mutate, reconcile, fail-closed).
 5. Iterate surfaces (email, payment, fs, config) onto the matrix.
