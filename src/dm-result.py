@@ -29,6 +29,8 @@ import json
 import os
 import re
 import sys
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -41,6 +43,7 @@ REPO = resolve_workspace()
 ACCESS_JSON = claude_home_path("channels", "discord", "access.json")
 SSE_STATUS_URL = "http://localhost:8080/sse-status"
 USAGE = "Usage: python3 src/dm-result.py 'text' | --file path"
+DISCORD_RATE_LIMIT_RETRIES = 5
 
 # Path allowlist for `[file: ...]` markers — sourced from
 # `src/send_allowlist.py` so this REST-fallback path uses the SAME
@@ -121,9 +124,43 @@ def _load_token() -> str:
     return ""
 
 
+def _discord_urlopen(req, *, timeout):
+    """Open one Discord request, honoring HTTP 429 Retry-After responses.
+
+    Retrying only 429 is deliberate: Discord did not accept a rate-limited
+    request, while retrying an ambiguous 5xx POST could duplicate a message.
+    """
+    retries = 0
+    while True:
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as error:
+            if error.code != 429 or retries >= DISCORD_RATE_LIMIT_RETRIES:
+                raise
+            body = b""
+            try:
+                body = error.read()
+            except Exception:
+                pass
+            retry_after = None
+            if error.headers:
+                retry_after = error.headers.get("Retry-After")
+            if retry_after is None and body:
+                try:
+                    retry_after = json.loads(body).get("retry_after")
+                except Exception:
+                    pass
+            try:
+                wait = max(0.0, min(float(retry_after), 60.0))
+            except (TypeError, ValueError):
+                wait = min(float(2 ** retries), 60.0)
+            time.sleep(min(wait + 0.5, 60.0))
+            retries += 1
+
+
 def _discord_api(method, path, token, body=None):
     """Small wrapper around urllib for Discord's REST API. Returns parsed JSON
-    on 2xx, raises on other statuses. No retries — caller handles failure."""
+    on 2xx and retries rate limits before raising other failures."""
     url = f"https://discord.com/api/v10{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
@@ -136,7 +173,7 @@ def _discord_api(method, path, token, body=None):
         },
         method=method,
     )
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with _discord_urlopen(req, timeout=10) as resp:
         raw = resp.read()
         return json.loads(raw) if raw else None
 
@@ -210,7 +247,7 @@ def _send_message_with_files(channel_id: str, token: str, content: str,
     )
     # 30s timeout — multipart uploads can be slower than JSON; cap to
     # bound the dm-result.py invocation time.
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with _discord_urlopen(req, timeout=30) as resp:
         raw = resp.read()
         return json.loads(raw) if raw else None
 
@@ -275,7 +312,7 @@ def _open_dm_channel(owner_id: str, token: str) -> str:
     raise RuntimeError(f"unexpected /users/@me/channels response: {resp!r}")
 
 
-def send_dm(text: str) -> bool:
+def send_dm(text: str, source_file: str = "") -> bool:
     """Send text to the resolved owner's Discord DM."""
     token = _load_token()
     if not token:
@@ -325,9 +362,37 @@ def send_dm(text: str) -> bool:
         )
         return True  # not an error — the input had no deliverable payload
 
-    # Chunk text into Discord-safe pieces, preserving code fences
-    # across boundaries.
+    # A retained fallback result is retried from the start by
+    # discord-bridge.py. Sending a long file as N independent messages means a
+    # failure on message N duplicates messages 1..N-1 on the next poll. Keep
+    # oversized file-backed text atomic by attaching the original result in one
+    # multipart request instead.
     chunks = list(_chunk_for_discord(clean_text)) if clean_text else []
+    source_attachment = os.path.realpath(source_file) if source_file else ""
+    oversized_attached = False
+    if (
+        len(chunks) > 1
+        and not marker_files
+        and _is_path_sendable(source_attachment)
+    ):
+        try:
+            _send_message_with_files(
+                channel_id,
+                token,
+                f"Result exceeded Discord's message limit ({len(clean_text):,} chars); "
+                "full text attached.",
+                [source_attachment],
+            )
+        except Exception as e:
+            print(
+                f"dm-result: failed to attach oversized result to channel {channel_id}: {e}",
+                file=sys.stderr,
+            )
+            return False
+        chunks = []
+        oversized_attached = True
+
+    # Inline text and direct CLI input retain the fence-aware chunking path.
     for i, chunk in enumerate(chunks):
         try:
             _discord_api("POST", f"/channels/{channel_id}/messages", token, {"content": chunk})
@@ -355,7 +420,8 @@ def send_dm(text: str) -> bool:
             )
             return False
 
-    file_summary = f", {len(sendable_files)} file(s)" if sendable_files else ""
+    delivered_files = len(sendable_files) + int(oversized_attached)
+    file_summary = f", {delivered_files} file(s)" if delivered_files else ""
     print(
         f"dm-result: sent to DM ({len(clean_text)} chars in {len(chunks)} chunk(s)"
         f"{file_summary}) via channel {channel_id}"
@@ -391,8 +457,10 @@ def main():
         if len(sys.argv) < 3:
             print("Usage: python3 src/dm-result.py --file path", file=sys.stderr)
             sys.exit(1)
-        text = Path(sys.argv[2]).read_text().strip()
+        source_file = str(Path(sys.argv[2]).resolve())
+        text = Path(source_file).read_text().strip()
     else:
+        source_file = ""
         text = " ".join(sys.argv[1:])
 
     # Honor the skip markers before any delivery path. This script is the LAST
@@ -416,7 +484,8 @@ def main():
         return
 
     print("dm-result: voice client disconnected, sending to Discord DM")
-    if send_dm(text):
+    sent = send_dm(text, source_file=source_file) if source_file else send_dm(text)
+    if sent:
         sys.exit(0)
     else:
         sys.exit(1)
