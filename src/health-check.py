@@ -20,6 +20,7 @@ Checks:
 """
 
 import hashlib
+import fnmatch
 import json
 import os
 import re
@@ -51,6 +52,7 @@ from git_binary import GitUnavailable  # noqa: E402
 from util_paths import _host_label, claude_home_path, shared_personal_path  # noqa: E402
 from workspace_default import resolve_workspace, status_read_path  # noqa: E402
 from sutando_config import resolve_core_runtime  # noqa: E402
+from cron_entry_digest import digest_map, drifted  # noqa: E402
 from task_archive import find_task_file  # noqa: E402
 
 # Workspace = runtime-state root (tasks/, results/, state/). REPO_DIR stays the
@@ -930,10 +932,25 @@ def check_session_cron_registration(
         return True
 
     expected = sum(1 for e in crons if isinstance(e, dict) and session_owned(e))
-    if runtime == "codex" or expected == 0:
+    if runtime == "codex":
         # codex has no session CronCreate surface (check_cron_runner owns that
-        # story); zero expected → nothing to verify.
+        # story), so nothing here applies regardless of the counts.
         return {"name": name, "status": "ok", "detail": "no session-owned schedules expected"}
+
+    # `expected == 0` DELIBERATELY does not short-circuit here (@john-the-dev on
+    # #2654). It used to, and that made the complete 1→0 transition the one case
+    # the surplus check below could never see: move a host's last session cron to
+    # `launchd: true` / `execution: codex-task`, park it, or delete it, and
+    # `expected` reaches 0 while the job registered under the old config is still
+    # firing. The probe then said `ok — no session-owned schedules expected`,
+    # which is the WORST form of this failure: every session job can be stale and
+    # health explicitly reports that none is expected.
+    #
+    # Zero-expected is not by itself evidence of health; it is only healthy when
+    # nothing was registered either. That question is answered by the stamp, so
+    # the decision moves BELOW the stamp read — the never-had-session-crons host
+    # exits at the no-stamp branch, and a host that DID register something falls
+    # through to the surplus check like any other.
 
     # The SESSION boundary, not the heartbeat's age. `.alive.started_at` is
     # `core_heartbeat._STARTED_AT`, stamped once at module load, and both launch
@@ -962,6 +979,11 @@ def check_session_cron_registration(
     try:
         stamp = json.loads(stamp_file.read_text())
     except FileNotFoundError:
+        if expected == 0:
+            # THE genuine never-had-session-crons host: nothing expected AND
+            # nothing ever registered. This is the case the old `expected == 0`
+            # short-circuit was really protecting, and it still exits healthy.
+            return {"name": name, "status": "ok", "detail": "no session-owned schedules expected"}
         return {
             "name": name,
             "status": "warn",
@@ -977,6 +999,12 @@ def check_session_cron_registration(
     if isinstance(stamp_ts, bool) or not isinstance(stamp_ts, (int, float)):
         return {"name": name, "status": "warn", "detail": "stamp malformed (missing numeric ts)"}
     if started_at is not None and stamp_ts < started_at:
+        if expected == 0:
+            # The stamp is from a PREVIOUS session, and session crons die with
+            # their session — so nothing it registered is still firing, and
+            # nothing is expected now. Telling the operator to re-run
+            # /schedule-crons here would be advice with no subject.
+            return {"name": name, "status": "ok", "detail": "no session-owned schedules expected"}
         return {
             "name": name,
             "status": "warn",
@@ -999,6 +1027,86 @@ def check_session_cron_registration(
             "status": "warn",
             "detail": f"only {registered}/{expected} session cron(s) registered at last /schedule-crons",
         }
+
+    # OWNERSHIP TRANSITION (@john-the-dev on #2654). The check above runs one
+    # way only, and the opposite inequality is a real failure it cannot see:
+    # edit a registered entry to `launchd: true` or `execution: codex-task` and
+    # it leaves `expected`, while the session job registered under the old
+    # config KEEPS FIRING. Counts then read registered=2, expected=1, and
+    # `2 < 1` is false — green. The digest cannot see it either, deliberately:
+    # entry_digest ignores the ownership fields precisely so that an entry which
+    # correctly stopped being registered is not reported as edited.
+    #
+    # So the signal is the surplus itself. It also covers an entry deleted from
+    # crons.json whose job was never de-registered — same disruption, same remedy.
+    #
+    # There is deliberately NO allowance for step 4's bootstrap fallback (which
+    # registers /proactive-loop when the config lacks it, legitimately putting
+    # registered one above expected). Subtracting one for it was the first
+    # attempt and it is wrong: from counts alone a benign fallback and a single
+    # real transition are the SAME surplus, so the allowance silently absorbs
+    # exactly one transition — an amnesty, not a filter. A host whose crons.json
+    # carries no proactive-loop entry has a config gap worth surfacing anyway,
+    # so the honest move is to warn either way and name both causes.
+    surplus = registered - expected
+    if surplus > 0:
+        fallback_armed = not any(
+            isinstance(e, dict) and session_owned(e)
+            and (e.get("prompt_skill") == "proactive-loop"
+                 or "proactive-loop" in str(e.get("prompt") or ""))
+            for e in crons
+        )
+        note = (
+            " (crons.json carries no proactive-loop entry, so step 4's bootstrap "
+            "fallback plausibly accounts for one of these — add an explicit entry "
+            "to tell the two apart)"
+            if fallback_armed else ""
+        )
+        return {
+            "name": name,
+            "status": "warn",
+            "detail": (
+                f"{registered} session cron(s) were registered but only {expected} are "
+                f"session-owned now — {surplus} moved to launchd/codex ownership, were "
+                f"parked, or were deleted since registration, so a job registered under the "
+                f"OLD config was never de-registered and MAY still be firing; re-run "
+                f"/schedule-crons to clear it{note}"
+            ),
+        }
+
+    # CONFIG DRIFT. Everything above answers "was a registration completed for
+    # this boot?" — a count, and a count cannot see an entry whose PROMPT was
+    # edited after it was registered. That drift is silent by construction: the
+    # config is right, the script is right, and only the stale registration is
+    # wrong (#2653, where a `--stand` flag added four days into a session kept
+    # not firing, and the field it populates read null on all 27 PRs).
+    #
+    # #2653 makes /schedule-crons re-register rather than skip, so the drift
+    # self-heals on the next run. This makes an UNHEALED one visible in between,
+    # because until the next run the only other observation point is a fire.
+    #
+    # Restricted to `session_owned` names: an edit to a launchd- or codex-owned
+    # entry is not a session-cron problem and must not warn as one. A stamp
+    # written before this field existed simply skips the check — an old stamp
+    # must not manufacture a warning it has no data for.
+    stamped_digests = stamp.get("config_digests")
+    if isinstance(stamped_digests, dict):
+        session_names = [
+            e.get("name") for e in crons if isinstance(e, dict) and session_owned(e)
+        ]
+        moved = drifted(stamped_digests, digest_map(crons), names=session_names)
+        if moved:
+            shown = ", ".join(moved[:4]) + ("…" if len(moved) > 4 else "")
+            return {
+                "name": name,
+                "status": "warn",
+                "detail": (
+                    f"{len(moved)} session cron(s) edited in crons.json since they were "
+                    f"registered ({shown}) — the running job still fires the OLD prompt; "
+                    f"re-run /schedule-crons"
+                ),
+            }
+
     return {"name": name, "status": "ok", "detail": f"{expected} session cron(s) stamped registered this boot"}
 
 
@@ -1064,6 +1172,109 @@ def _slug_derivation_key(name: str) -> str:
     """
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
+
+
+#: Files the workspace-root contract sanctions. Everything else at the root is
+#: drift. Kept next to the probe so adding a legitimate root file is a one-line
+#: edit in the same place a reader looks for the rule.
+WORKSPACE_ROOT_ALLOWED = frozenset({
+    "build_log.md",          # CLAUDE.md names it a workspace-root artifact
+    "pending-questions.md",  # same
+    "session-state.md",      # written by src/session-handoff.sh on compaction
+    ".gitkeep",              # git placeholder, not state
+})
+
+#: Migration sentinels are production-owned and DELIBERATELY retained at the
+#: workspace root — `workspace_default.py` writes `.notes-migrated`,
+#: `.build_log-migrated`, `.status-migrated` and `.conversation-log-migrated`
+#: there for O(1) re-entry, and says so explicitly ("kept at the workspace root
+#: for consistency with the existing ...").
+#:
+#: Matched by PATTERN, not by four literal names, because that is how the family
+#: is already defined elsewhere: `scripts/sutando-migrate.sh` finds them with
+#: `-name ".*-migrated*"`. Reusing the existing definition means a sentinel added
+#: later is exempt automatically.
+#:
+#: This is the same mistake this probe exists to catch, made one layer up: the
+#: first version of it shipped a hardcoded allowlist that missed a whole
+#: documented family, exactly as `_STATUS_FILES` does. @qingyun-wu and
+#: @john-the-dev caught it before merge — a permanent WARN on every upgraded
+#: install would have trained operators to ignore the detector.
+WORKSPACE_ROOT_SENTINEL_GLOB = ".*-migrated*"
+
+
+def check_workspace_root_tidy() -> "dict | None":
+    """Flag loose FILES at the workspace root — state that escaped `state/`.
+
+    CLAUDE.md: "Loose status/state .json files (...) live under `state/`; the
+    workspace root holds only the top-level directories."
+
+    That contract already has a MIGRATOR — `workspace_default._migrate_root_status`
+    — but it sweeps a hardcoded five-name list (`core-status.json`,
+    `voice-state.json`, `contextual-chips.json`, `dynamic-content.json`,
+    `quota-state.json`). An allowlist is the right shape for a migrator: its job is
+    relocating files it knows about. It is the wrong shape for enforcement, because
+    anything added afterwards is exempt by construction and nothing reports it.
+
+    So the contract had no detector at all, and drifted. Found on Chis-Mac-mini:
+    `.last-pq-notify` (written by check-pending-questions.py) and `.voice-agent.pid`
+    (voice-agent.ts) had accumulated at the root, plus two stray capture scripts —
+    none of them in the migrator's list, none of them flagged by any of the 23
+    existing probes.
+
+    WARN, never fail. This is drift, not breakage: the files work where they are,
+    and a fail-level probe would go red on every host that already has some, for
+    state nobody chose. A warn keeps it visible without gating anything.
+
+    Returns None when the root is clean, so a healthy install gains no line.
+    """
+    if not WORKSPACE_DIR.is_dir():
+        return None
+    try:
+        loose = sorted(
+            p.name for p in WORKSPACE_DIR.iterdir()
+            if p.is_file()
+            and p.name not in WORKSPACE_ROOT_ALLOWED
+            and not fnmatch.fnmatch(p.name, WORKSPACE_ROOT_SENTINEL_GLOB)
+        )
+    except OSError:
+        return None                      # unreadable workspace is another probe's job
+    if not loose:
+        return None
+
+    # Name the writer where a cheap grep finds one — "who put this here" is the
+    # first question, and answering it turns a nag into an action.
+    writers = {}
+    src = REPO_DIR / "src"
+    for name in loose:
+        try:
+            hits = sorted(
+                f.name for f in src.iterdir()
+                if f.is_file() and f.suffix in (".py", ".ts", ".sh")
+                and name in f.read_text(errors="replace")
+            )
+        except OSError:
+            hits = []
+        # Only attribute when EXACTLY one source file mentions the name. Taking
+        # hits[0] named whichever file happened to sort first — including a test
+        # that merely contains the string — and a confidently wrong writer is
+        # worse than none, because it sends the reader to the wrong file.
+        if len(hits) == 1:
+            writers[name] = hits[0]
+
+    shown = ", ".join(f"{n} (written by {writers[n]})" if n in writers else n
+                      for n in loose)
+    return {
+        "name": "workspace-root-tidy",
+        "status": "warn",
+        "detail": (
+            f"{len(loose)} loose file(s) at the workspace root, which the contract "
+            f"reserves for top-level directories: {shown}. State belongs under "
+            f"state/. `_migrate_root_status` only sweeps its five hardcoded names, "
+            f"so anything added since is exempt by construction — this probe is the "
+            f"detector that was missing, not a new rule."
+        ),
+    }
 
 def check_memory_dir_siblings() -> "dict | None":
     """Flag a populated memory corpus sitting under a DIFFERENT project slug.
@@ -1156,9 +1367,47 @@ def _carrier_representatives(workspace: Path, entry: str) -> "list[Path]":
     if not rel:
         return []
     if any(ch in rel for ch in "*?["):
-        return sorted(workspace.glob(rel))
-    candidate = workspace / rel
-    return [candidate] if candidate.exists() else []
+        matches = sorted(workspace.glob(rel))
+    else:
+        candidate = workspace / rel
+        matches = [candidate] if candidate.exists() else []
+    return [m for m in matches if not _reaches_through_symlink(workspace, m)]
+
+
+def _reaches_through_symlink(workspace: Path, p: Path) -> bool:
+    """True when every file the probe would derive from `p` is "beyond a
+    symbolic link" to git: `p` itself is a symlinked DIRECTORY, or any
+    component between `workspace` and `p` is a symlink.
+
+    Found live 2026-08-05: a compat alias symlink under
+    `.claude-sutando/projects/` (a space-slug project dir pointing at its
+    dash-slug twin) was matched by the memory glob, `check-ignore` rejected
+    every pathspec under it with exit 128 ("beyond a symbolic link"), and the
+    whole entry read UNMEASURED every health pass — while the content was
+    backed up the entire time at its real path, which the same entry probes
+    via the twin's own materialization.
+
+    Git never stores content past a symlink — at most the link entry itself —
+    so such a materialization is outside what the vault could ever carry, and
+    probing it can only produce 128s (or, if the crossing link itself were
+    probed instead, a false `dropped`: dir-only un-ignore patterns like
+    `!projects/*/` cannot match a symlink, measured on the live host). The
+    content's real path is the one that answers the backup question, and
+    when it lies inside the workspace the same probe measures it directly.
+
+    A symlink to a FILE with a real parent chain is deliberately NOT
+    filtered: git accepts that pathspec (nothing is *beyond* the link) and
+    file rules match it, so the existing behavior of probing it stands.
+    """
+    ancestors = []
+    cur = p
+    while cur != workspace and cur != cur.parent:
+        ancestors.append(cur)
+        cur = cur.parent
+    for c in ancestors[1:]:  # components strictly between workspace and p
+        if c.is_symlink():
+            return True
+    return p.is_symlink() and p.is_dir()
 
 
 def _carrier_probe_files(rep: "Path") -> "list[Path]":
@@ -4462,13 +4711,38 @@ def fix_skill_symlinks(check: dict) -> dict:
     return {"name": "skill-symlinks", "status": "ok" if not errors else "warn", "detail": result}
 
 
-def apply_skill_symlink_fixes(checks: list) -> None:
+def apply_skill_symlink_fixes(checks: list, stream=None) -> None:
     """--fix dispatch for skill-symlinks: warn-level (excluded from the issues
-    loop) but auto-fixable, so it is handled by its own pass over checks."""
+    loop) but auto-fixable, so it is handled by its own pass over checks.
+
+    `stream` is where the repair line goes, default stdout. A caller that emits
+    a machine-readable payload on stdout MUST pass `sys.stderr` — this helper
+    prints prose, and prose ahead of the payload makes `json.loads(stdout)` fail
+    at line 1.
+
+    On a successful repair the check dict is updated IN PLACE, so every
+    downstream reader — the JSON payload, the human listing, the summary — sees
+    the post-fix state instead of the warning this call just cleared. Reporting
+    the pre-fix warning after repairing it hands consumers a payload that
+    contradicts the action they asked for. The `_unlinked`/`_broken` keys are
+    cleared with it so a second pass cannot re-fix an already-repaired check.
+    """
+    out = stream if stream is not None else sys.stdout
     for c in checks:
         if c["name"] == "skill-symlinks" and (c.get("_unlinked") or c.get("_broken")):
             result = fix_skill_symlinks(c)
-            print(f"  {c['name']}: {result['detail']}")
+            print(f"  {c['name']}: {result['detail']}", file=out)
+            # RE-RUN the check instead of adopting the fixer's own verdict.
+            # `fix_skill_symlinks` repairs only `_unlinked`/`_broken`, and its
+            # status is computed solely from what it repaired — it is blind to
+            # `_orphaned`, which it deliberately does not remove. Copying that
+            # status over the check reported `ok` while a dangling link
+            # survived: a false clean, in the very payload added to make the
+            # post-fix state honest. A repair's self-report is not evidence of
+            # the resulting state; only re-measuring is.
+            fresh = check_skill_symlinks()
+            c.clear()
+            c.update(fresh)
 
 
 def _pending_task_files(tasks_dir: Path, results_dir: Optional[Path] = None) -> list[Path]:
@@ -5168,6 +5442,54 @@ def check_notes_split_brain() -> "dict | None":
     }
 
 
+def _drop_launcher_parents(pids: list) -> list:
+    """Collapse a launcher+child pair to the child that is the real process.
+
+    `pgrep -f '<name>\\.py$'` matches the LAUNCHER as well as the bridge,
+    because the launcher's own argv ends with the same script path:
+
+        pid 27538  secret-vault.py env TELEGRAM_BOT_TOKEN -- python3 src/telegram-bridge.py
+        pid 27541  python3 src/telegram-bridge.py            <- ppid 27538
+
+    Both match, so the duplicate-process check reported "multiple processes
+    (2 PIDs)" for a perfectly healthy single bridge — every run, indefinitely.
+    The `\\.py$` anchor above was added to stop a different false positive and
+    cannot help here: the launcher's command line genuinely ends in the script.
+
+    A standing false warning is worse than no warning: it is the one the
+    operator learns to scroll past, and this probe exists to catch a REAL
+    duplicate (two pollers racing for the same Telegram `getUpdates` cursor,
+    which silently splits inbound messages between them).
+
+    Identify by PID SCOPE, not by pattern: drop any matched pid that is the
+    parent of another matched pid. Keeps the leaf — the process actually doing
+    the work — and is agnostic to which launcher is in use (vault, `env`, a
+    shell wrapper). A pid whose parent is NOT in the set is untouched, so two
+    genuinely independent bridges still both survive and still warn.
+    """
+    if len(pids) < 2:
+        return list(pids)
+    try:
+        out = subprocess.run(
+            ["/bin/ps", "-o", "pid=,ppid=", "-p", ",".join(pids)],
+            capture_output=True, text=True,
+        )
+    except Exception:
+        return list(pids)
+    if out.returncode != 0:
+        # Could not resolve parentage — return the input untouched rather than
+        # guessing. Over-reporting a duplicate is recoverable; silently
+        # dropping a real second poller is not.
+        return list(pids)
+    parents = set()
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] in pids:
+            parents.add(parts[1])
+    kept = [p for p in pids if p not in parents]
+    return kept or list(pids)
+
+
 def _should_skip_bridge(channel_name: str, env_path: Path) -> bool:
     """True if SKIP_<CHANNEL>=1 is set in the main .env or as an env var.
 
@@ -5758,6 +6080,10 @@ def run_all_checks() -> list[dict]:
     if _mem_siblings:
         checks.append(_mem_siblings)
 
+    _root_tidy = check_workspace_root_tidy()
+    if _root_tidy:
+        checks.append(_root_tidy)
+
     _mem_index = check_memory_index_integrity()
     if _mem_index:
         checks.append(_mem_index)
@@ -5873,6 +6199,9 @@ def run_all_checks() -> list[dict]:
             result = subprocess.run(["/usr/bin/pgrep", "-f", f"{proc_name}\\.py$"], capture_output=True, text=True)
             pids = result.stdout.strip().split("\n") if result.returncode == 0 else []
             pids = [p for p in pids if p]
+            # A launcher's argv ends with the same script path, so it matches
+            # this pgrep too — see _drop_launcher_parents.
+            pids = _drop_launcher_parents(pids)
         except Exception:
             pids = []
 
@@ -7220,6 +7549,22 @@ def main():
         else None
     )
 
+    # skill-symlinks is warn-level, so it is never in `issues`. Its fix pass has
+    # to sit ABOVE both gates that follow, because each one independently made
+    # the repair unreachable:
+    #   * `if quiet: ... elif codex_notifier is None: sys.exit(0)` returns before
+    #     any fix runs, and
+    #   * the fix block itself lived inside `else:` of `if not issues:`.
+    # Net effect on a host whose ONLY problem was broken symlinks — the exact
+    # case this fixer exists for — `--fix` printed nothing and repaired nothing;
+    # it worked only when some UNRELATED check happened to be failing too.
+    # Prints only when it actually repairs something, so a healthy run is silent.
+    # Under --json the repair line goes to STDERR: stdout carries the payload,
+    # and prose ahead of it makes json.loads() fail at line 1 (caught in review
+    # of #2663 — the first version of this hoist printed to stdout regardless).
+    if do_fix:
+        apply_skill_symlink_fixes(checks, stream=sys.stderr if as_json else sys.stdout)
+
     # Optional: macOS notification surface for the launchd-supervised path
     # (com.sutando.health-check-fallback). Notifies on the INITIAL check set
     # — the launchd fallback wants the user-visible alert immediately, even
@@ -7309,9 +7654,6 @@ def main():
         if do_fix:
             print()
             print("Attempting fixes...")
-            # skill-symlinks is "warn" (excluded from issues) but auto-fixable —
-            # handle it separately from the issues loop.
-            apply_skill_symlink_fixes(checks)
             for c in issues:
                 if c["name"].startswith("com.sutando."):
                     result = fix_launchd(c["name"])
