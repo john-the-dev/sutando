@@ -240,3 +240,83 @@ test('cooldown path: no usable sibling → original token served (fail-safe, nev
 	assert.equal(served.fellBack, false);
 	assert.equal(served.token, 'doomed-scoped-token-aaaaaaaaaa');
 });
+
+// ── CR #2106: exercise the PRODUCTION getFreshOAuthToken composition ──────────
+// The helpers above are covered in isolation, but qingyun's CR asks that the
+// actual serve path — not just the helpers — prove it returns the sibling token
+// at both changed call sites. getFreshOAuthToken now accepts an injectable deps
+// seam, so these tests drive the REAL function with controlled keychain / refresh
+// / clock / backoff and assert the token the production path returns.
+
+import { getFreshOAuthToken, type ServeTokenDeps } from '../skills/quota-tracker/scripts/credential-proxy.ts';
+
+// Build deps that default to {expired scoped chosen, valid default sibling};
+// `over` replaces any leaf; returns the mutable backoff `state` for assertions.
+function makeServeDeps(
+	over: Partial<ServeTokenDeps> = {},
+	initialBackoff: { failCount: number; nextAllowedAt: number } = { failCount: 0, nextAllowedAt: 0 },
+): { deps: ServeTokenDeps; state: { failCount: number; nextAllowedAt: number } } {
+	const state = { ...initialBackoff };
+	const deps: ServeTokenDeps = {
+		readCred: () => scopedDoomed,
+		readCredFromService: (svc) =>
+			svc === scopedDoomed.service ? scopedDoomed
+				: svc === defaultValid.service ? defaultValid : null,
+		readAllCandidates: () => [scopedDoomed, defaultValid],
+		refreshAccessToken: async () => null,
+		writeCred: () => false,
+		now: () => NOW,
+		getBackoff: () => state,
+		setBackoff: (n) => { state.failCount = n.failCount; state.nextAllowedAt = n.nextAllowedAt; },
+		log: () => {},
+		logError: () => {},
+		...over,
+	};
+	return { deps, state };
+}
+
+test('getFreshOAuthToken (prod path): failed refresh with expired scoped + valid default → serves the sibling', async () => {
+	let refreshCalls = 0;
+	const { deps, state } = makeServeDeps({
+		refreshAccessToken: async () => { refreshCalls += 1; return null; },
+	});
+	const tok = await getFreshOAuthToken(deps);
+	assert.equal(tok, 'valid-default-token-bbbbbbbbbb'); // production return, not just a helper
+	assert.equal(refreshCalls, 1);                       // the refresh was actually attempted
+	assert.equal(state.failCount, 1);                    // and the failure armed the backoff
+	assert.ok(state.nextAllowedAt > NOW);
+});
+
+test('getFreshOAuthToken (prod path): cooldown-skipped refresh still falls back off the doomed scoped token', async () => {
+	let refreshCalls = 0;
+	const { deps } = makeServeDeps(
+		{ refreshAccessToken: async () => { refreshCalls += 1; return null; } },
+		{ failCount: 1, nextAllowedAt: NOW + 60_000 }, // active cooldown → shouldAttemptRefresh false
+	);
+	const tok = await getFreshOAuthToken(deps);
+	assert.equal(tok, 'valid-default-token-bbbbbbbbbb'); // serveWithoutRefresh branch, prod path
+	assert.equal(refreshCalls, 0);                       // cooldown genuinely suppressed the attempt
+});
+
+test('getFreshOAuthToken (prod path): successful refresh serves the freshly minted scoped token (no spurious fallback)', async () => {
+	const refreshed = { accessToken: 'freshly-refreshed-token-cccccccc', refreshToken: 'r2', expiresAt: NOW + 3_600_000 };
+	const { deps, state } = makeServeDeps(
+		{
+			refreshAccessToken: async () => refreshed,
+			writeCred: () => true,
+			readCredFromService: (svc) =>
+				svc === scopedDoomed.service ? { service: scopedDoomed.service, oauth: refreshed }
+					: svc === defaultValid.service ? defaultValid : null,
+		},
+		{ failCount: 2, nextAllowedAt: 0 },
+	);
+	const tok = await getFreshOAuthToken(deps);
+	assert.equal(tok, 'freshly-refreshed-token-cccccccc'); // scoped token, refreshed — not a sibling
+	assert.equal(state.failCount, 0);                       // success resets the backoff
+	assert.equal(state.nextAllowedAt, 0);
+});
+
+test('getFreshOAuthToken (prod path): no stored credential → null (unchanged fail-safe)', async () => {
+	const { deps } = makeServeDeps({ readCred: () => null });
+	assert.equal(await getFreshOAuthToken(deps), null);
+});

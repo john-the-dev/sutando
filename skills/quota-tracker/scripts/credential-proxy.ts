@@ -316,44 +316,80 @@ let refreshInFlight: Promise<void> | null = null;
 let refreshFailCount = 0;
 let nextRefreshAllowedAt = 0;
 
+// Injectable seam for the serve decision. Production binds the real keychain
+// readers / refresh / clock / backoff state (`defaultServeDeps` below); the
+// offline test binds fakes so the ACTUAL getFreshOAuthToken composition — not
+// just the pure helpers — is exercised end-to-end (CR #2106, qingyun): the
+// refresh-attempted-but-failed fallback and the cooldown-skipped fallback both
+// run through the real branch structure with controlled dependencies.
+export interface ServeTokenDeps {
+	readCred(): StoredClaudeOAuth | null;
+	readCredFromService(service: string): StoredClaudeOAuth | null;
+	readAllCandidates(): StoredClaudeOAuth[];
+	refreshAccessToken(cred: ClaudeOAuth): Promise<ClaudeOAuth | null>;
+	writeCred(service: string, oauth: ClaudeOAuth): boolean;
+	now(): number;
+	// Failure-backoff state — module-level singletons in production, test-owned
+	// in tests. Read as one snapshot, written as one replacement, so the branch
+	// logic never depends on the storage being module globals.
+	getBackoff(): { failCount: number; nextAllowedAt: number };
+	setBackoff(next: { failCount: number; nextAllowedAt: number }): void;
+	log(msg: string): void;
+	logError(msg: string): void;
+}
+
+const defaultServeDeps: ServeTokenDeps = {
+	readCred,
+	readCredFromService,
+	readAllCandidates,
+	refreshAccessToken,
+	writeCred,
+	now: () => Date.now(),
+	getBackoff: () => ({ failCount: refreshFailCount, nextAllowedAt: nextRefreshAllowedAt }),
+	setBackoff: (n) => { refreshFailCount = n.failCount; nextRefreshAllowedAt = n.nextAllowedAt; },
+	log: (m) => console.log(`${ts()} [Proxy] ${m}`),
+	logError: (m) => console.error(`${ts()} [Proxy] ${m}`),
+};
+
 // Return a usable accessToken, refreshing first if the stored one is at/near
 // expiry. Fail-safe at every step: any problem → return the existing token.
-async function getFreshOAuthToken(): Promise<string | null> {
-	const stored = readCred();
+// `deps` defaults to the real production dependencies; the offline test injects
+// fakes. Behavior with the default deps is identical to the pre-seam version.
+export async function getFreshOAuthToken(deps: ServeTokenDeps = defaultServeDeps): Promise<string | null> {
+	const stored = deps.readCred();
 	if (!stored) return null;
 	const { service, oauth: cred } = stored;
-	const now = Date.now();
+	const now = deps.now();
 	const needsRefresh =
 		typeof cred.expiresAt === 'number' &&
 		cred.expiresAt - now <= REFRESH_SKEW_MS &&
 		!!cred.refreshToken;
-	if (shouldAttemptRefresh(needsRefresh, Date.now(), nextRefreshAllowedAt)) {
+	if (shouldAttemptRefresh(needsRefresh, deps.now(), deps.getBackoff().nextAllowedAt)) {
 		if (!refreshInFlight) {
 			refreshInFlight = (async () => {
-				const fresh = await refreshAccessToken(cred);
-				if (fresh && writeCred(service, fresh)) {
-					refreshFailCount = 0;
-					nextRefreshAllowedAt = 0;
-					console.log(`${ts()} [Proxy] OAuth token refreshed (new expiry ${new Date(fresh.expiresAt ?? 0).toISOString()})`);
+				const fresh = await deps.refreshAccessToken(cred);
+				if (fresh && deps.writeCred(service, fresh)) {
+					deps.setBackoff({ failCount: 0, nextAllowedAt: 0 });
+					deps.log(`OAuth token refreshed (new expiry ${new Date(fresh.expiresAt ?? 0).toISOString()})`);
 				} else {
-					refreshFailCount += 1;
-					const backoff = nextRefreshBackoffMs(refreshFailCount);
-					nextRefreshAllowedAt = Date.now() + backoff;
-					console.error(`${ts()} [Proxy] refresh did not persist — keeping existing token (failure ${refreshFailCount}, backing off ${Math.round(backoff / 1000)}s)`);
+					const failCount = deps.getBackoff().failCount + 1;
+					const backoff = nextRefreshBackoffMs(failCount);
+					deps.setBackoff({ failCount, nextAllowedAt: deps.now() + backoff });
+					deps.logError(`refresh did not persist — keeping existing token (failure ${failCount}, backing off ${Math.round(backoff / 1000)}s)`);
 				}
 			})().finally(() => { refreshInFlight = null; });
 		}
 		await refreshInFlight;
-		const after = readCredFromService(service)?.oauth;
-		if (after && !tokenHardExpired(after, Date.now())) return after.accessToken;
+		const after = deps.readCredFromService(service)?.oauth;
+		if (after && !tokenHardExpired(after, deps.now())) return after.accessToken;
 		// Refresh failed and the chosen (typically scoped) token is still expired.
 		// Rather than serve a doomed token and 401-loop until someone deletes the
 		// scoped keychain entry by hand, fall back to any other candidate that
 		// still holds a valid token (the default item interactive `/login` keeps
 		// fresh). This automates the manual "delete the scoped entry" workaround.
-		const fallback = firstUsableCandidate(readAllCandidates(), Date.now(), service);
+		const fallback = firstUsableCandidate(deps.readAllCandidates(), deps.now(), service);
 		if (fallback) {
-			console.error(`${ts()} [Proxy] '${service}' token unrefreshable — serving valid '${fallback.service}' instead`);
+			deps.logError(`'${service}' token unrefreshable — serving valid '${fallback.service}' instead`);
 			return fallback.oauth.accessToken;
 		}
 		return after?.accessToken ?? cred.accessToken;
@@ -362,9 +398,9 @@ async function getFreshOAuthToken(): Promise<string | null> {
 	// OR the failure-backoff cooldown skipped it (shouldAttemptRefresh false).
 	// In every one of those cases a hard-expired chosen token must still fall
 	// back to a valid sibling rather than serve a guaranteed 401.
-	const served = serveWithoutRefresh(stored, readAllCandidates(), now);
+	const served = serveWithoutRefresh(stored, deps.readAllCandidates(), now);
 	if (served.fellBack) {
-		console.error(`${ts()} [Proxy] '${service}' token hard-expired and refresh unavailable this call — serving valid '${served.via}' instead`);
+		deps.logError(`'${service}' token hard-expired and refresh unavailable this call — serving valid '${served.via}' instead`);
 	}
 	return served.token;
 }
