@@ -409,19 +409,97 @@ def _token_from_ag2space_env():
             # is empty, so without this the URL chain has nothing and the bridge
             # fatals on "no gateway URL" in the exact scenario this fix targets.
             url = vals.get("REMOTE_TASK_URL") or vals.get("AG2_REMOTE_URL") or ""
-            return tok, url
-    return "", ""
+            # Carry REMOTE_MEDIA_MARKER from the same file too. The bridge derives
+            # its marker tag from os.environ at import (MEDIA_MARKER_TAG below), and
+            # a bare/desktop launch reaches config ONLY through this file — it never
+            # sees startup.sh's env exports, which is the one place the AG2 default
+            # is otherwise set. Without this, such a launch falls back to the
+            # provider-neutral default, the marker never matches the gateway's
+            # `[ag2space-media: …]`, and inbound image/file URLs stay unresolved in
+            # the task body — the core can't see owner-sent screenshots (owner-
+            # reported 2026-08-03). This runs at import, before MEDIA_MARKER_TAG is
+            # computed, so the tag picks it up. Provider-neutral: the VALUE lives in
+            # the channel .env, not in this generic package; and a real env var
+            # still wins (we only fill it when unset).
+            _mm = vals.get("REMOTE_MEDIA_MARKER")
+            if _mm and not os.environ.get("REMOTE_MEDIA_MARKER"):
+                os.environ["REMOTE_MEDIA_MARKER"] = _mm
+            # Return the source file path too (main #2323): it is the durable token
+            # source the auth-recovery path re-reads on rejection. In the desktop-
+            # spawned case this is the ONLY thing that arms recovery —
+            # REMOTE_TASK_TOKEN_FILE is unset there, so without carrying `path` into
+            # TOKEN_FILE the bridge keeps the historical FATAL/crash-loop behavior.
+            return tok, url, path
+    return "", "", ""
+
+
+def _token_from_vault_ag2space(vault_get=None):
+    """Vault tier for the ag2space onboarding token — parity with the channel
+    bridges (#2638).
+
+    Before this, sparrow resolved its token from the process env and the channel
+    `.env`, but NEVER the Keychain vault (`get_vault_key` occurrences in this
+    module: 0). So `vault set REMOTE_TASK_TOKEN <value>` stored the secret
+    correctly and changed nothing for ag2space — the operator spent the secret
+    and saw no effect, exactly the failure #2638 fixed for discord/slack/telegram
+    (@qingyun-air's 2026-08-04 bridge-parity finding). This closes that gap.
+
+    Reuses the shared core policy `channel_token.token_from_vault` rather than
+    copying it (the read is total-failure-safe and never surfaces the value).
+    sparrow ships standalone (`pyproject.toml`), so the monorepo `src/` may be
+    absent; when `channel_token` can't be located/imported we degrade to the
+    pre-#2638 behavior — no vault tier — rather than crash a bridge at startup.
+    Tries the current name, then the legacy `AG2_REMOTE_TOKEN` alias. Returns ''
+    on any failure. `vault_get` is injectable so the tier is testable hermetically
+    without touching a real Keychain.
+    """
+    try:
+        cur = os.path.dirname(os.path.abspath(__file__))
+        src = ""
+        while True:
+            if os.path.isfile(os.path.join(cur, "src", "channel_token.py")):
+                src = os.path.join(cur, "src")
+                break
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+        if not src:
+            return ""
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from channel_token import token_from_vault
+    except Exception:
+        return ""
+    tok = (token_from_vault("REMOTE_TASK_TOKEN", vault_get=vault_get)
+           or token_from_vault("AG2_REMOTE_TOKEN", vault_get=vault_get))
+    if tok:
+        # Name the source — which layer supplied the token is load-bearing for
+        # diagnosis. Never print the value.
+        print("[remote-gateway-bridge] token not in env or .env; loaded from vault",
+              file=sys.stderr, flush=True)
+    return tok
 
 
 _RAW = _env_compat("REMOTE_TASK_TOKEN", "AG2_REMOTE_TOKEN") or ""
 _URL_FALLBACK = ""
+_TOKEN_FILE_FALLBACK = ""
 if not _RAW:
-    _RAW, _URL_FALLBACK = _token_from_ag2space_env()
+    _RAW, _URL_FALLBACK, _TOKEN_FILE_FALLBACK = _token_from_ag2space_env()
+if not _RAW:
+    # Last resort: the Keychain vault — parity with the channel bridges (#2638).
+    # Without this, `vault set REMOTE_TASK_TOKEN` was a no-op for ag2space.
+    _RAW = _token_from_vault_ag2space()
 _URL_FROM_TOKEN, TOKEN = _parse_onboarding_token(_RAW)
 URL = (_env_compat("REMOTE_TASK_URL", "AG2_REMOTE_URL")
        or _URL_FROM_TOKEN or _URL_FALLBACK).rstrip("/")
 PROVIDER = os.environ.get("REMOTE_TASK_PROVIDER") or "remote"
 POLL_WAIT = int(os.environ.get("REMOTE_TASK_POLL_WAIT") or "25")
+# The ONE auth-header dict shared with long-lived consumers (event channel,
+# card poster). They must hold this dict BY REFERENCE (no copy) so a token
+# rotation (_reload_rotated_token) propagates to their next request without a
+# restart. _req() itself reads the TOKEN global per call and needs no dict.
+_AUTH_HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 HEARTBEAT_INTERVAL = 60
 # When the gateway lacks /v1/tasks/<id>/ack it returns 404/405; we back off
 # instead of hammering it — but only for this cooldown, then retry. A permanent
@@ -429,6 +507,18 @@ HEARTBEAT_INTERVAL = 60
 # picked up until the worker restarts; time-gating makes it self-healing.
 ACK_UNSUPPORTED_COOLDOWN = int(os.environ.get("REMOTE_ACK_RETRY_COOLDOWN") or "300")
 _ack_disabled_until = 0.0   # 0 = enabled; else epoch until which acks are skipped
+# Auth-rejection recovery: when the gateway rejects the bearer (401/403 — the
+# key was revoked or expired), the historical behavior is an immediate FATAL
+# exit. Under a supervisor that blindly relaunches, that becomes a silent
+# crash-loop hammering the gateway until a human notices. When
+# REMOTE_TASK_TOKEN_FILE names the durable token source (a dotenv-style file
+# with a REMOTE_TASK_TOKEN= line, or the raw onboarding string alone on a
+# line), the bridge instead re-reads that file on rejection: a DIFFERENT token
+# there (the connect/onboarding flow re-ran) is swapped in live — no restart —
+# and an unchanged one holds the bridge in a slow re-check loop until rotation
+# happens. Unset → exactly the pre-existing FATAL-exit behavior.
+TOKEN_FILE = os.environ.get("REMOTE_TASK_TOKEN_FILE") or _TOKEN_FILE_FALLBACK or ""
+AUTH_RECHECK_INTERVAL = int(os.environ.get("REMOTE_AUTH_RECHECK_INTERVAL") or "30")
 _heartbeat_disabled = False
 _last_heartbeat_at = 0.0
 
@@ -489,15 +579,48 @@ if LOCAL_TIER not in ("owner", "team", "other"):
 # We key the lookup on the BROKER-attested `user_id` (Matrix sender the broker
 # writes into the task, not a task-body self-claim), so this stays a LOCAL trust
 # decision — same principle as LOCAL_TIER. Only listed senders are re-tiered;
-# everyone else keeps LOCAL_TIER, so an unknown sender can never ESCALATE (the
-# map only DOWN-tiers named senders; owner stays owner by being absent from it).
-# Hot: re-read on mtime change so the owner can add teammates without a restart.
+# everyone else keeps LOCAL_TIER, so an UNLISTED sender can never escalate. A LISTED
+# sender gets exactly the tier the owner mapped them to — including one ABOVE
+# LOCAL_TIER, which is how a least-privilege node names its owner. See the CONTRACT
+# note on _tier_for for why that cannot be driven from the wire.
+# Hot: the cache keys on (st_mtime_ns, st_size, st_ino) and never serves an
+# above-LOCAL_TIER grant without a fresh read, so the owner can add teammates AND
+# revoke them without a restart.
 def _ag2space_access_path():
     base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
     return os.path.join(base, "channels", "ag2space", "access.json")
 
 
-_TIER_MAP_CACHE = {"mtime": None, "map": {}}
+# Known tier vocabulary. Also an ordering (higher == more privileged); kept for
+# validating a mapped value. It no longer CLAMPS — see _tier_for.
+_TIER_RANK = {"other": 0, "team": 1, "owner": 2}
+
+_TIER_MAP_CACHE = {"ident": None, "map": {}}
+
+
+def _has_above_local(cached) -> bool:
+    """True if the cached map grants anyone a tier ABOVE this node's LOCAL_TIER."""
+    local_rank = _TIER_RANK.get(LOCAL_TIER, _TIER_RANK["owner"])
+    return any(_TIER_RANK.get(v, 0) > local_rank for v in cached.values())
+
+
+def _stale_safe(cached):
+    """Project a STALE cached map onto the fail-closed side in BOTH directions.
+
+    The cache is deliberately preserved across a read error so a transient
+    mid-write cannot fail-OPEN a down-tiered sender back to LOCAL_TIER. That
+    reasoning holds only for entries at or below LOCAL_TIER. Once the map can
+    also grant a tier ABOVE LOCAL_TIER, replaying the cache verbatim keeps an
+    ESCALATION alive on a file the owner may have just deleted to revoke it —
+    so deleting access.json would not actually revoke anything.
+
+    Drop the above-LOCAL_TIER entries (those senders fall back to LOCAL_TIER)
+    and keep the rest. A legitimately-granted sender is briefly demoted while
+    the file is unreadable and is restored on the next successful read; an
+    unrevoked escalation is not left standing. Transient demotion is the safe
+    direction — the module already fails closed to "team" on a bad LOCAL_TIER."""
+    local_rank = _TIER_RANK.get(LOCAL_TIER, _TIER_RANK["owner"])
+    return {k: v for k, v in cached.items() if _TIER_RANK.get(v, 0) <= local_rank}
 
 
 def _load_tier_map():
@@ -514,11 +637,22 @@ def _load_tier_map():
     tradeoff — the map floor never drops on a transient fault)."""
     path = _ag2space_access_path()
     try:
-        mt = os.path.getmtime(path)
+        st = os.stat(path)
     except OSError:
         # Absent/unstattable → keep last-known-good (initially {} before any load).
-        return _TIER_MAP_CACHE["map"]
-    if mt == _TIER_MAP_CACHE["mtime"]:
+        return _stale_safe(_TIER_MAP_CACHE["map"])
+    # Cache identity is (mtime_ns, size, inode), NOT float mtime. A float mtime
+    # collides under a same-second rewrite and can be restored outright with
+    # os.utime, which would serve a REVOKED grant from cache — reproduced on
+    # #2584 (rewrite to {"tierMap":{}}, restore st_mtime_ns, still resolved owner).
+    ident = (st.st_mtime_ns, st.st_size, st.st_ino)
+    # Belt-and-braces: never serve an ABOVE-LOCAL grant from cache without a fresh
+    # read. Identity can still be forged deliberately; a revoked escalation must not
+    # survive that. Costs one small read per call only while an escalation is
+    # cached — discord's loader has no cache at all and re-reads every message.
+    if ident == _TIER_MAP_CACHE["ident"] and not _has_above_local(_TIER_MAP_CACHE["map"]):
+        # File present and UNCHANGED — this cache is current, not stale. Return it
+        # verbatim: projecting here would drop a legitimate up-tier on every call.
         return _TIER_MAP_CACHE["map"]
     try:
         with open(path) as f:
@@ -531,31 +665,46 @@ def _load_tier_map():
     except Exception:
         # Malformed / mid-write → keep last-known-good; don't advance mtime so a
         # later successful read of the fixed file is still picked up.
-        return _TIER_MAP_CACHE["map"]
-    _TIER_MAP_CACHE["mtime"], _TIER_MAP_CACHE["map"] = mt, tm
+        return _stale_safe(_TIER_MAP_CACHE["map"])
+    _TIER_MAP_CACHE["ident"], _TIER_MAP_CACHE["map"] = ident, tm
     return tm
-
-
-# Privilege ordering — a higher rank is MORE privileged. Used to clamp a mapped
-# tier so the owner file can only ever DOWN-tier (never escalate above the node's
-# own default), keeping the "map only down-tiers named senders" safety invariant
-# true in code rather than only in the comment.
-_TIER_RANK = {"other": 0, "team": 1, "owner": 2}
 
 
 def _tier_for(user_id):
     """Resolve the access_tier for a task's broker-attested sender.
 
-    A listed sender gets their mapped tier, CLAMPED to <= LOCAL_TIER: the map can
-    down-tier a sender below this node's default but never raise them above it, so
-    a compromised/misconfigured access.json can never ESCALATE. Everyone else
-    (unlisted / no user_id) gets LOCAL_TIER."""
+    An EXPLICITLY LISTED sender gets exactly the tier the owner mapped them to —
+    including a tier ABOVE this node's LOCAL_TIER. That is the point: it lets a
+    SHARED gateway run a least-privilege default (REMOTE_TASK_TIER=team) and name
+    the one sender who is the owner, instead of the only previously-available
+    shape — a blanket `owner` default that every unlisted sender inherits.
+
+    This mirrors the discord and slack bridges, which have always resolved
+    `access_tier = tierMap[sender_id]` with no clamp. The map is LOCAL,
+    owner-owned config with the same trust standing as REMOTE_TASK_TIER itself,
+    and the lookup key is the BROKER-ATTESTED user_id, never a task-body
+    self-claim — so the WIRE still cannot escalate anyone. Only the owner's own
+    local file can, and only for a sender they named explicitly.
+
+    Everyone else (unlisted / no user_id) gets LOCAL_TIER, unchanged: no existing
+    install is silently demoted, and an unknown sender never gains privilege.
+
+    ⚠ CONTRACT — `user_id` MUST stay broker-attested (cold-review note, #2584).
+    The removed clamp used to be a backstop: even if `user_id` had become
+    body-influenced, a mapped tier was still bounded by LOCAL_TIER. With the
+    clamp gone, "`user_id` is the broker-written Matrix sender, never a
+    task-body self-claim" is SOLELY load-bearing for the no-wire-escalation
+    property. It holds today because `user_id` is a broker-writer-side entry in
+    _TASK_FIELDS, serialized beside room_name/sender_name. Any future change
+    that lets a task body influence `user_id` reintroduces wire-controlled
+    escalation — re-add a bound here if that contract is ever weakened.
+    (Deliberately a contract note, not an assert: provenance cannot be checked
+    at runtime — the value is an ordinary string whichever path produced it.)"""
     uid = (user_id or "").strip()
     if uid:
         mapped = _load_tier_map().get(uid)
         if mapped in _TIER_RANK:
-            local_rank = _TIER_RANK.get(LOCAL_TIER, _TIER_RANK["owner"])
-            return mapped if _TIER_RANK[mapped] <= local_rank else LOCAL_TIER
+            return mapped
     return LOCAL_TIER
 
 
@@ -714,6 +863,139 @@ def _http_error_body(e) -> str:
         return (e.read() or b"").decode("utf-8", "replace")
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _read_token_file(path: str) -> str:
+    """The onboarding string from a token file, or "" (missing / unreadable /
+    empty — the caller treats all three as no-rotation). Two accepted shapes:
+    a dotenv-style file carrying a REMOTE_TASK_TOKEN= line (legacy
+    AG2_REMOTE_TOKEN= honored, optional `export `, surrounding quotes
+    stripped), or the raw onboarding string alone on the first non-comment,
+    '='-free line."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    # Collect BOTH alias assignments across the WHOLE file, then apply the
+    # documented precedence REMOTE_TASK_TOKEN > AG2_REMOTE_TOKEN regardless of
+    # line order (review P1: a migration-era env with a stale legacy line
+    # ABOVE the current canonical one made recovery hot-swap back to the stale
+    # legacy secret — first-match-in-file-order inverted startup.sh's
+    # precedence). Last assignment of a repeated key wins, matching shell
+    # sourcing semantics.
+    found: dict = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        for key in ("REMOTE_TASK_TOKEN", "AG2_REMOTE_TOKEN"):
+            if line.startswith(key + "="):
+                found[key] = line[len(key) + 1:].strip().strip("'\"")
+    for key in ("REMOTE_TASK_TOKEN", "AG2_REMOTE_TOKEN"):
+        if found.get(key):
+            return found[key]
+    for line in text.splitlines():
+        line = line.strip()
+        if line and "=" not in line and not line.startswith("#"):
+            return line
+    return ""
+
+
+def _read_token_file_url(path: str) -> str:
+    """The REMOTE_TASK_URL (legacy AG2_REMOTE_URL) from a SPLIT-layout token
+    file, or "" if absent/unreadable. The combined `url|secret` form embeds the
+    URL (extracted by _parse_onboarding_token), but a split file (bare
+    REMOTE_TASK_TOKEN + a separate REMOTE_TASK_URL line) does not — and
+    _read_token_file discards that URL. The reload path needs it so a split file
+    rewritten by connect to a DIFFERENT gateway is caught by the same
+    cross-gateway guard the combined form already gets; otherwise a re-onboard
+    to a new gateway would hot-swap the new bearer onto the OLD running URL
+    (the exact credential-boundary split the guard exists to prevent)."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    found: dict = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        for key in ("REMOTE_TASK_URL", "AG2_REMOTE_URL"):
+            if line.startswith(key + "="):
+                found[key] = line[len(key) + 1:].strip().strip("'\"")
+    return found.get("REMOTE_TASK_URL") or found.get("AG2_REMOTE_URL") or ""
+
+
+def _reload_rotated_token() -> bool:
+    """Re-read TOKEN_FILE and swap in a rotated SECRET. True only when a
+    usable, DIFFERENT secret was found for the SAME gateway: the TOKEN global
+    and the shared _AUTH_HEADERS dict are updated in place, so the poll loop,
+    event channel, and card poster resume with the new bearer without a
+    process restart.
+
+    A rotation NEVER moves URL. The long-lived consumers (EventChannel,
+    CardPoster) captured the base URL at construction, so honoring a new URL
+    here would split the process across gateways — the poller on the new
+    base, SSE + card posts still on the old one, now carrying the freshly
+    rotated bearer to the old endpoint (review P1). Changing gateways is a
+    reconfiguration, not a key rotation: refuse it loudly and keep waiting —
+    a restart picks the new URL up through the normal import-time parse."""
+    global TOKEN
+    if not TOKEN_FILE:
+        return False
+    raw = _read_token_file(TOKEN_FILE)
+    if not raw:
+        return False
+    # Route through the SAME parse used at import time (_parse_onboarding_token)
+    # so a rotation written in the URL-encoded form (https://gw/relay%7C<secret>,
+    # the desktop connect flow) splits correctly. A literal "|" split treated the
+    # encoded form as a bare secret and set the bearer to the whole URL string,
+    # so a valid rotation kept failing auth (regression caught on #2323 once
+    # #2307's %7C onboarding parser reached main).
+    url_from_token, secret = _parse_onboarding_token(raw)
+    # The URL guard must cover BOTH layouts: the combined url|secret form
+    # (url_from_token) AND the split form (bare secret + a separate
+    # REMOTE_TASK_URL line, which _read_token_file drops). Without the split
+    # fallback, a split file re-pointed by connect to a new gateway sends the
+    # new bearer to the OLD running URL — the credential split this guards.
+    file_url = (url_from_token or _read_token_file_url(TOKEN_FILE)).rstrip("/")
+    if file_url and file_url != URL:
+        _log(f"token file names a DIFFERENT gateway ({file_url}) "
+             f"than the running one ({URL}) — a URL change is not hot-swappable; "
+             "restart the bridge to move gateways")
+        return False
+    if not secret or secret == TOKEN:
+        return False
+    TOKEN = secret
+    _AUTH_HEADERS["Authorization"] = f"Bearer {TOKEN}"
+    return True
+
+
+def _recover_auth(code: int) -> bool:
+    """Auth-rejection recovery. An immediate re-read catches a rotation that
+    already happened (the bridge lagged behind a re-onboard); otherwise hold
+    in a slow re-check loop — keeping the poller singleton heartbeated so a
+    supervisor sees ONE live waiting process instead of a crash-loop — until
+    the token file rotates. Returns True once a rotated token is live; False
+    when no TOKEN_FILE is configured (caller keeps the historical FATAL
+    exit)."""
+    if _reload_rotated_token():
+        _log("auth rejected but token file already rotated — resuming with new token")
+        return True
+    if not TOKEN_FILE:
+        return False
+    _log(f"gateway auth rejected (HTTP {code}) — waiting for token rotation in "
+         f"{TOKEN_FILE} (re-check every {AUTH_RECHECK_INTERVAL}s)")
+    while True:
+        _emit_gateway_status(False,
+                             error=f"auth rejected HTTP {code} — waiting for re-connect",
+                             backoff_s=AUTH_RECHECK_INTERVAL)
+        time.sleep(AUTH_RECHECK_INTERVAL)
+        if not _heartbeat_singleton():
+            sys.exit("FATAL: lost poller singleton while waiting for token rotation")
+        if _reload_rotated_token():
+            _log("rotated token detected — resuming")
+            return True
 
 
 def _post_task_ack(tid: str) -> bool:
@@ -1086,6 +1368,11 @@ def _write_owner_activity(task: dict, sender_tier: str | None = None) -> None:
     supervisor escalation target). `sender_tier` is passed in by `_write_task` so
     the task tier and this gate share a SINGLE resolution (no divergence, no
     double tierMap read); a direct caller can omit it and we resolve here. For an
+    Since the map may now grant a tier ABOVE LOCAL_TIER, the mirror case also
+    holds: a sender explicitly mapped to owner on a least-privilege node DOES
+    register owner presence — that is the point of naming them owner. Tests 23/24
+    pin both directions, because a refactor that regated this on LOCAL_TIER would
+    silently stop recording the real owner's activity. For an
     unlisted sender `_tier_for` returns LOCAL_TIER, so the single-owner case is
     unchanged. Never trusts the gateway's own claim (it is outside the trust
     boundary) — only the broker-attested user_id keyed against the owner's LOCAL
@@ -1094,6 +1381,7 @@ def _write_owner_activity(task: dict, sender_tier: str | None = None) -> None:
     as discord-bridge.write_owner_activity so the proactive-loop reader is
     transport-agnostic. Best-effort — never blocks task intake."""
     if sender_tier is None:
+        # user_id is broker-attested here — see the CONTRACT note in _tier_for.
         sender_tier = _tier_for(task.get("user_id"))
     if sender_tier != "owner":
         return
@@ -1257,6 +1545,7 @@ def _write_task(task: dict) -> str | None:
     # Resolve ONCE and reuse for both the task tier AND the owner-activity gate
     # below, so the two decisions can never diverge (a single source of truth,
     # no double read of the tierMap).
+    # user_id is broker-attested here — see the CONTRACT note in _tier_for.
     sender_tier = _tier_for(task.get("user_id"))
     lines.append(f"access_tier: {sender_tier}")
     # #2267 parity, second half: the other bridges append the in-band security
@@ -1579,7 +1868,8 @@ def _maybe_start_event_channel() -> None:
         from .event_inbox import EventInbox
         from .event_channel import EventChannel
         inbox = EventInbox(str(_STATE / "event-inbox.db"))
-        ch = EventChannel(inbox, URL, {"Authorization": f"Bearer {TOKEN}"}, log=_log)
+        ch = EventChannel(inbox, URL, _AUTH_HEADERS, log=_log,
+                          auth_retry=bool(TOKEN_FILE))
         threading.Thread(target=ch.run, name="sparrow-event-channel", daemon=True).start()
         _EVENT_CHANNEL = ch
         # P1: drain the inbox into the Core's attention (taskify → tasks/) on a
@@ -1598,7 +1888,7 @@ def _maybe_start_event_channel() -> None:
             store = ActionStore(str(_STATE / "human-actions"))
             handler = HandlerChain([DecisionHandler(store, ha_owner, log=_log), handler])
             if ha_room:
-                poster = CardPoster(store, URL, {"Authorization": f"Bearer {TOKEN}"},
+                poster = CardPoster(store, URL, _AUTH_HEADERS,
                                     ha_room, log=_log,
                                     include_a2ui=os.environ.get("SPARROW_HA_A2UI", "")
                                     .strip().lower() in ("1", "true", "yes", "on"))
@@ -1681,6 +1971,9 @@ def main() -> None:
             _emit_gateway_status(True)
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
+                if _recover_auth(e.code):
+                    backoff = 1
+                    continue
                 _emit_gateway_status(False, error=f"auth rejected HTTP {e.code}")
                 sys.exit(f"FATAL: gateway auth rejected (HTTP {e.code}) — check REMOTE_TASK_TOKEN.")
             _log(f"poll HTTP {e.code} — backing off {backoff}s")

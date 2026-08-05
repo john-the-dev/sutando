@@ -48,6 +48,7 @@ Machine-readable ownership and lifecycle metadata lives in
 - [Workspace two-space model](workspace-design.md)
 - [Core health verdict + severity gate](design-core-health-verdict.md)
 - [Pointer Teacher design](pointer-teacher-design.md)
+- [Credential resolution by capability (G8)](design-credential-capability-resolver.md)
 - [ADR 0001: Pointer Teacher brain](adr/0001-pointer-teacher-brain.md)
 
 ## Documentation contract
