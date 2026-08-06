@@ -125,12 +125,29 @@ The policy is a **capability × tier matrix** (data, reviewable), not prose:
 | credential **read**     | allow | **deny**       | deny  | deny           |
 | write-reversible        | allow | delegate       | deny  | deny           |
 | write-irreversible†     | allow‡| needs-auth     | deny  | deny           |
-| financial / destructive | never (prohibited — human only, all tiers) |||
+| purchase (goods/svc)◊   | needs-auth◊ | deny       | deny  | deny           |
+| financial-move / cred-entry¶ | never — human-only, **all tiers incl. owner** |||
 
 \* other-tier reads are information-*about-Sutando* only.
-† send / merge / publish / config-write / purchase.
-‡ owner "allow" still records; some (financial trades, credential entry) stay
-  human-only per the standing prohibited list regardless of tier.
+† send / merge / publish / config-write. (Purchase is its own row ◊; financial
+  *moves* are ¶ — the three are disjoint so no capability has two decisions.)
+‡ owner "allow" is **confirm-gated, not unconditional**: an irreversible action
+  requires explicit confirmation unless a standing approval covers it
+  (`CLAUDE.md:7-9`). The audit row is written either way.
+◊ **purchase** of goods/services on a payment method already on file is *not*
+  prohibited — it is the explicit-permission case: owner = `needs-authorization`
+  (a per-purchase confirm, satisfiable by an owner grant or a standing approval),
+  matching `CLAUDE.md`'s checkout-with-confirmation contract. Non-owner tiers
+  `deny`. This row exists specifically so `purchase` has exactly one decision and
+  is not swept under the ¶ prohibition below.
+¶ **financial-move / credential-entry** is the enumerated human-only set:
+  executing a financial *trade or transfer of funds* (buy/sell/convert/withdraw/
+  deposit/send securities, crypto, or money), and *entering* financial
+  credentials, card/account/SSN/government-ID, passwords, or API keys. `never`
+  for **all tiers including owner** — the layer directs the human to do it rather
+  than doing it itself. Source: the standing **Prohibited** list in Sutando's
+  operating rules (these actions stay human-only regardless of tier or explicit
+  instruction). Distinct from ◊ `purchase`, which is permitted-with-confirmation.
 § **`credential use` ≠ `credential read`, and this distinction is the whole
   point of the layer.** `use` = the mediator exercises a credential on the
   principal's behalf (signs the request, injects the key server-side) and
