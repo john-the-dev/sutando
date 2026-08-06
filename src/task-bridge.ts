@@ -15,7 +15,11 @@ import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { resolveWorkspace } from './workspace_default.js';
 import { claudeHomePath } from './util_paths.js';
 import { recordConversation, recordSessionBoundary } from './conversation-store.js';
-import { selectBackend, type TaskDelegationService } from './task-delegation.js';
+import {
+	emitTaskProcessed,
+	selectBackend,
+	type TaskDelegationService,
+} from './task-delegation.js';
 
 const REPO_DIR = resolveWorkspace();
 const TASK_DIR = join(REPO_DIR, 'tasks');
@@ -35,7 +39,12 @@ function writeOwnerActivity(channel: string, summary: string): void {
 			channel,
 			summary: summary.slice(0, 80),
 		};
-		const tmp = OWNER_ACTIVITY_FILE + '.tmp';
+		// Per-PID staging: last-owner-activity.json is written by five processes
+		// (this task-bridge + the sparrow/discord/slack/telegram bridges). A shared
+		// '.tmp' name lets two concurrent writers truncate and interleave the same
+		// temp file, so the rename can publish torn JSON. A per-PID temp is never
+		// shared; renameSync maps to an atomic rename(2). (sonichi/sutando#2222)
+		const tmp = `${OWNER_ACTIVITY_FILE}.${process.pid}.tmp`;
 		writeFileSync(tmp, JSON.stringify(payload));
 		renameSync(tmp, OWNER_ACTIVITY_FILE);
 	} catch (e) {
@@ -55,7 +64,7 @@ function archiveFile(srcPath: string, kind: 'tasks' | 'results', taskId: string)
 		const destDir = join(REPO_DIR, kind, 'archive', ym);
 		mkdirSync(destDir, { recursive: true });
 		renameSync(srcPath, join(destDir, `${taskId}.txt`));
-	} catch (err) {
+	} catch {
 		try { unlinkSync(srcPath); } catch { /* ignore */ }
 	}
 }
@@ -68,6 +77,50 @@ function archiveFile(srcPath: string, kind: 'tasks' | 'results', taskId: string)
 const _delegation: TaskDelegationService = selectBackend(TASK_DIR, RESULT_DIR, archiveFile);
 
 function ts(): string { return new Date().toISOString().slice(11, 23); }
+
+/** U+200B — zero-width space; not whitespace, so it survives .trimStart(). */
+const _ZWSP = '​';
+// Kept in lockstep with local_task_protocol.KNOWN_HEADER_KEYS (the Python
+// guard's source of truth). TS can't import the Python tuple, so this list is
+// the mirror; injection-guard-sweep asserts parity so drift fails CI. Synced to
+// the full 34-key set on the 2026-07-13 main merge (main widened the Python side
+// from 14 → 34; the TS guard must defang the same keys or forged interaction_type:
+// / attachments: / media_form: lines slip through here).
+const _HEADER_KEYS = [
+	'id', 'timestamp', 'task', 'source', 'access_tier', 'user_id',
+	'channel_id', 'priority', 'interaction_type', 'source_message_id',
+	'channel_name', 'guild_name', 'attempts', 'sender_name', 'room_name',
+	'parent_message_id', 'reply_chain_ids', 'reminder', 'author_name', 'author_id', 'chat_id',
+	'thread_ts', 'reply_to_event', 'reply_to_me', 'callSid', 'caller',
+	'from', 'call_sid', 'hint', 'instructions', 'transcript',
+	'content_modalities', 'media_form', 'attachments', 'platform_card',
+];
+const _HEADER_RE = new RegExp(`^(?:${_HEADER_KEYS.join('|')})\\s*:`, 'i');
+const _FENCE_RE = /^={3,}/;
+// Every separator str.splitlines() / universal-newline readers treat as a
+// line boundary — fold ALL to '\n' so the guard's line-set matches the
+// reader's (else \v \f \x1c-\x1e \x85 \u2028 \u2029 smuggle a forged line past it).
+const _LINE_SEP_RE = /\r\n|[\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]/g;
+
+/**
+ * Defang user-supplied content before embedding in a task file.
+ *
+ * Prefixes any line that looks like a task-file header field or a
+ * ===FENCE=== with U+200B so structural injection (access_tier forge,
+ * system-instruction fence) cannot succeed. Idempotent; folds every str.splitlines() separator (not just CR/CRLF).
+ * TypeScript mirror of src/task_body_guard.py:confine_user_content().
+ */
+function confineUserContent(text: string): string {
+	if (!text) return text;
+	const normalized = text.replace(_LINE_SEP_RE, '\n');
+	return normalized.split('\n').map(line => {
+		const probe = line.trimStart();
+		if ((_HEADER_RE.test(probe) || _FENCE_RE.test(probe)) && !line.startsWith(_ZWSP)) {
+			return _ZWSP + line;
+		}
+		return line;
+	}).join('\n');
+}
 
 /**
  * Write a chat-path task file so the dashboard tracks chat-originated work.
@@ -93,7 +146,7 @@ export function writeChatTask(taskDescription: string): string {
 		`user_id: ${process.env.SUTANDO_DM_OWNER_ID || 'chat-local'}`,
 		`access_tier: owner`,
 		`priority: normal`,
-		`task: ${taskDescription}`,
+		`task: ${confineUserContent(taskDescription)}`,
 		'',
 	].join('\n');
 	// Local mode: same synchronous write as always. Relay mode: fire-and-log —
@@ -349,7 +402,7 @@ export const workTool: ToolDefinition = {
 				contextBlock =
 					`\n\n--- recent voice transcript (may contain ASR errors; if the task above ` +
 					`seems garbled or doesn't match this, infer the true intent from it or ask to ` +
-					`confirm before acting) ---\n${recent}\n`;
+					`confirm before acting) ---\n${confineUserContent(recent)}\n`;
 			}
 		} catch { /* best effort — never block delegation on context attach */ }
 		const content =
@@ -357,11 +410,18 @@ export const workTool: ToolDefinition = {
 			`timestamp: ${timestamp}\n` +
 			`source: voice\n` +
 			`interaction_type: realtime_audio\n` +
+			// interaction-model 4D, step 1.5 (scope A): stamp the media-form axis
+			// on live-plane tasks. Additive/observability — routing still keys on
+			// _isVoiceTask (source/channel_id); scope B makes this the canonical
+			// plane-routing signal. `live_stream` = the payload originates from a
+			// continuous real-time session (media frames stay out-of-band per the
+			// three-channel rule; this is provenance, not stream bytes).
+			`media_form: live_stream\n` +
 			`channel_id: local-voice\n` +
 			`user_id: ${ownerId}\n` +
 			`access_tier: owner\n` +
 			`priority: urgent\n` +
-			`task: ${task}${contextBlock}\n`;
+			`task: ${confineUserContent(task)}${contextBlock}\n`;
 		await _delegation.submitTask(taskId, content);
 		// Resolve per-task timeout. 0 → no timeout. Negative or NaN → default.
 		// Cap at 6 hours to prevent runaway pending-state if the voice agent
@@ -511,8 +571,7 @@ export function startContextDropWatcher(onContextDrop: (content: string) => void
 					// `task:` last so the (multi-line) context-drop body can't
 					// forge header fields. Same shape as the voice/chat task
 					// writers and agent-api.py's /task endpoint per PR #982.
-					writeFileSync(
-						join(TASK_DIR, `${taskId}.txt`),
+					const taskContent =
 						`id: ${taskId}\n` +
 						`timestamp: ${new Date().toISOString()}\n` +
 						`source: context-drop\n` +
@@ -521,8 +580,12 @@ export function startContextDropWatcher(onContextDrop: (content: string) => void
 						`user_id: ${ownerId}\n` +
 						`access_tier: owner\n` +
 						`priority: normal\n` +
-						`task: User dropped context via hotkey. Process this:\n${content}\n`,
+						`task: User dropped context via hotkey. Process this:\n${confineUserContent(content)}\n`;
+					writeFileSync(
+						join(TASK_DIR, `${taskId}.txt`),
+						taskContent,
 					);
+					emitTaskProcessed(taskContent);
 					unlinkSync(CONTEXT_DROP_FILE);
 					// Also inject into Gemini if available
 					onContextDrop(content);
@@ -757,7 +820,26 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 			for (const file of files) {
 				if (_deliveredResults.has(file)) continue;
 				const path = join(RESULT_DIR, file);
-				const result = readFileSync(path, 'utf-8').trim();
+				// `[dm-only]` is a Discord-routing privacy marker (see
+				// src/result_markers.py) — on the Python bridge side it suppresses
+				// any [channel:] redirect on the same body (so a body carrying
+				// private data can't be redirected out to a shared channel). It does
+				// NOT by itself force DM delivery — routing to the owner's DM stays
+				// the consumer's job (for a proactive-* result the default
+				// destination already is the owner's DM). It has no meaning for the
+				// voice/task path, so strip it on read: this keeps voice from ever
+				// speaking "dm only" and keeps it out of logs. Parity with Python
+				// parse_markers(), which strips ONLY a STANDALONE marker — one alone
+				// on its line. An inline mention is prose (a result DISCUSSING the
+				// marker) and rewriting it silently corrupts owner-facing text:
+				//   in  "- #2170 [dm-only]: closes the leak vector"
+				//   out "- #2170 : closes the leak vector"
+				// The old expression here was /\[dm-only\]\s*/gi, which stripped
+				// every occurrence and made this consumer disagree with every
+				// text bridge after the Python side was narrowed.
+				const result = readFileSync(path, 'utf-8')
+					.replace(/^[ \t]*\[dm-only\][ \t]*\r?\n?/gim, '')
+					.trim();
 				if (!result) continue;
 				const taskId = file.replace('.txt', '');
 
@@ -902,6 +984,15 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 				if (!_shouldFallthrough(file)) continue;
 				if (result) {
 					console.log(`${ts()} [TaskBridge] Result ${file}: ${result.slice(0, 100)}`);
+					// Delivery affinity (owner-hit 2026-07-09 05:04): a task that
+					// arrived via a REMOTE bridge (gateway/discord/telegram/slack —
+					// anything not voice-origin) has its result delivered BY that
+					// bridge. Voice may narrate a copy for call continuity, but
+					// must NOT archive the files — archiving here starved the
+					// gateway and the owner's room reply silently never went out
+					// ("do we have a room event?" answered on-call only). Foreign
+					// results: narrate once (in-memory dedup), leave files alone.
+					const foreignOrigin = file.startsWith('task-') && !taskId.startsWith('task-chat-') && !_isVoiceTask(taskId);
 					// proactive-* files reach this fallthrough only to be SPOKEN
 					// (onResult below). They are NOT tasks — gate the two
 					// task-registration side-effects (_sendTaskStatus + POST
@@ -923,17 +1014,21 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 							}).catch(() => {});
 						} catch {}
 					}
-					setTimeout(() => {
-						const taskIdFromFile = path.split('/').pop()!.replace('.txt', '');
-						archiveFile(path, 'results', taskIdFromFile);
-						// Also archive the originating task file so get_task_status
-						// stops counting it as "queued" — voice agent reads
-						// tasks/*.txt directly and otherwise sees stale files
-						// (Chi reported "task done in UI but queued in voice"
-						// on 2026-05-04 with 32 stale files in tasks/).
-						const taskFile = join(TASK_DIR, `${taskIdFromFile}.txt`);
-						if (existsSync(taskFile)) archiveFile(taskFile, 'tasks', taskIdFromFile);
-					}, 10_000);
+					if (!foreignOrigin) {
+						setTimeout(() => {
+							const taskIdFromFile = path.split('/').pop()!.replace('.txt', '');
+							archiveFile(path, 'results', taskIdFromFile);
+							// Also archive the originating task file so get_task_status
+							// stops counting it as "queued" — voice agent reads
+							// tasks/*.txt directly and otherwise sees stale files
+							// (Chi reported "task done in UI but queued in voice"
+							// on 2026-05-04 with 32 stale files in tasks/).
+							const taskFile = join(TASK_DIR, `${taskIdFromFile}.txt`);
+							if (existsSync(taskFile)) archiveFile(taskFile, 'tasks', taskIdFromFile);
+						}, 10_000);
+					} else {
+						console.log(`${ts()} [TaskBridge] ${taskId} is foreign-origin (remote bridge delivers); narrated only, files left for owner bridge`);
+					}
 				}
 			}
 		} catch (err) {

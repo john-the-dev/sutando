@@ -9,8 +9,9 @@
  */
 
 import { createServer, request as httpRequest } from 'node:http';
+import { connect as netConnect } from 'node:net';
 import { writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readTmuxStatus } from './tmux-status.js';
 import { CHAT_HTML } from './chat-ui.js';
@@ -21,6 +22,13 @@ const HTTP_PORT = Number(process.env.CLIENT_PORT) || 8080;
 const HTTP_HOST = process.env.CLIENT_HOST || '0.0.0.0'; // '0.0.0.0' binds to all interfaces for EC2
 const WS_PORT = Number(process.env.PORT) || 9900;
 const DEFAULT_WS_URL = `ws://localhost:${WS_PORT}`;
+// Opt-in LAN sharing. The voice WS (WS_PORT) binds loopback only, so a browser
+// on another device on the same network can't reach it. When enabled, this
+// server proxies WS_PORT through its own LAN-reachable HTTP port at /ws — so a
+// LAN peer reaches the voice agent without WS_PORT itself being exposed. OFF by
+// default: enabling it lets any device on the network use this core's agent
+// (the voice WS has no auth), so it's an explicit choice per network.
+const LAN_SHARE = /^(1|true|yes|on)$/i.test(process.env.SUTANDO_LAN_SHARE || '');
 
 // Workspace-relative paths use resolveWorkspace() (closes #763). Skills paths
 // (non-runtime, code-adjacent) remain anchored to the repo root.
@@ -29,6 +37,60 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TASK_DIR = join(WORKSPACE_DIR, 'tasks');
 const STATE_DIR = join(WORKSPACE_DIR, 'state');
 const SUBSCRIPTIONS_PATH = join(REPO_ROOT, 'skills/subscription-scanner/state/subscriptions.json');
+
+// ─── Browser voice-transport delivery ──────────────────────────────────────
+//
+// The page loads src/web-voice-transport.ts — the canonical transport — as a
+// plain <script>. Getting real TypeScript into the browser needs a build step,
+// and the two runtime modes need different ones:
+//
+//   BUNDLED (packaged desktop app): this file IS dist/web-client.js, running
+//     under the pinned node with no tsx and no devDependencies. It serves the
+//     prebuilt dist/web-voice-transport.browser.js that build:bundle produced.
+//     A missing artifact is a PACKAGING ERROR — 503, never a silent fallback.
+//
+//   SOURCE (tsx src/web-client.ts): devDependencies are present, so the
+//     transport is compiled on demand from the TypeScript and cached in memory
+//     for the process. Compiling rather than reading dist/ is deliberate — it
+//     is what guarantees source mode cannot serve a stale artifact left behind
+//     by an old build:bundle run.
+//
+// Distinguishing the modes by where this module is running from is exact:
+// esbuild writes the bundle to dist/, tsx runs it from src/.
+const RUNNING_BUNDLED = basename(dirname(fileURLToPath(import.meta.url))) === 'dist';
+const BROWSER_TRANSPORT_ARTIFACT = 'web-voice-transport.browser.js';
+const BROWSER_TRANSPORT_ROUTE = '/web-voice-transport.js';
+const BROWSER_TRANSPORT_DIST = join(REPO_ROOT, 'dist', BROWSER_TRANSPORT_ARTIFACT);
+let _browserTransportCache: string | null = null;
+
+/**
+ * Resolve the browser transport JS for the current mode. Throws with a
+ * diagnostic message rather than returning a fallback: there is no second
+ * implementation to fall back TO, so a silent empty response would surface as
+ * an unexplained dead Connect button.
+ */
+async function loadBrowserTransport(): Promise<string> {
+	if (_browserTransportCache) return _browserTransportCache;
+
+	if (RUNNING_BUNDLED) {
+		if (!existsSync(BROWSER_TRANSPORT_DIST)) {
+			throw new Error(
+				`bundled mode: ${BROWSER_TRANSPORT_ARTIFACT} missing from ${dirname(BROWSER_TRANSPORT_DIST)} — ` +
+					'desktop packaging error (npm run build:bundle did not run or did not ship this artifact)',
+			);
+		}
+		_browserTransportCache = readFileSync(BROWSER_TRANSPORT_DIST, 'utf8');
+		return _browserTransportCache;
+	}
+
+	// Source mode. The specifier is built at runtime so esbuild cannot follow it
+	// when bundling this file — that keeps the esbuild devDependency out of
+	// dist/web-client.js, which must run without a development node_modules.
+	const specifier = ['..', 'scripts', 'browser-transport-build.mjs'].join('/');
+	const mod = await import(new URL(specifier, import.meta.url).href);
+	_browserTransportCache = await mod.buildBrowserTransportSource();
+	return _browserTransportCache!;
+}
 
 const HTML = /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -327,6 +389,21 @@ const HTML = /* html */ `<!DOCTYPE html>
   }
   .task-item:last-child { border-bottom: none; }
   .task-item:hover { background: #1a1a2a; cursor: pointer; }
+  .task-workstream + .task-workstream { margin-top: 7px; }
+  .task-workstream-header {
+    appearance: none; width: 100%; display: flex; align-items: center;
+    justify-content: space-between; gap: 8px; padding: 9px 10px;
+    color: #aeb4ff; background: #11111d; cursor: pointer;
+    border: 1px solid #24243a; border-radius: 8px; font-family: inherit;
+    text-align: left; font-size: 12px;
+    font-weight: 600; letter-spacing: 0.02em;
+  }
+  .task-workstream-header:hover { background: #18182a; border-color: #39395d; }
+  .task-workstream-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .task-workstream-chevron { color: #6f75ba; width: 10px; flex-shrink: 0; }
+  .task-workstream-count { color: #666; font-size: 11px; font-weight: 400; }
+  .task-workstream-tasks { padding-top: 3px; }
+  .task-workstream--collapsed .task-workstream-tasks { display: none; }
   .note-item:hover { background: #1a1a2a; }
   .task-status {
     width: 22px; height: 22px; border-radius: 50%;
@@ -658,7 +735,7 @@ const HTML = /* html */ `<!DOCTYPE html>
   </div>
   <video id="vision-preview" autoplay muted playsinline style="display:block; width: 100%; max-height: 180px; background:#000; border-radius:6px;"></video>
 </div>
-<input type="text" id="wsUrl" value="${DEFAULT_WS_URL}" />
+<input type="text" id="wsUrl" value="" placeholder="${DEFAULT_WS_URL}" />
 <script>
 fetch('http://localhost:7844/stand-identity').then(r=>r.json()).then(s=>{
   if(s.name){
@@ -789,6 +866,7 @@ let INPUT_RATE  = 16000;
 let OUTPUT_RATE = 24000;
 const CAPTURE_BUF = 2048;
 const WS_PORT = ${WS_PORT};
+const LAN_SHARE = ${LAN_SHARE ? 'true' : 'false'};
 
 // Auto-detect WebSocket URL from current hostname
 function getDefaultWsUrl() {
@@ -797,6 +875,14 @@ function getDefaultWsUrl() {
   // If HTTPS, use /ws path through nginx proxy; otherwise direct port
   if (window.location.protocol === 'https:') {
     return protocol + '//' + hostname + '/ws';
+  }
+  const isLoopback = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
+  if (!isLoopback && LAN_SHARE) {
+    // Served to a LAN peer AND LAN sharing is on: the voice WS port is
+    // loopback-only, so route through the /ws proxy on this LAN-reachable HTTP
+    // port. (Only when the proxy actually exists — otherwise fall through to the
+    // direct port so trusted remote deployments with a reachable WS port work.)
+    return protocol + '//' + window.location.host + '/ws';
   }
   return protocol + '//' + hostname + ':' + WS_PORT;
 }
@@ -869,6 +955,12 @@ function initRemoteToggle() {
       });
     } catch {}
   });
+  // Short audible cue when the agent invokes a tool/core (owner ask
+  // 2026-07-09) — a subtle "the answer is grounded" signal. Distinct pitch
+  // per kind: research (cloud lookup) / work (local core) / tool (inline).
+  _sseSource.addEventListener('tool-cue', function(e) {
+    try { playToolCue(String(e.data || '').trim()); } catch {}
+  });
   _sseSource.onerror = () => setTimeout(() => initRemoteToggle(), 5000);
 }
 initRemoteToggle();
@@ -879,6 +971,41 @@ document.addEventListener('visibilitychange', () => {
 // ─── State ────────────────────────────────────────────────
 let ws = null;
 let audioCtx = null;
+// Play a short, low-volume Web Audio blip to signal a tool/core invocation
+// (owner ask 2026-07-09). Reuses the AudioContext created on the call's user
+// gesture, so it's already running during a voice session. Pitch/shape differ
+// by kind so the user can tell a cloud research lookup from a local-core
+// handoff by ear alone. Fire-and-forget: never blocks or gates the tool call.
+function playToolCue(kind) {
+  try {
+    if (!audioCtx) { try { audioCtx = new AudioContext(); } catch (e) { return; } }
+    if (audioCtx.state === 'suspended') { try { audioCtx.resume(); } catch (e) {} }
+    // [freq Hz, startOffset s, duration s] steps. Kept <120ms total, gain low
+    // so the blip sits under speech without masking it. Retune here freely.
+    var seqs = {
+      research: [[720, 0.0, 0.05], [1080, 0.06, 0.06]], // two rising notes — reaching out to the cloud
+      work:     [[500, 0.0, 0.11]],                     // one low note — handing off to local core
+      tool:     [[820, 0.0, 0.045]]                     // short mid tick — inline tool
+    };
+    var seq = seqs[kind] || seqs.tool;
+    var vol = 0.05; // "not too loud" (owner)
+    var now = audioCtx.currentTime;
+    seq.forEach(function(step) {
+      var freq = step[0], t0 = now + step[1], dur = step[2];
+      var osc = audioCtx.createOscillator();
+      var g = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      // Fast attack, exponential decay — avoids the click of a hard on/off edge.
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(vol, t0 + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(g); g.connect(audioCtx.destination);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.02);
+    });
+  } catch (e) {}
+}
 let micStream = null;
 let processor = null;
 let connected = false;
@@ -1058,6 +1185,7 @@ function setStatus(text, state) {
 const PERSIST_KEY_TASKS = 'sutando-taskmap-v1';
 const PERSIST_KEY_EXPAND = 'sutando-expanded-v1';
 const PERSIST_KEY_SHOW_DONE = 'sutando-show-done-v1';
+const PERSIST_KEY_WORKSTREAM_DISPLAY = 'sutando-task-workstream-display-v1';
 // Default-hide done tasks. With Tasks growing to top-30, completed work was
 // crowding out active items and the watcher-glance use case ("what's still
 // running?") got lost. Toggle persists across reloads.
@@ -1093,10 +1221,100 @@ function persistExpanded() {
   try { localStorage.setItem(PERSIST_KEY_EXPAND, JSON.stringify(Array.from(expandedTasks))); } catch {}
 }
 const taskMap = window.taskMap = loadPersistedTaskMap();
+let taskWorkstreamNames = Object.create(null);
+
+function loadTaskWorkstreamDisplayState() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PERSIST_KEY_WORKSTREAM_DISPLAY) || '{}');
+    return {
+      collapsed: new Set(Array.isArray(parsed.collapsed) ? parsed.collapsed : []),
+      seen: new Set(Array.isArray(parsed.seen) ? parsed.seen : []),
+      manual: new Set(Array.isArray(parsed.manual) ? parsed.manual : []),
+    };
+  } catch {
+    return { collapsed: new Set(), seen: new Set(), manual: new Set() };
+  }
+}
+const taskWorkstreamDisplayState = loadTaskWorkstreamDisplayState();
+const collapsedTaskWorkstreams = taskWorkstreamDisplayState.collapsed;
+const seenTaskWorkstreams = taskWorkstreamDisplayState.seen;
+const manuallyCollapsedTaskWorkstreams = taskWorkstreamDisplayState.manual;
+function persistTaskWorkstreamDisplayState() {
+  try {
+    localStorage.setItem(PERSIST_KEY_WORKSTREAM_DISPLAY, JSON.stringify({
+      collapsed: Array.from(collapsedTaskWorkstreams),
+      seen: Array.from(seenTaskWorkstreams),
+      manual: Array.from(manuallyCollapsedTaskWorkstreams),
+    }));
+  } catch {}
+}
+
+function toggleTaskWorkstream(workstreamId) {
+  if (collapsedTaskWorkstreams.has(workstreamId)) {
+    collapsedTaskWorkstreams.delete(workstreamId);
+    manuallyCollapsedTaskWorkstreams.delete(workstreamId);
+  } else {
+    collapsedTaskWorkstreams.add(workstreamId);
+    manuallyCollapsedTaskWorkstreams.add(workstreamId);
+  }
+  persistTaskWorkstreamDisplayState();
+  renderTasks();
+  updateDynamicRegion();
+}
+
+function rememberTaskWorkstreams(workstreams) {
+  if (!Array.isArray(workstreams)) return;
+  workstreams.forEach(function(workstream) {
+    if (workstream && workstream.id && workstream.name) {
+      taskWorkstreamNames[String(workstream.id)] = String(workstream.name);
+    }
+  });
+}
+
+function taskTimeFromRow(row, existing) {
+  if (row.time instanceof Date && !Number.isNaN(row.time.getTime())) return row.time;
+  if (typeof row.time === 'number') {
+    const date = new Date(row.time * 1000);
+    if (!Number.isNaN(date.getTime())) return date;
+  } else if (row.time) {
+    const date = new Date(row.time);
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+  if (existing.time) {
+    const date = existing.time instanceof Date ? existing.time : new Date(existing.time);
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+  return new Date();
+}
+
+function mergeTaskRow(existing, row) {
+  const hasWorkstreamId = Object.prototype.hasOwnProperty.call(row, 'workstream_id');
+  const hasWorkstreamName = Object.prototype.hasOwnProperty.call(row, 'workstream_name');
+  if (row.status === 'working' && row.workstream_id &&
+      !manuallyCollapsedTaskWorkstreams.has(String(row.workstream_id)) &&
+      collapsedTaskWorkstreams.delete(String(row.workstream_id))) {
+    persistTaskWorkstreamDisplayState();
+  }
+  return Object.assign({}, existing, {
+    status: row.status || existing.status || 'done',
+    text: row.text || existing.text || row.id,
+    time: taskTimeFromRow(row, existing),
+    result: row.result || existing.result || '',
+    source: row.source || existing.source || '',
+    workstream_id: hasWorkstreamId ? (row.workstream_id || '') : (existing.workstream_id || ''),
+    workstream_name: hasWorkstreamName ? (row.workstream_name || '') : (existing.workstream_name || ''),
+  });
+}
+
 function updateTask(taskId, status, text, result) {
   const existing = taskMap[taskId] || {};
   const isNew = !existing.status;
-  taskMap[taskId] = { status, text: text || existing.text, time: new Date(), result: result || existing.result || '' };
+  taskMap[taskId] = Object.assign({}, existing, {
+    status,
+    text: text || existing.text,
+    time: existing.time || new Date(),
+    result: result || existing.result || '',
+  });
   // Auto-switch to tasks tab if new task arrives and user is on starter
   if (isNew && window._drActiveTab === 'starter') { switchDRTab('tasks'); }
   // Auto-expand ongoing tasks so the user sees progress, AND newly-finished
@@ -1120,24 +1338,15 @@ new MutationObserver(() => {
   const [verb, idxStr] = a.split(':');
   const idx = idxStr ? parseInt(idxStr, 10) : NaN;
   // Per-task ops ("expand:3") must use the SAME ordering the user actually sees.
-  // The primary #tasks container is display:none — only the dr-content "tasks"
-  // sub-tab is visible, which renders top-10 by time desc with no filter
-  // (line 2308 below). Voice "expand task N" hitting a different list than
-  // what the user can see produces the bug Chi caught — voice targeted a
-  // 3-day-old timeout task because it ranked 3rd in the unsliced filtered
-  // observer list, but the user's "task 3" was a recent done task that
-  // wasn't in the filtered set.
-  const visibleIds = Object.entries(taskMap)
-    .sort((a, b) => b[1].time - a[1].time)
-    .slice(0, 10)
-    .map(([id]) => id);
+  // The primary #tasks container is hidden; use the same grouped ordering as
+  // the visible Tasks tab so workstream headers cannot shift voice numbering.
+  const visibleIds = groupedTaskDisplay(Object.entries(taskMap)).entries.map(([id]) => id);
   // All-tasks ops ("expand"/"collapse" with no index) still use the broader
   // filtered list — "expand all" should reach everything non-done, not just
   // the visible 10.
-  const allIds = Object.entries(taskMap)
-    .filter(([, t]) => showDone || t.status !== 'done')
-    .sort((a, b) => b[1].time - a[1].time)
-    .map(([id]) => id);
+  const allIds = groupedTaskDisplay(
+    Object.entries(taskMap).filter(([, t]) => showDone || t.status !== 'done')
+  ).entries.map(([id]) => id);
   if (Number.isInteger(idx) && idx >= 1 && idx <= visibleIds.length) {
     const targetId = visibleIds[idx - 1];
     if (verb === 'expand') {
@@ -1189,6 +1398,11 @@ function toggleAllTasks() {
   renderTasks();
 }
 document.addEventListener('click', function(e) {
+  const workstreamHeader = e.target.closest && e.target.closest('.task-workstream-header[data-workstream-id]');
+  if (workstreamHeader) {
+    toggleTaskWorkstream(workstreamHeader.dataset.workstreamId);
+    return;
+  }
   // Don't toggle if clicking inside the result text (allow text selection)
   if (e.target.closest && e.target.closest('[id^="result-"]')) return;
   // Don't toggle if the click ended a drag-to-select on the task title.
@@ -1241,6 +1455,75 @@ function summarizeTaskText(raw) {
   return s;
 }
 
+// ─── Workstream-grouped task display helpers ─────────────────
+// Sort once, then build workstream buckets in encounter order. Because the input
+// is newest-first, workstream groups are ordered by latest activity and each
+// group's tasks remain newest-first. The flattened entries array is the
+// canonical numbered display order used by rendering and voice expand:N.
+const UNGROUPED_WORKSTREAM_ID = '__ungrouped__';
+function groupedTaskDisplay(entries, limit) {
+  let chronological = entries.slice().sort(function(a, b) {
+    return b[1].time - a[1].time;
+  });
+  if (Number.isInteger(limit) && limit >= 0) chronological = chronological.slice(0, limit);
+
+  const byWorkstream = new Map();
+  let hasInferredWorkstream = false;
+  chronological.forEach(function(entry) {
+    const task = entry[1] || {};
+    const rawId = task.workstream_id;
+    const hasWorkstream = rawId !== undefined && rawId !== null && String(rawId).trim() !== '';
+    const workstreamId = hasWorkstream ? String(rawId) : UNGROUPED_WORKSTREAM_ID;
+    if (hasWorkstream) hasInferredWorkstream = true;
+    if (!byWorkstream.has(workstreamId)) {
+      const workstreamName = hasWorkstream
+        ? (taskWorkstreamNames[workstreamId] || task.workstream_name || 'Workstream')
+        : 'Ungrouped';
+      byWorkstream.set(workstreamId, { id: workstreamId, name: String(workstreamName), entries: [] });
+    }
+    byWorkstream.get(workstreamId).entries.push(entry);
+  });
+
+  const groups = Array.from(byWorkstream.values());
+  return {
+    grouped: hasInferredWorkstream,
+    groups,
+    entries: groups.reduce(function(all, group) { return all.concat(group.entries); }, []),
+  };
+}
+
+function renderTaskWorkstreamGroups(display, renderEntry) {
+  let defaultsChanged = false;
+  if (display.grouped) {
+    display.groups.forEach(function(group) {
+      if (seenTaskWorkstreams.has(group.id)) return;
+      seenTaskWorkstreams.add(group.id);
+      // Make the whole workstream taxonomy visible at a glance. Completed-only
+      // workstreams start compact; a workstream with current work starts open.
+      if (group.entries.every(function(entry) { return entry[1].status === 'done'; })) {
+        collapsedTaskWorkstreams.add(group.id);
+      }
+      defaultsChanged = true;
+    });
+  }
+  if (defaultsChanged) persistTaskWorkstreamDisplayState();
+  let displayIndex = 0;
+  return display.groups.map(function(group) {
+    const rows = group.entries.map(function(entry) {
+      return renderEntry(entry, displayIndex++);
+    }).join('');
+    if (!display.grouped) return rows;
+    const count = group.entries.length;
+    const collapsed = collapsedTaskWorkstreams.has(group.id);
+    return '<section class="task-workstream' + (collapsed ? ' task-workstream--collapsed' : '') + '">' +
+      '<button type="button" class="task-workstream-header" data-workstream-id="' + esc(group.id) + '" aria-expanded="' + (!collapsed) + '">' +
+      '<span class="task-workstream-title"><span class="task-workstream-chevron">' + (collapsed ? '&#9656;' : '&#9662;') + '</span>' + esc(group.name) + '</span>' +
+      '<span class="task-workstream-count">' + count + (count === 1 ? ' task' : ' tasks') + '</span></button>' +
+      '<div class="task-workstream-tasks">' + rows + '</div></section>';
+  }).join('');
+}
+// ─── End workstream-grouped task display helpers ─────────────
+
 function renderTasks() {
   const container = $('tasks');
   const entries = Object.entries(taskMap);
@@ -1273,8 +1556,8 @@ function renderTasks() {
   // iterating on a party plan) new tasks pushed earlier valuable results out
   // of view within seconds. 30 keeps a longer history visible; localStorage
   // persistence above keeps results from being lost across refreshes.
-  const sorted = visible.sort((a, b) => b[1].time - a[1].time).slice(0, 30);
-  container.innerHTML = sorted.map(([id, t], i) => {
+  const display = groupedTaskDisplay(visible, 30);
+  container.innerHTML = renderTaskWorkstreamGroups(display, ([id, t], i) => {
     const icons = { pending: '&#8987;', working: '&#9881;', done: '&#10003;', error: '&#10007;' };
     const ago = Math.round((Date.now() - t.time) / 1000);
     const timeStr = ago < 60 ? ago + 's ago' : Math.round(ago / 60) + 'm ago';
@@ -1320,11 +1603,11 @@ function renderTasks() {
     const expandChip = hasResult ? '<span class="task-expand">' + (isExpanded ? 'Hide ▾' : 'Show details ▸') + '</span>' : '';
     return '<div class="task-item"' + clickAttr + '>' +
       '<div class="task-status ' + t.status + '">' + (icons[t.status] || '?') + '</div>' +
-      '<span class="' + textClass + '">' + displayText + '</span>' +
+      '<span class="' + textClass + '">' + esc(displayText) + '</span>' +
       '<span class="task-time">' + timeStr + '</span>' +
       expandChip +
       '</div>' + resultHtml + actionsHtml;
-  }).join('');
+  });
 }
 
 // ─── Toast notifications ────────────────────────────────
@@ -1338,6 +1621,62 @@ function showToast(msg) {
   setTimeout(() => { if (el.parentNode) el.remove(); }, 4000);
 }
 const knownTaskIds = new Set(Object.keys(taskMap));
+
+// Hydrate durable history once at startup. The always-on agent API performs
+// inference independently of this page; while it is still backfilling inferred
+// workstreams, re-read the snapshot so tasks move into their canonical groups
+// without a reload. Historical rows are marked known before merging, so the live
+// poll never announces them as newly received work.
+let taskHistoryRetryTimer = null;
+let taskHistoryHydrating = false;
+let taskHistoryInitialLoadComplete = false;
+const taskWorkstreamRefreshRequested = new Set();
+function scheduleTaskHistoryHydration(delayMs) {
+  if (taskHistoryRetryTimer) return;
+  taskHistoryRetryTimer = setTimeout(function() {
+    taskHistoryRetryTimer = null;
+    if (taskHistoryHydrating) {
+      scheduleTaskHistoryHydration(delayMs);
+      return;
+    }
+    hydrateTaskHistory();
+  }, delayMs || 3000);
+}
+async function hydrateTaskHistory() {
+  if (taskHistoryHydrating) return;
+  taskHistoryHydrating = true;
+  if (taskHistoryRetryTimer) {
+    clearTimeout(taskHistoryRetryTimer);
+    taskHistoryRetryTimer = null;
+  }
+  try {
+    const resp = await fetch('/api/task-history');
+    if (!resp.ok) {
+      scheduleTaskHistoryHydration(30000);
+      return;
+    }
+    const data = await resp.json();
+    rememberTaskWorkstreams(data.workstreams);
+    for (const row of (data.tasks || [])) {
+      if (!row || !row.id) continue;
+      knownTaskIds.add(row.id);
+      taskMap[row.id] = mergeTaskRow(taskMap[row.id] || {}, row);
+      if (row.workstream_id) taskWorkstreamRefreshRequested.delete(row.id);
+    }
+    persistTaskMap();
+    renderTasks();
+    updateDynamicRegion();
+    taskHistoryInitialLoadComplete = true;
+    if (data.inference && data.inference.pending) {
+      scheduleTaskHistoryHydration(10000);
+    }
+  } catch {
+    scheduleTaskHistoryHydration(30000);
+  }
+  finally {
+    taskHistoryHydrating = false;
+  }
+}
 
 // ─── Poll agent API for task status ───────────────────────
 let taskPollTimer = null;
@@ -1353,14 +1692,22 @@ function startTaskPolling() {
       for (const t of (data.tasks || [])) {
         apiTasks.add(t.id);
         const existing = taskMap[t.id] || {};
+        if (t.workstream_id) {
+          taskWorkstreamRefreshRequested.delete(t.id);
+        } else if (!existing.workstream_id && !taskWorkstreamRefreshRequested.has(t.id)) {
+          taskWorkstreamRefreshRequested.add(t.id);
+          scheduleTaskHistoryHydration(1000);
+        }
         // Toast for new tasks
         if (!knownTaskIds.has(t.id)) {
           knownTaskIds.add(t.id);
-          const snippet = (t.text || '').slice(0, 60);
-          showToast('<span class="toast-label">Context received</span> ' + snippet);
+          if (taskHistoryInitialLoadComplete) {
+            const snippet = (t.text || '').slice(0, 60);
+            showToast('<span class="toast-label">Context received</span> ' + snippet);
+          }
         }
         // Toast for completed tasks
-        if (t.status === 'done' && existing.status && existing.status !== 'done') {
+        if (taskHistoryInitialLoadComplete && t.status === 'done' && existing.status && existing.status !== 'done') {
           showToast('<span class="toast-label">Done</span> ' + (t.text || t.id).slice(0, 60));
         }
         // Auto-expand working tasks every poll; auto-expand done tasks ONLY
@@ -1376,7 +1723,7 @@ function startTaskPolling() {
         if (t.status === 'done' && existing.status !== 'done' && !expandedTasks.has(t.id) && !userCollapsed) {
           expandedTasks.add(t.id);
         }
-        taskMap[t.id] = { status: t.status, text: t.text, time: new Date(t.time * 1000), result: t.result || existing.result || '', source: t.source || existing.source || '' };
+        taskMap[t.id] = mergeTaskRow(existing, t);
       }
       // Remove tasks no longer in API (stale)
       for (const id of Object.keys(taskMap)) {
@@ -1402,7 +1749,8 @@ function stopTaskPolling() {
   if (taskPollTimer) { clearInterval(taskPollTimer); taskPollTimer = null; }
 }
 
-// Start polling on page load
+// Hydrate history immediately, then keep the lightweight active-task poll.
+hydrateTaskHistory();
 startTaskPolling();
 
 function updateStats() {
@@ -2761,9 +3109,9 @@ function renderTabContent() {
     if (entries.length === 0) {
       container.innerHTML = '<div style="color:#666;font-size:12px;text-align:center;padding:12px">No recent tasks</div>';
     } else {
-      var sorted = entries.sort(function(a,b) { return b[1].time - a[1].time; }).slice(0, 10);
+      var display = groupedTaskDisplay(entries);
       var icons = { pending: '&#8987;', working: '&#9881;', done: '&#10003;', error: '&#10007;' };
-      container.innerHTML = sorted.map(function(entry, i) {
+      container.innerHTML = renderTaskWorkstreamGroups(display, function(entry, i) {
         var id = entry[0], t = entry[1];
         var ago = Math.round((Date.now() - t.time) / 1000);
         var timeStr = ago < 60 ? ago + 's ago' : Math.round(ago / 60) + 'm ago';
@@ -2791,11 +3139,11 @@ function renderTabContent() {
         var expandChip = hasResult ? '<span class="task-expand">' + (isExpanded ? 'Hide &#9662;' : 'Show details &#9656;') + '</span>' : '';
         return '<div class="task-item"' + clickAttr + '>' +
           '<div class="task-status ' + t.status + '">' + (icons[t.status] || '?') + '</div>' +
-          '<span class="' + textClass + '">' + displayText + '</span>' +
+          '<span class="' + textClass + '">' + esc(displayText) + '</span>' +
           '<span class="task-time">' + timeStr + '</span>' +
           expandChip +
           '</div>' + resultHtml;
-      }).join('');
+      });
     }
     window._drLocalContent = false;
 
@@ -3182,7 +3530,6 @@ function readCoreStatus(): { running: boolean; step: string; stale: boolean } {
 		return { running: false, step: '', stale: true };
 	}
 }
-function coreIsRunning(): boolean { return readCoreStatus().running; }
 
 const VOICE_STATE_STALE_SECONDS = 120;
 function readVoiceState(): boolean | null {
@@ -3255,7 +3602,6 @@ function renderSubscriptionsHtml(rawJson: string): string {
 	let data: any;
 	try { data = JSON.parse(rawJson); } catch (e: any) { data = { last_scan: null, subscriptions: [], scan_history: [], _parse_error: e?.message }; }
 	const lastScan = data.last_scan ? new Date(data.last_scan).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : '— never scanned —';
-	const lastDiff = (data.scan_history && data.scan_history.length) ? data.scan_history[data.scan_history.length - 1] : { added: [], removed: [], amount_changed: [] };
 	const dataJson = JSON.stringify(data).replace(/</g, '\\u003c');
 
 	return /* html */ `<!DOCTYPE html>
@@ -3540,8 +3886,78 @@ function escapeHtml(s: string): string {
 	return String(s).replace(/[<>&"']/g, c => (({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'} as Record<string, string>)[c] || c));
 }
 
+function isLoopbackAddress(address: string | undefined): boolean {
+	return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+}
+
 const server = createServer((req, res) => {
 	const url = new URL(req.url || '/', `http://${req.headers.host}`);
+
+	// Task history carries owner prompts and result bodies. Keep it behind the
+	// dashboard's same-origin server, forward the configured bearer token, and
+	// reject LAN callers unless the owner explicitly enabled LAN sharing.
+	if (url.pathname === '/api/task-history' || url.pathname === '/api/task-workstreams/infer') {
+		const isHistory = url.pathname === '/api/task-history';
+		const expectedMethod = isHistory ? 'GET' : 'POST';
+		if (req.method !== expectedMethod) {
+			res.writeHead(405, { 'Content-Type': 'application/json', 'Allow': expectedMethod });
+			res.end(JSON.stringify({ error: 'method not allowed' }));
+			return;
+		}
+		if (!LAN_SHARE && !isLoopbackAddress(req.socket.remoteAddress)) {
+			res.writeHead(403, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ error: 'task history is local-only' }));
+			return;
+		}
+		const token = process.env.SUTANDO_API_TOKEN || '';
+		const headers: Record<string, string> = { 'Accept': 'application/json' };
+		if (token) headers.Authorization = `Bearer ${token}`;
+		const proxyReq = httpRequest({
+			host: '127.0.0.1',
+			port: 7843,
+			path: isHistory ? '/tasks/history' : '/tasks/workstreams/infer',
+			method: expectedMethod,
+			headers,
+		}, (proxyRes) => {
+			res.writeHead(proxyRes.statusCode || 502, {
+				'Content-Type': 'application/json',
+				'Cache-Control': 'no-store',
+			});
+			proxyRes.pipe(res);
+		});
+		proxyReq.on('error', () => {
+			res.writeHead(502, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ error: 'agent api unavailable' }));
+		});
+		proxyReq.end();
+		return;
+	}
+
+	if (url.pathname === BROWSER_TRANSPORT_ROUTE) {
+		loadBrowserTransport().then(
+			js => {
+				res.writeHead(200, {
+					'Content-Type': 'application/javascript; charset=utf-8',
+					// Source mode recompiles per process; bundled mode ships a new
+					// artifact per release. Neither wants a browser holding an old
+					// copy across a restart, and this file is 14KB.
+					'Cache-Control': 'no-store',
+				});
+				res.end(js);
+			},
+			(err: Error) => {
+				// Fail loudly and in two places: the HTTP status so the page's
+				// loader can show the user something, and the server log so the
+				// operator sees the packaging error even if nobody opened the UI.
+				console.error(`[web-client] ${BROWSER_TRANSPORT_ROUTE} unavailable: ${err.message}`);
+				res.writeHead(503, { 'Content-Type': 'application/javascript; charset=utf-8' });
+				res.end(
+					`console.error(${JSON.stringify('Sutando voice transport unavailable: ' + err.message)});\n`,
+				);
+			},
+		);
+		return;
+	}
 
 	if (url.pathname === '/sse') {
 		res.writeHead(200, {
@@ -3712,6 +4128,23 @@ const server = createServer((req, res) => {
 					_preSeeingToolState = 'idle';
 					if (aState === 'working' && labelParam) _toolLabel = labelParam;
 					else if (aState !== 'working') _toolLabel = '';
+					// Sound cue (owner ask 2026-07-09): emit a short audible blip per
+					// tool/core invocation so the user hears the answer is grounded.
+					// Distinct pitch for cloud research vs local core (work) vs inline
+					// tool. Fires on the leading edge — this branch = one onToolCall's
+					// working post → one cue. A SEPARATE SSE event from agent-state so it
+					// still fires when effectiveAgentState() is unchanged (back-to-back
+					// tool calls stay 'working', which suppresses the agent-state
+					// broadcast at the prevEffective===nextEffective guard below).
+					if (aState === 'working' && labelParam) {
+						const l = labelParam.toLowerCase();
+						const cueKind = (l === 'work' || l === 'ask_sutando' || l === 'ask_core')
+							? 'work'
+							: (/search|research|ground|google/.test(l) ? 'research' : 'tool');
+						for (const client of sseClients) {
+							try { client.write(`event: tool-cue\ndata: ${cueKind}\n\n`); } catch {}
+						}
+					}
 				}
 			} else {
 				// Browser can't legitimately know working/seeing — those
@@ -3771,7 +4204,7 @@ const server = createServer((req, res) => {
 				const text = await r.text();
 				res.writeHead(r.status, { 'Content-Type': 'application/json' });
 				res.end(text);
-			} catch (err) {
+			} catch {
 				const fallback = url.pathname === '/vision/state'
 					? { streaming: false, source: null, fps: 0, frames: 0, durationMs: 0, sessionReady: false }
 					: { status: 'failed', error: 'voice-agent not reachable' };
@@ -3838,7 +4271,7 @@ const server = createServer((req, res) => {
 	// port to state/overlay-control.json; we forward same-origin requests so
 	// the browser needs no CORS or port discovery.
 	if (url.pathname === '/api/overlays' || url.pathname.startsWith('/api/overlays/')) {
-		let disc: { host?: string; port?: number } | null = null;
+		let disc: { host?: string; port?: number } | null;
 		try {
 			disc = JSON.parse(readFileSync(join(STATE_DIR, 'overlay-control.json'), 'utf-8'));
 		} catch {
@@ -3951,8 +4384,61 @@ const server = createServer((req, res) => {
 	res.end(HTML);
 });
 
+// LAN-share WS proxy: forward an upgrade on /ws to the loopback voice WS. Only
+// active when SUTANDO_LAN_SHARE is enabled; otherwise the upgrade is refused
+// (loopback clients connect to WS_PORT directly and never hit this path). The
+// handshake bytes (incl. Sec-WebSocket-Key) are replayed verbatim to WS_PORT
+// with the path rewritten to '/', then the two sockets are piped together.
+server.on('upgrade', (req, socket, head) => {
+	const path = (req.url || '').split('?')[0];
+	// Allow the /ws proxy when the upgrade arrives over LOOPBACK — i.e. from a
+	// same-host TLS-terminating reverse proxy (nginx/caddy) forwarding the
+	// pre-existing HTTPS `wss://<host>/ws` path — OR when LAN sharing is
+	// explicitly enabled. A direct remote/LAN client (non-loopback source) still
+	// needs SUTANDO_LAN_SHARE, so LAN_SHARE only gates the NEW LAN exposure and
+	// not the HTTPS reverse-proxy path. socket.remoteAddress is the real TCP
+	// source and can't be spoofed by a request header.
+	const remote = (socket as import('node:net').Socket).remoteAddress || '';
+	const fromLoopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+	if (path !== '/ws' || !(LAN_SHARE || fromLoopback)) {
+		socket.destroy();
+		return;
+	}
+	// Same-origin guard — applied only to DIRECT (non-loopback) clients, i.e. the
+	// LAN-share path. Browser WebSockets aren't CORS-protected, so a page on any
+	// site a LAN device visits could target ws://<core>:8080/ws; require the
+	// Origin to match the request Host so only the Sutando UI served from this
+	// host can open it. Loopback sources (a same-host reverse proxy) are trusted
+	// and skip this — Host/Origin can legitimately differ across proxying.
+	const origin = req.headers.origin;
+	if (!fromLoopback && origin) {
+		let originHost: string;
+		try {
+			originHost = new URL(origin).host;
+		} catch {
+			originHost = '\0'; // unparseable Origin → never matches
+		}
+		if (originHost !== req.headers.host) {
+			socket.destroy();
+			return;
+		}
+	}
+	const upstream = netConnect(WS_PORT, '127.0.0.1', () => {
+		const lines = [`${req.method} / HTTP/1.1`];
+		for (let i = 0; i < req.rawHeaders.length; i += 2) {
+			lines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
+		}
+		upstream.write(lines.join('\r\n') + '\r\n\r\n');
+		if (head && head.length) upstream.write(head);
+		socket.pipe(upstream);
+		upstream.pipe(socket);
+	});
+	upstream.on('error', () => socket.destroy());
+	socket.on('error', () => upstream.destroy());
+});
+
 server.listen(HTTP_PORT, HTTP_HOST, () => {
-	const serverUrl = HTTP_HOST === '0.0.0.0' 
+	const serverUrl = HTTP_HOST === '0.0.0.0'
 		? `http://localhost:${HTTP_PORT} (or use your server's IP/DNS)`
 		: `http://${HTTP_HOST}:${HTTP_PORT}`;
 	console.log(`\n  Sutando — Web Client`);
