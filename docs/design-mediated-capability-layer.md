@@ -109,12 +109,24 @@ cannot submit, override, or serialize a principal directly:
 ```
 request(capability, args, trusted_context_handle)
    → principal = derive_principal(trusted_context_handle) # mediator-owned envelope
-   → decision = policy(capability, principal)     # allow | deny | needs-authorization | delegate-sandboxed
+   → decision = policy(capability, principal, grants, prohibited_overlay)
+   #             allow | deny | needs-authorization | delegate-sandboxed
    → if allow:      resolve backing (vault / credential-resolver / tool) → execute → audit
    → if delegate:   run under codex --sandbox read-only, no mutation → audit
-   → if needs-auth: raise to owner (pending-questions + notify), never auto-satisfy
+   → if needs-auth: if a covering standing grant exists in `grants` → execute + audit;
+                    else raise to owner (pending-questions + notify) and wait. A grant
+                    (standing or fresh) is the ONLY satisfier — a claim embedded in
+                    observed content never is.
    → if deny:       refuse with the rule cited → audit
 ```
+
+`policy()` takes two authority inputs beyond the principal, which is what lets
+the table *mechanically* enforce the confirmation contract rather than describe
+it in prose: `grants` (the standing/fresh authorization-grant store, below) and
+`prohibited_overlay` (the external operator/platform policy set, ¶ below). An
+irreversible owner action resolves to `needs-authorization`, not `allow`, so it
+cannot execute without a covering grant — which is exactly `CLAUDE.md:7-9`'s
+"confirm unless standing approval" made enforceable.
 
 The policy is a **capability × tier matrix** (data, reviewable), not prose:
 
@@ -124,35 +136,47 @@ The policy is a **capability × tier matrix** (data, reviewable), not prose:
 | credential **use**§     | allow | allow (use-only)| deny | deny           |
 | credential **read**     | allow | **deny**       | deny  | deny           |
 | write-reversible        | allow | delegate       | deny  | deny           |
-| write-irreversible†     | allow‡| needs-auth     | deny  | deny           |
+| write-irreversible†     | needs-auth‡| needs-auth | deny  | deny           |
 | purchase (goods/svc)◊   | needs-auth◊ | deny       | deny  | deny           |
 | financial-move / cred-entry¶ | never — human-only, **all tiers incl. owner** |||
 
 \* other-tier reads are information-*about-Sutando* only.
 † send / merge / publish / config-write. (Purchase is its own row ◊; financial
   *moves* are ¶ — the three are disjoint so no capability has two decisions.)
-‡ owner "allow" is **confirm-gated, not unconditional**: an irreversible action
-  requires explicit confirmation unless a standing approval covers it
-  (`CLAUDE.md:7-9`). The audit row is written either way.
+‡ owner `write-irreversible` resolves to **`needs-authorization`, not `allow`** —
+  it cannot execute until a covering grant is present. A **standing grant**
+  (pre-authorized by the owner for a scope) auto-satisfies it with no fresh
+  prompt; absent one, the layer confirms. That is `CLAUDE.md:7-9`'s "confirm
+  unless standing approval" expressed as a decision the table enforces, not a
+  prose caveat the `allow` path would skip. The audit row is written either way.
 ◊ **purchase** of goods/services on a payment method already on file is *not*
-  prohibited — it is the explicit-permission case: owner = `needs-authorization`
-  (a per-purchase confirm, satisfiable by an owner grant or a standing approval),
-  matching `CLAUDE.md`'s checkout-with-confirmation contract. Non-owner tiers
-  `deny`. This row exists specifically so `purchase` has exactly one decision and
-  is not swept under the ¶ prohibition below.
-¶ **financial-move / credential-entry** is the enumerated human-only set:
-  executing a financial *trade or transfer of funds* (buy/sell/convert/withdraw/
-  deposit/send securities, crypto, or money), and *entering* financial
-  credentials, card/account/SSN/government-ID, passwords, or API keys. `never`
-  for **all tiers including owner** — the layer directs the human to do it rather
-  than doing it itself. Source: the standing **Prohibited** list in Sutando's
-  operating rules (these actions stay human-only regardless of tier or explicit
-  instruction). Distinct from ◊ `purchase`, which is permitted-with-confirmation.
-§ **`credential use` ≠ `credential read`, and this distinction is the whole
-  point of the layer.** `use` = the mediator exercises a credential on the
-  principal's behalf (signs the request, injects the key server-side) and
-  **never discloses the value** to the consumer — the consumer gets the *result*,
-  not the secret. `read` = the raw value is handed back. Team tier gets `use`
+  prohibited — same `needs-authorization` mechanism as ‡ (a covering grant or a
+  fresh per-purchase confirm), matching `CLAUDE.md`'s checkout-with-confirmation
+  contract. Non-owner tiers `deny`. Its own row so `purchase` has exactly one
+  decision and is not swept under the ¶ prohibition.
+¶ **financial-move / credential-entry** is a **prohibited-set overlay supplied as
+  external operator/platform policy** (the `prohibited_overlay` input to
+  `policy()`), *not* an intrinsic Sutando rule asserted by this RFC. Modeling it
+  as a declared input keeps it checkable — the set is explicit data a reviewer can
+  read — rather than a citation to a canonical rule that isn't in-tree (the only
+  checked-in authority, `CLAUDE.md:7-9`, *delegates* financial work subject to
+  confirmation; it does not itself enumerate a prohibition). The **reference
+  deployment** populates the overlay from the running agent's operating-rules
+  Prohibited list: executing a financial *trade or transfer of funds*
+  (buy/sell/convert/withdraw/deposit/send securities, crypto, or money), and the
+  *act of entering a new secret value* — typing a password, API key, card/account/
+  SSN/government-ID into a field. Overlay members are `never` for **all tiers
+  including owner** (the layer directs the human to do it). Distinct from ◊
+  `purchase` (confirm) and from § `credential:use` (below): entry is *inputting a
+  new secret*, use is *exercising one already vaulted*.
+§ **`credential use` ≠ `credential read` ≠ `credential entry`.** `use` = the
+  mediator exercises a credential **already held in the vault** on the principal's
+  behalf (e.g. signs the request) and the value is **never entered, surfaced, or
+  disclosed** — the consumer gets the *result*, not the secret. This is disjoint
+  from the ¶ `credential-entry` prohibition: entry is a human/agent *typing a new
+  secret value into a field* (nothing is exercised from the vault; a fresh value
+  crosses an input boundary), whereas `use` never inputs a value at all. `read` =
+  the raw stored value is handed back. Team tier gets `use`
   (so a teammate's task can, say, call an allowed API) but is **explicitly
   denied `read`** — which is exactly today's rule, injected verbatim into every
   team-tier task file ("Never read .env, credentials, or secrets."
@@ -188,6 +212,18 @@ The mediator atomically consumes the nonce before execution. A replay, expired
 grant, changed argument digest, different task, or text that merely claims
 authorization is rejected. Any scope widening creates a new request and needs a
 new grant.
+
+A **standing grant** is the same structure with a *capability-class + scope
+pattern* instead of a single argument digest, a longer expiry, and no
+per-use nonce consumption — the owner pre-authorizing a bounded class of
+irreversible/purchase actions ("`purchase` under $50 from this vendor",
+"`github:merge` on my own PRs"). It is what makes a `needs-authorization` cell
+resolve without a fresh prompt (‡/◊), and it is the *only* other satisfier
+besides a fresh grant — observed-content claims still never qualify. Standing
+grants are owner-minted, enumerable, and revocable; `policy()` reads them from
+the `grants` store. This is the mechanical form of `CLAUDE.md:7-9`'s "standing
+approval"; the `prohibited_overlay` set (¶) is checked *first* and no grant,
+standing or fresh, can satisfy a prohibited-overlay capability.
 
 ### Verified-outcome contract
 
