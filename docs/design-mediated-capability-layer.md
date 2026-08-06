@@ -186,6 +186,85 @@ idempotency policy. This is the mechanism that catches the swallowed-insert
 failure in motivating example #3. Capabilities that cannot define a meaningful
 postcondition must not cite outcome verification as a property of this layer.
 
+### Totality is required at *two* levels, not one
+
+Next-steps §2 asks for "a test that the matrix is total" — but that is totality
+of **capability × tier** (authorization: every cell has a decision). There is a
+second, prior function that also has to be total and the RFC originally left
+implicit: **classification of inbound content → capability request** (routing).
+A mediator that owns the request removes the agent's discretion to pick the
+action; that is the point, but it is only safe if the routing function has a
+defined answer for *every* input — otherwise removing the discretion converts a
+human's least-wrong judgment call into a deterministic wrong answer, which is
+worse.
+
+This is not hypothetical: a reviewer processing a team-tier task this week hit
+inbound content (a peer bot's `done:` status report) that matched **none** of
+the in-band block's action menu — not a request, not a PR-review ask, needing no
+owner decision, not echo/noise by that menu's own definition. A human noticed
+the mismatch and flagged it; a mediator that silently resolved it would emit
+nothing and the whole class would go invisible. Requirements:
+
+- The classification function is **total over inbound content**, with an
+  explicit terminal `unclassified` outcome — a *defined* behavior, not a menu
+  that assumes exhaustiveness.
+- `unclassified` is **fail-closed** (it never resolves to a privileged action)
+  **and observable** — it emits an audit record and escalates, so the class is
+  countable instead of silent. "A selected action is not evidence that a correct
+  action existed" — the same shape as the verified-outcome contract's
+  "`{ok:true}` is not evidence."
+
+### Escalation delivery contract (the `needs-authorization` path must actually deliver)
+
+`needs-authorization` is only a real gate if the escalation reaches the owner.
+The reused path (`pending-questions.md` + macOS-notify) does **not** guarantee
+that today, measured on a live host: the reader counts only entries **above the
+file's `# Resolved` divider**, so an append at EOF lands below it and is
+silently uncounted (same defect class PR #2521 fixed in `auth-preflight-gate.sh`);
+the notify path is cooldown-gated and skipped most cron fires; and the queue was
+46-deep. An escalation that is written-but-uncounted, or counted-but-unnotified,
+degrades `needs-authorization` into a **silent indefinite deny** — at which point
+the layer's guarantee is "nothing privileged happens" rather than "the owner
+decides." The layer therefore requires:
+
+- **Write-then-assert:** an escalation is not considered recorded until the
+  layer reads it back and confirms it *counts* (lands above the divider, is
+  addressable). A write whose read-back fails is a failed escalation, surfaced,
+  not assumed delivered.
+- **A defined terminal state for a never-answered grant.** An unanswered
+  `needs-authorization` stays denied (fail-closed) and never times out *into*
+  allow; the request remains observably pending so it can be re-surfaced, rather
+  than silently aging out. Time-to-deny vs stay-pending-forever is a policy knob,
+  but "silently disappears" is not an option.
+
+### Relationship to the runtime-API dispatcher
+
+`CLAUDE.md:42` already assigns an owner to this concern: JSON-RPC dispatch,
+approval/elicitation policy, and **governed-capability authorization** belong in
+`src/runtime-api/dispatcher.py`, with the standing rule *"Do not reimplement
+approval or capability behavior in a transport"*
+(`docs/architecture-boundaries.md:23` independently bounds "identity,
+access-tier, capability, and policy decisions"). This RFC does **not** introduce
+a competing gate. The split is:
+
+- `src/capability-policy.*` is **policy-as-data + the decision function** — the
+  capability×tier matrix, the classification/routing function, and
+  `policy(capability, principal) → decision`. It holds no transport and executes
+  nothing.
+- `src/runtime-api/dispatcher.py` remains the **enforcement locus for
+  runtime-API-surfaced capabilities** and *consumes* `capability-policy` rather
+  than re-deriving decisions — this is the generalization-and-lift of the
+  authorization concern it is already mandated to own, not a reimplementation.
+- The **PreToolUse hook** (revised open-question 2) is the enforcement locus for
+  agent-tool surfaces that never enter the runtime-API, consuming the *same*
+  policy module so there is exactly one place a decision is made.
+
+Implementation note: when this lands, `CLAUDE.md:42` needs a one-line follow-up
+pointing "governed-capability authorization" at the shared `capability-policy`
+home, so the two documented homes never drift (the RFC is deliberately explicit
+here because an RFC gets *cited* as authority, and an unreconciled overlap
+becomes expensive later).
+
 ## What it reuses (not a rewrite)
 
 - **Input:** authenticated bridges and the task runtime bind the existing
@@ -205,7 +284,9 @@ postcondition must not cite outcome verification as a property of this layer.
 - **Delegation:** the `delegate` decision is today's `codex exec --sandbox
   read-only` path, promoted from ad hoc to a first-class outcome.
 - **Escalation:** `needs-authorization` reuses `pending-questions.md` + the
-  macOS-notify path already used for owner decisions.
+  macOS-notify path already used for owner decisions — but only under the
+  write-then-assert delivery contract above, because that path does not
+  guarantee delivery as-is (silent EOF-below-divider miss, notify cooldown).
 - **Audit:** one append-only record per request (who / capability / decision /
   **verified outcome**), same shape as AG2Platform/agent-universe#118 ("audit log
   for all staff actions", merged) — log-before-mutate, reconcile the real result,
@@ -243,21 +324,32 @@ postcondition must not cite outcome verification as a property of this layer.
    are few call sites and high value, so hook-first there is cheap and is where
    the guarantee actually has to bite; friction-saving library wrapping is for the
    reversible reads.
-3. **Owner-tier recording.** Owner actions are `allow` — do we still want the
-   full audit row for them (recommend yes: observability, not restriction)?
+3. **Owner-tier recording.** ~~Owner actions are `allow` — do we still want the
+   full audit row for them?~~ **Resolved (sonichi): yes.** Recording an owner
+   action costs nothing and is the only way the audit answers "what actually
+   happened" rather than "what was refused." Owner `allow` still writes the full
+   record; the row restricts nothing.
 4. Does "mediated capability layer" here match your intent, or did you mean
    something narrower (e.g. just the credential/tool-handle side)?
 
 ## Next steps (on owner confirm)
 
 1. Land this RFC.
-2. Define the capability taxonomy + policy matrix as data
-   (`src/capability-policy.*` + a test that the matrix is total).
+2. Define the capability taxonomy + policy matrix as data in
+   `src/capability-policy.*` (consumed by `dispatcher.py` and the PreToolUse
+   hook, per "Relationship to the runtime-API dispatcher" — not a new gate).
+   Two totality tests, not one: the capability×tier matrix is total (every cell
+   decided), **and** the inbound-content classifier is total with an observable
+   `unclassified` terminal outcome.
 3. Wrap the shipped `credential-resolver` + a `github:*` capability behind
    `mediate(capability, trusted_context_handle)`; route one real consumer through
    it. Enforce
    the `needs-authorization` + prohibited rows via a **PreToolUse hook** (per
-   revised open-question 2), not an advisory library.
+   revised open-question 2), not an advisory library. The `needs-authorization`
+   escalation ships with the write-then-assert delivery contract (read-back the
+   pending-questions entry to confirm it counts) and a defined never-answered
+   terminal state — an escalation the layer cannot confirm delivered is a failed
+   gate, not a silent deny.
 4. Add the append-only audit record plus per-capability independent
    postcondition verifier recording the **verified outcome** (reuse
    AG2Platform/agent-universe#118 "audit log for all staff actions" —
