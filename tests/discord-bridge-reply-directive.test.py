@@ -313,12 +313,7 @@ def case_c_directive_only_first_chunk():
 
 
 def case_d_oversized_result_has_a_delivery_budget():
-    """A malformed result must not monopolize the Discord delivery loop.
-
-    The live incident produced 512 sequential sends from one 955 KB result,
-    leaving the owner's stop request queued behind the flood. Four sends keep
-    a useful preview while bounding how long one result can occupy the loop.
-    """
+    """Oversized results must reserve the fourth send for truncation notice."""
     fails = []
     ch = _MockChannel(channel_id=888999000)
     body = "oversized-review-output\n" * 1200

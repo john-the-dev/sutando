@@ -305,10 +305,7 @@ def _chunk_for_discord_unbounded(text: str, max_len: int = 1900):
     """Lossless Discord-sized chunks for golden tests and local processing."""
     yield from chunk_message(text, max_len)
 
-# One malformed result used to monopolize the bridge for 512 sequential Discord
-# sends, so even the owner's stop request could not be delivered until the flood
-# finished. Keep the low-level chunker lossless for callers/tests that need it,
-# but put a hard budget on every network delivery from this bridge.
+# Network delivery is bounded; local and golden chunking remains lossless.
 DISCORD_DELIVERY_MAX_CHUNKS = 4
 DISCORD_TRUNCATION_NOTICE = (
     "⚠️ Result truncated: additional content was suppressed to keep Discord "
@@ -321,16 +318,11 @@ def _chunk_for_discord(
     max_len: int = 1900,
     max_chunks: int = DISCORD_DELIVERY_MAX_CHUNKS,
 ):
-    """Yield at most ``max_chunks`` sends, reserving the last for a notice.
-
-    Reads only one chunk beyond the budget, so a very large result does not
-    need to be expanded into a second in-memory list merely to discover that it
-    is oversized. Each preview chunk remains fence-safe because the shared
-    chunker closes Markdown fences at every boundary.
-    """
+    """Bound network delivery and reserve the final send for truncation notice."""
     if max_chunks < 1:
         raise ValueError("max_chunks must be at least 1")
     preview = []
+    # Read one chunk past the limit instead of expanding the full result.
     for chunk in _chunk_for_discord_unbounded(text, max_len=max_len):
         preview.append(chunk)
         if len(preview) > max_chunks:
