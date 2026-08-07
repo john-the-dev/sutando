@@ -312,6 +312,28 @@ def case_c_directive_only_first_chunk():
     return fails
 
 
+def case_d_oversized_result_has_a_delivery_budget():
+    """A malformed result must not monopolize the Discord delivery loop.
+
+    The live incident produced 512 sequential sends from one 955 KB result,
+    leaving the owner's stop request queued behind the flood. Four sends keep
+    a useful preview while bounding how long one result can occupy the loop.
+    """
+    fails = []
+    ch = _MockChannel(channel_id=888999000)
+    body = "oversized-review-output\n" * 1200
+    sent = asyncio.run(_run_one_poll_iteration("test-task-d", ch, body))
+    if len(sent) != 4:
+        fails.append(f"d) oversized result should use exactly 4 sends (got {len(sent)})")
+        return fails
+    if not (sent[0]["content"] or "").startswith("oversized-review-output"):
+        fails.append("d) first send should retain the beginning of the result")
+    notice = sent[-1]["content"] or ""
+    if "truncated" not in notice.lower() or "suppressed" not in notice.lower():
+        fails.append(f"d) final send should explain truncation (got {notice!r})")
+    return fails
+
+
 def test_resolver_bindings_restored_after_the_context() -> int:
     """Protect the late-import restore sweep with an activated assertion.
 
@@ -358,7 +380,7 @@ def _workspace_fingerprint(ws) -> dict:
         try:
             # CONTENT hash under results/ — that subtree holds the owner's
             # archived task evidence, and the fixture task ids are FIXED
-            # (test-task-a/b/c), so a destructive OVERWRITE of an existing file
+            # (test-task-a/b/c/d), so a destructive OVERWRITE of an existing file
             # is the realistic collision (john-the-dev, #2619). A same-size
             # rewrite is exactly what a name-only or size-only check misses.
             # (size, mtime) elsewhere keeps a whole-workspace scan cheap.
@@ -426,6 +448,7 @@ def main():
         ("a-directive-present-constructs-reference", case_a_directive_present_constructs_reference),
         ("b-no-directive-no-reference", case_b_no_directive_no_reference),
         ("c-directive-only-first-chunk", case_c_directive_only_first_chunk),
+        ("d-oversized-result-has-a-delivery-budget", case_d_oversized_result_has_a_delivery_budget),
     ]
     failures = []
     with _bridge_writes_redirected() as (_tmp, _redirected):
