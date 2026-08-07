@@ -313,7 +313,7 @@ def case_c_directive_only_first_chunk():
 
 
 def case_d_oversized_result_has_a_delivery_budget():
-    """Oversized results must reserve the fourth send for truncation notice."""
+    """Oversized results use three previews plus a truncation notice."""
     fails = []
     ch = _MockChannel(channel_id=888999000)
     body = "oversized-review-output\n" * 1200

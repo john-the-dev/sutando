@@ -302,7 +302,7 @@ def _extract_user_id_mentions(mention_strs):
 
 
 def _chunk_for_discord_unbounded(text: str, max_len: int = 1900):
-    """Lossless Discord-sized chunks for golden tests and local processing."""
+    """Yield lossless Discord-sized chunks for local callers."""
     yield from chunk_message(text, max_len)
 
 # Network delivery is bounded; local and golden chunking remains lossless.
@@ -318,7 +318,7 @@ def _chunk_for_discord(
     max_len: int = 1900,
     max_chunks: int = DISCORD_DELIVERY_MAX_CHUNKS,
 ):
-    """Bound network delivery and reserve the final send for truncation notice."""
+    """Bound network sends; reserve the final send for truncation."""
     if max_chunks < 1:
         raise ValueError("max_chunks must be at least 1")
     preview = []
