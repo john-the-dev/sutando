@@ -40,11 +40,8 @@ _RUNNING_STATES = frozenset({"PENDING", "EXPECTED"})
 
 
 def _check_state(c) -> str:
-    """Classify one rollup entry as green/pending/failing.
-
-    Check runs carry status+conclusion; commit statuses carry state. Anything
-    unrecognised is failing, so an unknown value can never read as mergeable.
-    """
+    """Check runs carry status+conclusion, commit statuses carry state; anything
+    unrecognised is failing so an unknown value never reads as mergeable."""
     if c.get("status") in _RUNNING_STATUSES or c.get("state") in _RUNNING_STATES:
         return "pending"
     if "conclusion" in c and c.get("conclusion") is not None:
