@@ -21,7 +21,7 @@
 
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // --------------------------------------------------------------------------- //
@@ -37,7 +37,16 @@ const LOCAL_FILENAME = 'sutando.config.local.json';
  * stays lenient (warn-only) so experimental/scratch keys don't break.
  * Per Mini's review #8 on PR #1395.
  */
-const KNOWN_TOP_LEVEL_KEYS = new Set(['workspace', 'claude_sutando_config_dir', 'vault']);
+const KNOWN_TOP_LEVEL_KEYS = new Set([
+	'core',
+	'workspace',
+	'claude_sutando_config_dir',
+	'core_config_dirs',
+	'vault',
+	'migrate',
+	'bridges',
+	'stand',
+]);
 
 /**
  * Walk upward from `start` until we find a directory containing
@@ -253,6 +262,9 @@ export function loadConfig(repoRoot?: string): { [k: string]: Json } {
 // --------------------------------------------------------------------------- //
 
 const HARDCODED_WORKSPACE_DEFAULT_REL = 'workspace';
+/** Home-relative last-ditch when no repo root is found (src/ installed outside a
+ *  checkout). MUST equal workspace_default.py's _DEFAULT_SUBPATH. */
+export const LAST_DITCH_WORKSPACE_REL = 'sutando-workspace';
 
 /**
  * Resolve the workspace directory per the canonical contract.
@@ -315,7 +327,7 @@ export function resolveWorkspace(repoRoot?: string): string {
 	} else if (embedderDefault) {
 		resolved = resolve(embedderDefault.replace(/^~/, homedir()));
 	} else if (root === undefined) {
-		resolved = resolve(join(homedir(), '.sutando', 'workspace'));
+		resolved = resolve(join(homedir(), LAST_DITCH_WORKSPACE_REL));
 	} else {
 		resolved = resolve(join(root, HARDCODED_WORKSPACE_DEFAULT_REL));
 	}
@@ -361,15 +373,39 @@ export function resolveVault(repoRoot?: string): VaultConfig {
 	const sync = (vault.sync as { [k: string]: Json } | undefined) ?? {};
 	const includeRaw = sync.include;
 	const excludeRaw = sync.exclude;
+	const strings = (v: Json | undefined): string[] =>
+		Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+	// `exclude_extra` APPENDS (deep-merge replaces lists, so a local `exclude`
+	// override silently drops the shipped carve-outs). Must match resolve_vault().
+	const exclude = strings(excludeRaw);
+	for (const p of strings(sync.exclude_extra)) {
+		if (!exclude.includes(p)) exclude.push(p);
+	}
 	return {
 		enabled: typeof vault.enabled === 'boolean' ? vault.enabled : false,
 		remote_url: typeof vault.remote_url === 'string' ? vault.remote_url : '',
 		sync: {
-			include: Array.isArray(includeRaw) ? includeRaw.filter((v): v is string => typeof v === 'string') : [],
-			exclude: Array.isArray(excludeRaw) ? excludeRaw.filter((v): v is string => typeof v === 'string') : [],
+			include: strings(includeRaw),
+			exclude,
 		},
 		interval_seconds: typeof vault.interval_seconds === 'number' ? vault.interval_seconds : 1800,
 	};
+}
+
+export type CoreRuntime = 'claude' | 'codex';
+
+/** Resolve the persistent core CLI runtime. */
+export function resolveCoreRuntime(repoRoot?: string): CoreRuntime {
+	const cfg = loadConfig(repoRoot);
+	const core = (cfg.core as { [k: string]: Json } | undefined) ?? {};
+	const configured = typeof core.runtime === 'string' ? core.runtime.trim() : 'claude';
+	const runtime = process.env.SUTANDO_CORE_RUNTIME?.trim() || configured || 'claude';
+	if (runtime !== 'claude' && runtime !== 'codex') {
+		throw new Error(
+			`sutando config: unsupported core.runtime=${JSON.stringify(runtime)}; expected one of: claude, codex`,
+		);
+	}
+	return runtime;
 }
 
 const DEFAULT_CLAUDE_SUTANDO_SUBDIR = '.claude-sutando';
