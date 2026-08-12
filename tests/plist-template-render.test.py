@@ -183,6 +183,35 @@ with tempfile.TemporaryDirectory() as td:
                  if f.name.startswith(".plist-render-")]
     check("temp file cleaned up on failure", not leftovers, str(leftovers))
 
+print("== every installer supplies exactly its template's placeholders ==")
+# A missing token now fails the install loudly, so a typo here is a real
+# breakage rather than a leftover literal in the rendered plist.
+PAIRS = {
+    "install-cron-runner-launchd.sh": "com.sutando.cron-runner.plist",
+    "install-health-check-launchd.sh": "com.sutando.health-check-fallback.plist",
+    "install-sutando-app-launchd.sh": "com.sutando.menubar.plist",
+    "install-credential-proxy-launchd.sh": "com.sutando.credential-proxy.plist",
+}
+for inst, tplname in PAIRS.items():
+    itext = (REPO / "src" / inst).read_text()
+    blk = itext[itext.index("render_plist_template.py"):]
+    blk = blk[:blk.index("|| exit 1")]
+    supplied = set(re.findall(r'"([A-Z0-9_]+)=', blk))
+    needed = set(re.findall(r"__([A-Z0-9_]+)__",
+                            (REPO / "src" / "launchd" / tplname).read_text()))
+    check(f"{inst} covers {tplname}", not (needed - supplied),
+          f"missing {sorted(needed - supplied)}")
+    # Render the real template with hostile values end to end.
+    dest = pathlib.Path(tempfile.gettempdir()) / f"rt-{tplname}"
+    try:
+        rpt.render_to_file(str(REPO / "src" / "launchd" / tplname), str(dest),
+                           {k: f"/tmp/a&b<x>|y/{k.lower()}" for k in supplied})
+        check(f"{tplname} renders with hostile values", True)
+    except rpt.RenderError as exc:
+        check(f"{tplname} renders with hostile values", False, str(exc))
+    finally:
+        dest.unlink(missing_ok=True)
+
 print("== installers delegate (no installer renders plists itself) ==")
 INSTALLERS = ["install-cron-runner-launchd.sh", "install-health-check-launchd.sh",
               "install-sutando-app-launchd.sh", "install-credential-proxy-launchd.sh"]
