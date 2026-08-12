@@ -1,30 +1,6 @@
 #!/usr/bin/env python3
-"""Render a launchd plist template by substituting __TOKEN__ placeholders.
-
-Shared owner for launchd plist rendering. Installers pass resolved values; this
-module owns substitution, XML escaping, and the parse check.
-
-Replaces per-installer `sed -e "s|__TOKEN__|$VALUE|g"`, which is wrong for
-values containing sed or XML metacharacters:
-
-  * `&` in a sed *replacement* means "the matched text", so `/tmp/a&b` renders
-    the token back into the output and the job silently points at a path that
-    does not exist.
-  * `|` in a value terminates the s-expression; `\\` starts an escape.
-  * `<`, `>`, `&` are XML metacharacters. Unescaped, they make the plist
-    unparseable, and `launchctl bootstrap` reports nothing useful.
-
-Every one of those failures is silent: sed exits 0, the file is written, and
-the broken job is loaded. So this module also *parses* the result and exits
-non-zero when it is not a valid plist -- turning a job that never runs into an
-install that visibly fails.
-
-Usage:
-    render_plist_template.py TEMPLATE DEST TOKEN=VALUE [TOKEN=VALUE ...]
-
-TOKEN is the bare name; `__` delimiters are added here, so callers cannot
-disagree about the placeholder spelling.
-"""
+"""Render a launchd plist: literal __TOKEN__ substitution, XML escaping, parse
+check. Usage: render_plist_template.py TEMPLATE DEST TOKEN=VALUE ..."""
 
 from __future__ import annotations
 
@@ -41,11 +17,7 @@ class RenderError(Exception):
 
 
 def render(template_text: str, values: dict) -> str:
-    """Substitute __TOKEN__ placeholders in *template_text*.
-
-    Replacement is literal (no metacharacter interpretation) and each value is
-    XML-escaped for a plist <string> text node.
-    """
+    """Literal __TOKEN__ substitution; values XML-escaped for a <string> node."""
     out = template_text
     for token, value in values.items():
         if not token:
@@ -55,22 +27,14 @@ def render(template_text: str, values: dict) -> str:
 
 
 def unresolved_tokens(text: str) -> list:
-    """Placeholder names still present after substitution, sorted.
-
-    A leftover placeholder means the caller forgot a value; the plist parses
-    fine and the job points at a literal `__REPO__` path, so parsing alone
-    cannot catch it.
-    """
+    """Placeholders left after substitution: these still parse, so the parse
+    check alone cannot catch a forgotten value."""
     return sorted(set(re.findall(r"__([A-Z0-9_]+)__", text)))
 
 
 def render_to_file(template_path: str, dest_path: str, values: dict) -> str:
-    """Render *template_path* to *dest_path*. Returns the rendered text.
-
-    Validates before publishing: an unparseable render or a leftover
-    placeholder raises and leaves any existing destination unchanged, so a
-    failed re-install cannot replace a working plist with a broken one.
-    """
+    """Render to *dest_path*, validating first: a failed render leaves any
+    existing destination unchanged rather than publishing a broken plist."""
     with open(template_path, "r", encoding="utf-8") as fh:
         text = render(fh.read(), values)
 

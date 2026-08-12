@@ -1,16 +1,6 @@
 #!/usr/bin/env python3
-"""Contract tests for src/render_plist_template.py plus wiring tests for the
+"""Contract tests for src/render_plist_template.py and wiring tests for the
 four launchd installers that delegate to it.
-
-Each value tested here is one that the previous `sed -e "s|__TOKEN__|$V|g"`
-rendering handles wrongly:
-
-    /tmp/a&b     sed exits 0, plist parses, path becomes /tmp/a__REPO__b
-    /tmp/a<b>c   sed exits 0, plist is unparseable
-    /tmp/a|b     the value terminates sed's s-expression
-
-The silent case is the first one, so the assertions check the *rendered path*,
-not just that the output parses.
 """
 
 import importlib.util
@@ -211,6 +201,21 @@ for inst, tplname in PAIRS.items():
         check(f"{tplname} renders with hostile values", False, str(exc))
     finally:
         dest.unlink(missing_ok=True)
+
+print("== no installer invokes the renderer through a bare python3 ==")
+# A bare python3 can be the Xcode-CLT stub: it satisfies an existence check and
+# raises the install dialog when run, so the interpreter must be resolved.
+for inst in ["install-cron-runner-launchd.sh", "install-health-check-launchd.sh",
+             "install-sutando-app-launchd.sh", "install-credential-proxy-launchd.sh"]:
+    text = (REPO / "src" / inst).read_text()
+    bare = [ln for ln in text.splitlines()
+            if "render_plist_template.py" in ln and re.search(r':-python3\}|"python3"|^\s*python3\s', ln)]
+    check(f"{inst} resolves the interpreter", not bare, str(bare[:1]))
+    blk = text[text.index("render_plist_template.py"):]
+    blk = text[max(0, text.index("render_plist_template.py") - 400):text.index("render_plist_template.py")]
+    check(f"{inst} uses a resolved interpreter var",
+          "require_python" in blk or "PYTHON_BIN=" in text or "$PYTHON_BIN" in text,
+          "no resolver near the call site")
 
 print("== installers delegate (no installer renders plists itself) ==")
 INSTALLERS = ["install-cron-runner-launchd.sh", "install-health-check-launchd.sh",

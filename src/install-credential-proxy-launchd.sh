@@ -111,7 +111,11 @@ case "$cmd" in
         mkdir -p "$WORKSPACE/logs"
         # Shared renderer: literal substitution + XML escaping + a parse check.
         # Every value here is caller-influenced, so all get the same treatment.
-        "${PYTHON_BIN:-python3}" "$REPO/src/render_plist_template.py" "$TEMPLATE" "$DEST" \
+        # Resolve via the shared helper: a bare python3 can be the Xcode-CLT
+        # stub, which passes an existence check and raises the install dialog.
+        . "$REPO/scripts/python-binary.sh"
+        _PY="$(require_python "$REPO" "install the credential-proxy launchd job")" || exit 1
+        "$_PY" "$REPO/src/render_plist_template.py" "$TEMPLATE" "$DEST" \
             "REPO=$REPO" \
             "WORKSPACE=$WORKSPACE" \
             "BREW_BIN=$BREW_BIN" \
