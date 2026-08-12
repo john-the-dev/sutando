@@ -6,20 +6,10 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 
-# A launchd job's PATH reaches /usr/bin, where a clean Mac's python3 is the
-# CLT stub: it satisfies `command -v` but raises the install dialog when run.
-_pick_py() {
-    local c
-    for c in "${SUTANDO_PY:-}" "$REPO/../runtime/python/bin/python3" \
-             /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
-        [ -n "$c" ] || continue
-        if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys' >/dev/null 2>&1; then
-            printf '%s\n' "$c"; return 0
-        fi
-    done
-    return 1
-}
-PY_BIN="$(_pick_py || true)"
+# Shared resolver: a launchd PATH reaches the Xcode-CLT stub, which passes an
+# existence check and raises the install dialog when run.
+. "$REPO/scripts/python-binary.sh"
+PY_BIN="$(resolve_python "$REPO")"
 
 # Per-host label, lockstep with `_host_label()` in src/util_paths.py: the
 # heartbeat file is per-host and both sides must agree on the name.
