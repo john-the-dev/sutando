@@ -10,6 +10,7 @@
 import { execSync, execFileSync } from 'node:child_process';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
+import { requirePython, shellQuote } from '../../src/python-binary.js';
 
 const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
 
@@ -25,7 +26,10 @@ export const summonTool: ToolDefinition = {
 	description:
 		'Summon Sutando\'s screen — opens Zoom with screen sharing so the user can see and control remotely. ' +
 		'Use when user says "summon", "share my screen", "start zoom", "let me see your screen". ' +
-		'Instant — do NOT use work for this.' +
+		'Instant — do NOT use work for this. ' +
+		'Call this ONLY on one of those explicit requests. A complaint that something is not visible ' +
+		'("I don\'t see the slides", "you\'re not showing it") is NOT a summon request — fix the display ' +
+		'through the display/navigation tools instead. Never fire on filler or when unsure — fire nothing.' +
 		(getZoomPMI() ? ` Default meeting: ${getZoomPMI()}.` : ''),
 	parameters: z.object({
 		meetingId: z.string().optional().describe('Zoom meeting ID. Omit for personal room.'),
@@ -40,7 +44,7 @@ export const summonTool: ToolDefinition = {
 	// readiness/Join-retry loop + share script 15s + mute/cleanup 10s + dial-in
 	// host wait 20s). 120s gives meaningful margin without being absurd.
 	timeout: 120_000,
-	async execute(args, ctx) {
+	async execute(args, _ctx) {
 		const { meetingId, passcode, shareScreen = getShareScreen(), dialIn = false } = args as { meetingId?: string; passcode?: string; shareScreen?: boolean; dialIn?: boolean };
 		const pwd = passcode ?? getZoomPasscode();
 		const cleanId = (meetingId ?? getZoomPMI()).replace(/\D/g, '');
@@ -398,7 +402,13 @@ export const joinZoomTool: ToolDefinition = {
 				// Click Join button if preview window appears
 				await new Promise(r => setTimeout(r, 3000));
 				try {
-					execSync(`/usr/bin/python3 -c "
+					// requirePython throws when the host has no runnable interpreter —
+					// absorbed by the `catch` below, which already degrades this to
+					// "Join button not clicked". Never hardcode /usr/bin/python3: on a
+					// Mac without developer tools that is the Xcode-CLT stub and
+					// spawning it raises a modal install dialog. shellQuote because
+					// this is a shell string and the resolved path may contain spaces.
+					execSync(`${shellQuote(requirePython())} -c "
 import Quartz, subprocess, time
 result = subprocess.run(['osascript', '-e', '''
 tell application \\\"zoom.us\\\" to activate

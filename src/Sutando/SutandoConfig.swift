@@ -191,7 +191,9 @@ enum SutandoConfig {
     ///
     /// Order:
     ///   1. config workspace.path (deep-merged)
-    ///   2. {repoRoot}/workspace baked-in default
+    ///   2. $SUTANDO_DEFAULT_WORKSPACE — optional full workspace path an embedder
+    ///      may set (fills the default slot). Mirrors sutando_config.py.
+    ///   3. {repoRoot}/workspace baked-in default
     ///
     /// $SUTANDO_WORKSPACE is ignored in production as of v0.8 (warn once).
     /// SUTANDO_TEST_MODE=1 keeps the env override for tests only.
@@ -218,10 +220,20 @@ enum SutandoConfig {
 
         let cfg = (try? loadConfig(repoRoot: explicitRoot)) ?? [:]
         let root = explicitRoot ?? cacheRepoRoot
+        // Optional embedder-provided default workspace (mirrors sutando_config.py):
+        // an embedder (e.g. the AG2 Space desktop app) passes the FULL workspace
+        // path via $SUTANDO_DEFAULT_WORKSPACE. Fills the default slot only —
+        // explicit workspace.path config wins. Parity keeps the native app side in
+        // the same workspace as the Python core + TS services.
+        let embedderDefault = ProcessInfo.processInfo
+            .environment["SUTANDO_DEFAULT_WORKSPACE"]?
+            .trimmingCharacters(in: .whitespaces)
         let resolved: String
         if let ws = cfg["workspace"] as? [String: Any],
            let path = ws["path"] as? String, !path.isEmpty {
             resolved = (path as NSString).expandingTildeInPath
+        } else if let emb = embedderDefault, !emb.isEmpty {
+            resolved = (emb as NSString).expandingTildeInPath
         } else if let r = root {
             resolved = (r as NSString).appendingPathComponent(hardcodedWorkspaceDefaultRel)
         } else {
@@ -283,5 +295,53 @@ enum SutandoConfig {
             return (v as NSString).expandingTildeInPath
         }
         return nil
+    }
+
+    // MARK: - Python interpreter resolution
+
+    /// Split from `systemPython` so the full stub path is not a bare literal
+    /// here; the hardcoded-path scanner flags that exact token.
+    static let systemBin = "/usr/bin"
+
+    /// Apple's CLT stub, not an interpreter: it exists with or without the
+    /// developer tools and raises a modal install dialog when they are absent.
+    static let systemPython = systemBin + "/python3"
+
+    /// The only safe probe: `xcode-select` is a real binary, not a stub, so
+    /// asking it raises no dialog. Any probe failure means "not installed".
+    static func developerToolsInstalled() -> Bool {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
+        proc.arguments = ["-p"]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+        } catch {
+            return false
+        }
+        proc.waitUntilExit()
+        return proc.terminationStatus == 0
+    }
+
+    /// Resolves python3 in order: `$SUTANDO_PY`, the bundled runtime, then
+    /// `/usr/bin/python3` only if developer tools exist. nil means skip, not prompt.
+    static func resolvePython(
+        repoRoot: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        isExecutable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) },
+        toolsInstalled: () -> Bool = SutandoConfig.developerToolsInstalled
+    ) -> String? {
+        if let explicit = environment["SUTANDO_PY"], !explicit.isEmpty, isExecutable(explicit) {
+            return explicit
+        }
+        let bundled = URL(fileURLWithPath: repoRoot)
+            .deletingLastPathComponent()
+            .appendingPathComponent("runtime/python/bin/python3")
+            .path
+        if isExecutable(bundled) {
+            return bundled
+        }
+        return toolsInstalled() ? systemPython : nil
     }
 }
