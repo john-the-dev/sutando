@@ -126,18 +126,62 @@ out = rpt.render(TEMPLATE.replace("<dict>", "<dict>\n    <!-- __REPO__ -->", 1),
 check("value cannot break out of a comment", "-->y" not in out.split("<key>")[0], out[:0] or "")
 
 print("== renderer: CLI exit codes ==")
+# main() is called in-process: a subprocess would not be measured by the
+# coverage gate, so the CLI paths would look untested.
 with tempfile.TemporaryDirectory() as td:
     tpl = pathlib.Path(td) / "t.plist"
     tpl.write_text(TEMPLATE)
     dest = pathlib.Path(td) / "out.plist"
-    ok = subprocess.run([sys.executable, str(REPO / "src" / "render_plist_template.py"),
-                         str(tpl), str(dest), "REPO=/tmp/a&b", "WORKSPACE=/tmp/w",
-                         "PYTHON=/usr/bin/python3"], capture_output=True, text=True)
-    check("CLI exits 0 on success", ok.returncode == 0, ok.stderr)
-    bad = subprocess.run([sys.executable, str(REPO / "src" / "render_plist_template.py"),
-                          str(tpl), str(dest), "REPO=/tmp/r"], capture_output=True, text=True)
-    check("CLI exits non-zero on missing value", bad.returncode != 0,
-          f"rc={bad.returncode}")
+    argv0 = "render_plist_template.py"
+
+    rc = rpt.main([argv0, str(tpl), str(dest), "REPO=/tmp/a&b",
+                   "WORKSPACE=/tmp/w", "PYTHON=/usr/bin/python3"])
+    check("CLI exits 0 on success", rc == 0, f"rc={rc}")
+    # On disk the value is escaped; what matters is the parsed value.
+    check("CLI wrote the destination",
+          dest.exists()
+          and plistlib.loads(dest.read_bytes())["ProgramArguments"][1].startswith("/tmp/a&b"))
+
+    rc = rpt.main([argv0, str(tpl), str(dest), "REPO=/tmp/r"])
+    check("CLI exits 1 on missing value", rc == 1, f"rc={rc}")
+
+    rc = rpt.main([argv0, str(tpl)])
+    check("CLI exits 2 on too few arguments", rc == 2, f"rc={rc}")
+
+    rc = rpt.main([argv0, str(tpl), str(dest), "NOEQUALS"])
+    check("CLI exits 2 on a malformed pair", rc == 2, f"rc={rc}")
+
+    rc = rpt.main([argv0, str(tpl / "nope"), str(dest), "REPO=/tmp/r"])
+    check("CLI exits 1 when the template is unreadable", rc == 1, f"rc={rc}")
+
+    # The CLI is still the real entry point, so check the process exit code too.
+    proc = subprocess.run([sys.executable, str(REPO / "src" / "render_plist_template.py"),
+                           str(tpl), str(dest), "REPO=/tmp/r"], capture_output=True, text=True)
+    check("process exits non-zero on failure", proc.returncode != 0, f"rc={proc.returncode}")
+
+print("== renderer: rejects an empty token name ==")
+try:
+    rpt.render("__X__", {"": "v"})
+    check("empty token raises", False, "no exception")
+except rpt.RenderError:
+    check("empty token raises", True)
+
+print("== renderer: leaves no temp file behind when publishing fails ==")
+with tempfile.TemporaryDirectory() as td:
+    tpl = pathlib.Path(td) / "t.plist"
+    tpl.write_text(TEMPLATE)
+    # A directory at the destination makes os.replace fail after the temp write.
+    dest = pathlib.Path(td) / "adir"
+    dest.mkdir()
+    try:
+        rpt.render_to_file(str(tpl), str(dest), {
+            "REPO": "/tmp/r", "WORKSPACE": "/tmp/w", "PYTHON": "/usr/bin/python3"})
+        check("publish failure propagates", False, "no exception")
+    except OSError:
+        check("publish failure propagates", True)
+    leftovers = [f.name for f in pathlib.Path(td).iterdir()
+                 if f.name.startswith(".plist-render-")]
+    check("temp file cleaned up on failure", not leftovers, str(leftovers))
 
 print("== installers delegate (no installer renders plists itself) ==")
 INSTALLERS = ["install-cron-runner-launchd.sh", "install-health-check-launchd.sh",
