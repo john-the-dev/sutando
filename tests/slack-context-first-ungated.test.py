@@ -38,6 +38,13 @@ os.environ["SLACK_APP_TOKEN"] = "xapp-test-not-real"
 # Deliberately EMPTY: no task-progress, no audio-transcribe.
 os.environ["CLAUDE_CONFIG_DIR"] = str(Path(_tmp) / "claude")
 Path(os.environ["CLAUDE_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)
+# The bridge resolves channel config AT IMPORT and falls back to the operator's
+# real ~/.claude/channels/slack/access.json when the canonical path is missing,
+# so this must be seeded before exec_module — setting CLAUDE_CONFIG_DIR alone
+# is not isolation (scripts/lint-hermetic-bridge-tests.py).
+_cfg = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "channels" / "slack"
+_cfg.mkdir(parents=True, exist_ok=True)
+(_cfg / "access.json").write_text('{"allowFrom": []}')
 
 sys.path.insert(0, str(REPO / "src"))
 for name in ("slack_bolt", "slack_bolt.adapter", "slack_bolt.adapter.socket_mode"):
