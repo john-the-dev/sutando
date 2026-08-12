@@ -1057,9 +1057,8 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
     _transcribe_py = claude_home_path("skills", "audio-transcribe", "scripts", "transcribe.py")
     _claude_config_dir = claude_home_path()
     skill_hints = ""
-    # CONTEXT-FIRST is a correctness step, not a skill hint, so it must not be
-    # gated on task-progress/audio-transcribe being installed. Those steps stay
-    # conditional inside. (Mirrors discord-bridge #1782 + telegram-bridge.)
+    # CONTEXT-FIRST is a correctness step, not a skill hint: it must not be
+    # gated on optional skills. The steps that need them stay conditional inside.
     if access_tier == "owner":
         hints_lines = ["===SKILL INSTRUCTIONS (follow before any other action)==="]
         step = 1

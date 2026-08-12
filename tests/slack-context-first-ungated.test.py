@@ -1,23 +1,6 @@
 #!/usr/bin/env python3
-"""CONTEXT-FIRST must reach owner tasks with NO optional skill installed (#1839).
-
-The guard used to be `access_tier == "owner" and (notify.py exists or
-transcribe.py exists)`, so on a host with neither task-progress nor
-audio-transcribe the entire SKILL INSTRUCTIONS block — including the
-CONTEXT-FIRST step, which is a correctness instruction unrelated to those
-skills — was never written. That is the bug the reviewer reproduced against
-`origin/main`.
-
-Why this file exists separately: `tests/slack-bridge-write-task.test.py` seeds a
-`notify.py` stub into its temp CLAUDE_CONFIG_DIR so it can assert the exact
-notify command, so BOTH guards look identical to it — it passes either way and
-cannot gate this change. `tests/bridge-skill-hints-injection.test.py` used to
-pin the guard's literal text, which failed on any legitimate edit while proving
-nothing about behaviour. This asserts the behaviour instead: neither skill
-present, owner task, CONTEXT-FIRST still injected.
-
-Run: python3 tests/slack-context-first-ungated.test.py
-"""
+"""CONTEXT-FIRST must reach an owner task with NO optional skill installed.
+Separate file: the sibling suites seed a notify.py stub, so neither can gate this."""
 from __future__ import annotations
 
 import importlib.util
@@ -38,10 +21,8 @@ os.environ["SLACK_APP_TOKEN"] = "xapp-test-not-real"
 # Deliberately EMPTY: no task-progress, no audio-transcribe.
 os.environ["CLAUDE_CONFIG_DIR"] = str(Path(_tmp) / "claude")
 Path(os.environ["CLAUDE_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)
-# The bridge resolves channel config AT IMPORT and falls back to the operator's
-# real ~/.claude/channels/slack/access.json when the canonical path is missing,
-# so this must be seeded before exec_module — setting CLAUDE_CONFIG_DIR alone
-# is not isolation (scripts/lint-hermetic-bridge-tests.py).
+# Seed before exec_module: config resolves at import and falls back to the
+# operator's real access.json, so CLAUDE_CONFIG_DIR alone is not isolation.
 _cfg = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "channels" / "slack"
 _cfg.mkdir(parents=True, exist_ok=True)
 (_cfg / "access.json").write_text('{"allowFrom": []}')

@@ -63,21 +63,8 @@ check(
     "slack: SKILL INSTRUCTIONS sentinel present",
     "===SKILL INSTRUCTIONS" in slack_src,
 )
-# The owner-only gate is covered BEHAVIORALLY in
-# tests/slack-bridge-write-task.test.py ("other-tier task: no CONTEXT-FIRST
-# (hints block is owner-only)"), which calls _write_task and inspects the file.
-# The source-grep that used to sit here pinned the guard's TEXT
-# (`access_tier == "owner" and (`), so it failed on any legitimate change to the
-# guard while proving nothing about non-owner behaviour — the same
-# source_grep_tests class removed below per CR #1840.
-# NOTE: the thread-reply embed (PR #1840) — the `[Replying in Slack thread to
-# @root: text]` note built from a conversations_replies fetch — is covered
-# BEHAVIORALLY in tests/slack-bridge-write-task.test.py: it calls _write_task
-# with a threaded event (thread_ts != ts), mocks conversations_replies, and
-# asserts the note is embedded (root user + truncated root text), plus a
-# best-effort path where an API failure is swallowed and the task still writes
-# with no note. The prior source-grep substring/regex checks here were redundant
-# with that and were removed per CR #1840 (source_grep_tests).
+# The owner-only gate and the thread-reply embed are covered behaviourally in
+# tests/slack-bridge-write-task.test.py; a source-grep here pinned only text.
 
 # ---------------------------------------------------------------------------
 # Discord bridge
