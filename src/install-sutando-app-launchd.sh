@@ -85,12 +85,12 @@ case "$cmd" in
         echo "  workspace: $WORKSPACE"
         mkdir -p "$HOME/Library/LaunchAgents"
         mkdir -p "$WORKSPACE/logs"
-        # Render the template.
-        sed \
-            -e "s|__REPO__|$REPO|g" \
-            -e "s|__WORKSPACE__|$WORKSPACE|g" \
-            -e "s|__HOME__|$HOME|g" \
-            "$TEMPLATE" > "$DEST"
+        # Shared renderer: literal substitution + XML escaping + a parse
+        # check, so a path with & < > | cannot install a silently-broken job.
+        "${PYTHON_BIN:-python3}" "$REPO/src/render_plist_template.py" "$TEMPLATE" "$DEST" \
+            "REPO=$REPO" \
+            "WORKSPACE=$WORKSPACE" \
+            "HOME=$HOME" || exit 1
         bootout_if_loaded
         launchctl bootstrap "$DOMAIN" "$DEST"
         # If Sutando.app was already running before install, the launchd-spawned

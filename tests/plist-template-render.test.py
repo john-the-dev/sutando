@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Contract tests for src/render_plist_template.py plus wiring tests for the
+four launchd installers that delegate to it.
+
+Each value tested here is one that the previous `sed -e "s|__TOKEN__|$V|g"`
+rendering handles wrongly:
+
+    /tmp/a&b     sed exits 0, plist parses, path becomes /tmp/a__REPO__b
+    /tmp/a<b>c   sed exits 0, plist is unparseable
+    /tmp/a|b     the value terminates sed's s-expression
+
+The silent case is the first one, so the assertions check the *rendered path*,
+not just that the output parses.
+"""
+
+import importlib.util
+import pathlib
+import re
+import plistlib
+import subprocess
+import sys
+import tempfile
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+spec = importlib.util.spec_from_file_location("rpt", REPO / "src" / "render_plist_template.py")
+rpt = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(rpt)
+
+TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>test.job</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>__REPO__/src/cron-runner.py</string>
+    </array>
+    <key>WorkingDirectory</key><string>__WORKSPACE__</string>
+</dict>
+</plist>
+"""
+
+HOSTILE = ["/tmp/a&b", "/tmp/a<b>c", "/tmp/a|b", "/tmp/a'b", '/tmp/a"b', "/tmp/a\\b", "/tmp/plain"]
+
+failures = []
+
+
+def check(name, cond, detail=""):
+    if cond:
+        print(f"  PASS {name}")
+    else:
+        failures.append(name)
+        print(f"  FAIL {name} {detail}")
+
+
+def rendered_paths(repo):
+    """Render with *repo* and return (program-arg, working-dir) as the OS sees them."""
+    with tempfile.TemporaryDirectory() as td:
+        tpl = pathlib.Path(td) / "t.plist"
+        tpl.write_text(TEMPLATE)
+        dest = pathlib.Path(td) / "out.plist"
+        rpt.render_to_file(str(tpl), str(dest), {
+            "REPO": repo, "WORKSPACE": repo + "/ws", "PYTHON": "/usr/bin/python3",
+        })
+        d = plistlib.loads(dest.read_bytes())
+        return d["ProgramArguments"][1], d["WorkingDirectory"]
+
+
+print("== renderer: hostile values survive substitution ==")
+for repo in HOSTILE:
+    try:
+        arg, wd = rendered_paths(repo)
+        check(f"value {repo!r} round-trips",
+              arg == repo + "/src/cron-runner.py" and wd == repo + "/ws",
+              f"got arg={arg!r} wd={wd!r}")
+    except Exception as exc:
+        check(f"value {repo!r} round-trips", False, f"raised {type(exc).__name__}: {exc}")
+
+print("== renderer: the specific silent-corruption case ==")
+arg, _ = rendered_paths("/tmp/a&b")
+check("ampersand does not re-emit the token", "__REPO__" not in arg, f"got {arg!r}")
+
+print("== renderer: refuses to publish a bad render ==")
+with tempfile.TemporaryDirectory() as td:
+    tpl = pathlib.Path(td) / "t.plist"
+    tpl.write_text(TEMPLATE)
+    dest = pathlib.Path(td) / "out.plist"
+    dest.write_text("PREEXISTING")
+
+    # Missing value -> leftover placeholder -> raise, destination untouched.
+    try:
+        rpt.render_to_file(str(tpl), str(dest), {"REPO": "/tmp/r"})
+        check("missing value raises", False, "no exception")
+    except rpt.RenderError as exc:
+        check("missing value raises", "PYTHON" in str(exc) and "WORKSPACE" in str(exc), str(exc))
+    check("destination untouched after failure", dest.read_text() == "PREEXISTING")
+
+    # A template that cannot parse even when fully substituted.
+    bad = pathlib.Path(td) / "bad.plist"
+    bad.write_text("<plist><dict><key>x</key><string>__REPO__</string>")
+    try:
+        rpt.render_to_file(str(bad), str(dest), {"REPO": "/tmp/r"})
+        check("unparseable render raises", False, "no exception")
+    except rpt.RenderError as exc:
+        check("unparseable render raises", "not a valid plist" in str(exc), str(exc))
+    check("destination untouched after parse failure", dest.read_text() == "PREEXISTING")
+
+print("== renderer: tolerates what launchd tolerates ==")
+# A shipped template has "--" in a comment: launchd accepts it, Expat does not,
+# so validating raw text would break that installer.
+with tempfile.TemporaryDirectory() as td:
+    tpl = pathlib.Path(td) / "t.plist"
+    tpl.write_text(TEMPLATE.replace("<dict>", "<dict>\n    <!-- runs with --emit-task --quiet -->", 1))
+    dest = pathlib.Path(td) / "out.plist"
+    try:
+        rpt.render_to_file(str(tpl), str(dest), {
+            "REPO": "/tmp/r", "WORKSPACE": "/tmp/w", "PYTHON": "/usr/bin/python3"})
+        check("double-dash in a comment still renders", True)
+    except rpt.RenderError as exc:
+        check("double-dash in a comment still renders", False, str(exc))
+
+# Escaping means a value can never terminate a comment, so stripping comments
+# before the parse check cannot be used to smuggle in malformed output.
+out = rpt.render(TEMPLATE.replace("<dict>", "<dict>\n    <!-- __REPO__ -->", 1), {"REPO": "x-->y"})
+check("value cannot break out of a comment", "-->y" not in out.split("<key>")[0], out[:0] or "")
+
+print("== renderer: CLI exit codes ==")
+with tempfile.TemporaryDirectory() as td:
+    tpl = pathlib.Path(td) / "t.plist"
+    tpl.write_text(TEMPLATE)
+    dest = pathlib.Path(td) / "out.plist"
+    ok = subprocess.run([sys.executable, str(REPO / "src" / "render_plist_template.py"),
+                         str(tpl), str(dest), "REPO=/tmp/a&b", "WORKSPACE=/tmp/w",
+                         "PYTHON=/usr/bin/python3"], capture_output=True, text=True)
+    check("CLI exits 0 on success", ok.returncode == 0, ok.stderr)
+    bad = subprocess.run([sys.executable, str(REPO / "src" / "render_plist_template.py"),
+                          str(tpl), str(dest), "REPO=/tmp/r"], capture_output=True, text=True)
+    check("CLI exits non-zero on missing value", bad.returncode != 0,
+          f"rc={bad.returncode}")
+
+print("== installers delegate (no installer renders plists itself) ==")
+INSTALLERS = ["install-cron-runner-launchd.sh", "install-health-check-launchd.sh",
+              "install-sutando-app-launchd.sh", "install-credential-proxy-launchd.sh"]
+for name in INSTALLERS:
+    text = (REPO / "src" / name).read_text()
+    check(f"{name} calls the shared renderer", "render_plist_template.py" in text)
+    # Match the substitution expression wherever it sits, so a one-line sed
+    # fails too. Other sed uses in these scripts are fine.
+    templating = [ln for ln in text.splitlines()
+                  if re.search(r"s\|__[A-Z0-9_]+__\|", ln)]
+    check(f"{name} has no sed plist templating", not templating, str(templating[:2]))
+
+print()
+if failures:
+    print(f"FAILED {len(failures)}: {failures}")
+    sys.exit(1)
+print("all plist-template-render checks passed")
