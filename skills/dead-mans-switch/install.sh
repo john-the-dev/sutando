@@ -65,11 +65,21 @@ case "$cmd" in
         echo "  workspace: $WORKSPACE"
         mkdir -p "$HOME/Library/LaunchAgents"
         mkdir -p "$WORKSPACE/logs"
-        sed \
-            -e "s|__REPO__|$REPO|g" \
-            -e "s|__WORKSPACE__|$WORKSPACE|g" \
-            -e "s|__HOMEBREW_BIN__|$BREW_BIN|g" \
-            "$TEMPLATE" > "$DEST"
+        # Not sed: `&` in a replacement means "the matched text", `|` is the
+        # delimiter, and plist values need XML escaping. A path with any of
+        # those silently produced a corrupt ProgramArguments and exit 0.
+        python3 - "$TEMPLATE" "$DEST" "$REPO" "$WORKSPACE" "$BREW_BIN" <<'PY'
+import sys
+from xml.sax.saxutils import escape
+
+template, dest, repo, workspace, brew_bin = sys.argv[1:6]
+text = open(template, encoding="utf-8").read()
+for token, value in (("__REPO__", repo),
+                     ("__WORKSPACE__", workspace),
+                     ("__HOMEBREW_BIN__", brew_bin)):
+    text = text.replace(token, escape(value))
+open(dest, "w", encoding="utf-8").write(text)
+PY
         bootout_if_loaded
         launchctl bootstrap "$DOMAIN" "$DEST"
         echo "  Loaded via $SERVICE"
