@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""CONTEXT-FIRST must reach owner tasks with NO optional skill installed (#1839).
+
+The guard used to be `access_tier == "owner" and (notify.py exists or
+transcribe.py exists)`, so on a host with neither task-progress nor
+audio-transcribe the entire SKILL INSTRUCTIONS block — including the
+CONTEXT-FIRST step, which is a correctness instruction unrelated to those
+skills — was never written. That is the bug the reviewer reproduced against
+`origin/main`.
+
+Why this file exists separately: `tests/slack-bridge-write-task.test.py` seeds a
+`notify.py` stub into its temp CLAUDE_CONFIG_DIR so it can assert the exact
+notify command, so BOTH guards look identical to it — it passes either way and
+cannot gate this change. `tests/bridge-skill-hints-injection.test.py` used to
+pin the guard's literal text, which failed on any legitimate edit while proving
+nothing about behaviour. This asserts the behaviour instead: neither skill
+present, owner task, CONTEXT-FIRST still injected.
+
+Run: python3 tests/slack-context-first-ungated.test.py
+"""
+from __future__ import annotations
+
+import importlib.util
+import os
+import sys
+import tempfile
+import types
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+REPO = Path(__file__).resolve().parent.parent
+_tmp = tempfile.mkdtemp(prefix="slack-cf-")
+
+os.environ["SUTANDO_TEST_MODE"] = "1"
+os.environ["SLACK_BOT_TOKEN"] = "xoxb-test-not-real"
+os.environ["SLACK_APP_TOKEN"] = "xapp-test-not-real"
+# Deliberately EMPTY: no task-progress, no audio-transcribe.
+os.environ["CLAUDE_CONFIG_DIR"] = str(Path(_tmp) / "claude")
+Path(os.environ["CLAUDE_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)
+
+sys.path.insert(0, str(REPO / "src"))
+for name in ("slack_bolt", "slack_bolt.adapter", "slack_bolt.adapter.socket_mode"):
+    sys.modules.setdefault(name, types.ModuleType(name))
+sys.modules["slack_bolt"].App = lambda *a, **k: types.SimpleNamespace(
+    event=lambda *a, **k: (lambda f: f), client=types.SimpleNamespace())
+sys.modules["slack_bolt.adapter.socket_mode"].SocketModeHandler = lambda *a, **k: None
+
+_spec = importlib.util.spec_from_file_location("slack_bridge", REPO / "src" / "slack-bridge.py")
+mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(mod)
+
+
+class ContextFirstUngated(unittest.TestCase):
+    def _write(self, tier: str = "owner") -> str:
+        uid = "U_OWNER"
+        event = {"user": uid, "channel": "CFAKE", "channel_type": "im", "ts": "1000.001"}
+        with patch.object(mod, "load_allowed", lambda: {uid}), \
+             patch.object(mod, "_ensure_tier_map_seeded", lambda: True), \
+             patch.object(mod, "load_tier_map", lambda: {uid: tier}), \
+             patch.object(mod, "write_owner_activity", lambda *a, **k: None):
+            mod._write_task(event, "DM", "please check the Zacks", "testowner")
+        files = sorted(Path(mod.TASKS_DIR).glob("task-*.txt"))
+        self.assertTrue(files, "no task file written")
+        return files[-1].read_text()
+
+    def test_neither_skill_installed_still_gets_context_first(self):
+        notify = mod.claude_home_path("skills", "task-progress", "scripts", "notify.py")
+        transcribe = mod.claude_home_path("skills", "audio-transcribe", "scripts", "transcribe.py")
+        self.assertFalse(notify.exists(), "harness must have NO task-progress skill")
+        self.assertFalse(transcribe.exists(), "harness must have NO audio-transcribe skill")
+
+        body = self._write("owner")
+        self.assertIn("===SKILL INSTRUCTIONS", body,
+                      "owner task lost its instructions block because no optional skill was installed")
+        self.assertIn("CONTEXT-FIRST", body,
+                      "CONTEXT-FIRST is a correctness step and must not be gated on optional skills")
+
+    def test_non_owner_still_gets_nothing(self):
+        """The owner-only gate must survive the ungating — this is the half that
+        should stay conditional."""
+        body = self._write("other")
+        self.assertNotIn("===SKILL INSTRUCTIONS", body)
+        self.assertNotIn("CONTEXT-FIRST", body)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
