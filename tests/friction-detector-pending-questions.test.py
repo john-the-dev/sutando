@@ -13,11 +13,14 @@ Exit: 0 = pass, 1 = fail
 """
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 # Load friction-detector (hyphenated filename) via importlib.
 import importlib
@@ -105,6 +108,39 @@ class TestCheckPendingQuestionsFreForm(unittest.TestCase):
             f"Section below # Resolved should be excluded. Got: {result}",
         )
 
+    def test_divider_documented_in_a_comment_is_not_the_divider(self):
+        """A `# Resolved` line inside an HTML comment must not end the active region.
+
+        The live outage: the file's own banner warns writers not to append at EOF
+        and quotes the rule it documents, putting `` # Resolved` heading `` at the
+        start of a line inside the comment. The old anchor matched that, so the
+        active region collapsed to the banner and every real section read as
+        archived.
+        """
+        content = f"""<!-- =====
+     WRITERS READ THIS FIRST — the parser truncates at the first `
+# Resolved` heading
+     and only counts sections ABOVE it.
+     ===== -->
+
+## Open question
+- **Asked:** {_OLD}
+
+# Resolved
+
+## Already done
+- **Asked:** {_OLD}
+"""
+        result = _make_module_with_pq(content)
+        self.assertTrue(
+            any("Open question" in r for r in result),
+            f"Decoy inside the banner must not truncate the file. Got: {result}",
+        )
+        self.assertFalse(
+            any("Already done" in r for r in result),
+            f"The real divider must still be honored. Got: {result}",
+        )
+
     def test_none_open_placeholder_returns_empty(self):
         """Standard '(none open)' content returns empty."""
         content = "# Pending Questions\n\n_(none open)_\n"
@@ -157,6 +193,111 @@ class TestCheckPendingQuestionsFreForm(unittest.TestCase):
         self.assertIn("d old", result[0], f"Age not in output: {result[0]}")
 
 
+class TestCheckGithubIssues(unittest.TestCase):
+    """Tests for check_github_issues() stale-issue detection.
+
+    Mocks subprocess.run to exercise the timezone-aware comparison path
+    without requiring a live GitHub token.
+    """
+
+    def _call_with_mock_gh(self, updated_at: str):
+        import json as _json
+        import unittest.mock as _mock
+
+        mock_items = [{"number": 99, "title": "test issue", "updatedAt": updated_at}]
+        fake_result = _mock.MagicMock()
+        fake_result.returncode = 0
+        fake_result.stdout = _json.dumps(mock_items)
+
+        with _mock.patch.object(_fd_mod.subprocess, "run", return_value=fake_result):
+            return _fd_mod.check_github_issues()
+
+    def test_stale_issue_reported(self):
+        """Issues older than 7 days are reported as stale."""
+        old_ts = (datetime.now(tz=__import__("datetime").timezone.utc) - timedelta(days=10)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        issues = self._call_with_mock_gh(old_ts)
+        self.assertTrue(
+            any("#99" in i for i in issues),
+            f"Stale issue should be reported; got: {issues}",
+        )
+
+    def test_fresh_issue_not_reported(self):
+        """Issues updated within 7 days are not reported."""
+        fresh_ts = (datetime.now(tz=__import__("datetime").timezone.utc) - timedelta(days=3)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        issues = self._call_with_mock_gh(fresh_ts)
+        self.assertFalse(
+            any("#99" in i for i in issues),
+            f"Fresh issue should not be reported; got: {issues}",
+        )
+
+
+class TestCheckStaleTasks(unittest.TestCase):
+    """Completed task/result pairs must not be reported as stale work."""
+
+    def _call(self, result_location: Optional[str]) -> list:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            tasks = workspace / "tasks"
+            results = workspace / "results"
+            tasks.mkdir()
+            results.mkdir()
+
+            name = "task-cron-main-loop-123.txt"
+            task = tasks / name
+            task.write_text("source: cron\n")
+            old = time.time() - 2 * 3600
+            os.utime(task, (old, old))
+
+            if result_location == "live":
+                (results / name).write_text("[no-send]\n")
+            elif result_location == "bridge-archive":
+                archive = results / "archive" / "2026-08"
+                archive.mkdir(parents=True)
+                (archive / name).write_text("[no-send]\n")
+            elif result_location == "flat-archive":
+                archive = results / "archive"
+                archive.mkdir()
+                (archive / name).write_text("[no-send]\n")
+            elif result_location == "non-file":
+                (results / name).mkdir()
+            elif result_location == "retention-archive":
+                archive = results / "archive-2026-08-02"
+                archive.mkdir()
+                (archive / name).write_text("[no-send]\n")
+
+            original_workspace = _fd_mod.WORKSPACE
+            original_results = _fd_mod.RESULTS_DIR
+            _fd_mod.WORKSPACE = workspace
+            _fd_mod.RESULTS_DIR = results
+            try:
+                return _fd_mod.check_stale_tasks()
+            finally:
+                _fd_mod.WORKSPACE = original_workspace
+                _fd_mod.RESULTS_DIR = original_results
+
+    def test_unprocessed_old_task_is_reported(self):
+        self.assertEqual(len(self._call(None)), 1)
+
+    def test_live_result_marks_task_complete(self):
+        self.assertEqual(self._call("live"), [])
+
+    def test_bridge_archived_result_marks_task_complete(self):
+        self.assertEqual(self._call("bridge-archive"), [])
+
+    def test_flat_archived_result_marks_task_complete(self):
+        self.assertEqual(self._call("flat-archive"), [])
+
+    def test_result_named_directory_does_not_mark_task_complete(self):
+        self.assertEqual(len(self._call("non-file")), 1)
+
+    def test_retention_archived_result_marks_task_complete(self):
+        self.assertEqual(self._call("retention-archive"), [])
+
+
 class TestFreFormParserStructural(unittest.TestCase):
     """Structural checks on the source code to confirm the fix is in place."""
 
@@ -170,10 +311,24 @@ class TestFreFormParserStructural(unittest.TestCase):
             "Parser must not require **Status: unanswered** — free-form files never write this.",
         )
 
-    def test_resolved_divider_honored(self):
-        """Parser must split on `# Resolved` divider."""
-        self.assertIn("Resolved", self.SRC)
-        self.assertIn("re.split", self.SRC)
+    def test_divider_logic_is_not_reimplemented_locally(self):
+        """The divider cut must come from the shared helper, not a local regex.
+
+        This replaces an `assertIn("re.split", SRC)` text-grep. That assertion
+        tracked one spelling of the implementation rather than the property it
+        cared about, so the 2026-07-30 refactor — which preserved the behavior and
+        is covered behaviorally by test_below_resolved_divider_excluded and
+        test_divider_documented_in_a_comment_is_not_the_divider — reported a
+        failure with nothing behaviorally wrong.
+
+        The property actually worth guarding is the opposite one: four readers
+        each owning a private copy of this regex is what let a single defect go
+        dark in four places at once, so a LOCAL redefinition is the regression.
+        """
+        self.assertIn("active_region", self.SRC,
+                      "friction-detector must delegate the divider cut to pending_questions_md")
+        self.assertNotIn("re.split(r'^#", self.SRC,
+                         "divider regex must not be reimplemented locally")
 
     def test_explicit_resolved_regex_present(self):
         """Parser must recognize explicit resolved/answered/done status."""

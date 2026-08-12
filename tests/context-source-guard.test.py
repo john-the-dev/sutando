@@ -8,7 +8,11 @@ contained: a fixture access.json + a temp workspace are pointed at via env
 so no live Discord is touched. All ids are FICTITIOUS. Run:
   python3 tests/context-source-guard.test.py
 """
-import json, os, subprocess, tempfile, sys
+import json
+import os
+import subprocess
+import tempfile
+import sys
 from pathlib import Path
 
 HOOK = str(Path(__file__).resolve().parent.parent / "hooks" / "context-source-guard.py")
@@ -41,8 +45,23 @@ ENV.pop("DISCORD_BOT_TOKEN", None)  # force offline (cache-only) guild resolutio
 
 
 def run(payload, env=ENV):
-    return subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
-                          capture_output=True, text=True, timeout=20, env=env).stdout.strip()
+    # Assert the hook EXITED CLEANLY, not just that it printed something.
+    #
+    # The allow path is "exit 0 and print nothing" by design, and `is_deny()`
+    # returns False for any unparseable output — so a hook that CRASHED (empty
+    # stdout, non-zero exit) is indistinguishable from one that allowed. Every
+    # `assert not is_deny(...)` case below would pass on a crash; only the deny
+    # cases would catch it. Half this suite was blind, and it guards a security
+    # boundary.
+    #
+    # Same shape as the audit-script false green: a subprocess check that reads
+    # output but discards returncode cannot tell "ran" from "crashed".
+    proc = subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
+                          capture_output=True, text=True, timeout=20, env=env)
+    assert proc.returncode == 0, (
+        f"hook exited {proc.returncode} (expected 0). "
+        f"stderr: {proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else 'none'}")
+    return proc.stdout.strip()
 
 
 def is_deny(out):
@@ -108,6 +127,52 @@ run(read_task(PUBLIC_CH)[0], env=ENV_HOST)
 assert is_deny(run(bash_read(PRIVATE_CH), env=ENV_HOST)), \
     "per-host CLAUDE_CONFIG_DIR: walk up to nearest .claude-sutando ancestor, resolution stays on <WS>"
 
+# 9) inner-fail-closed: exception inside the gated section (non-empty blacklist) must DENY,
+#    not allow. Import the hook as a module and monkey-patch _resolve_guild to throw; the
+#    inner try/except re-raises SystemExit from _deny() correctly and wraps other exceptions.
+#    This exercises the security fix for finding #4 of the 2026-07-07 audit.
+import importlib.util
+spec = importlib.util.spec_from_file_location("csg", HOOK)
+csg_mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(csg_mod)
+
+# Point module globals at the fixture workspace so _active_serving / _blacklist work.
+csg_mod.ACCESS_FILE = acc.name
+csg_mod.STATE = str(STATE_DIR / "active-serving-channel.json")
+csg_mod._GUILD_CACHE = str(STATE_DIR / ".channel-guild-cache.json")
+
+# Seed serving channel to PUBLIC_CH (which has a non-empty blacklist).
+csg_mod._record_serving(PUBLIC_CH)
+
+# Make _resolve_guild throw to simulate an unexpected runtime error in the gated section.
+_orig_resolve = csg_mod._resolve_guild
+csg_mod._resolve_guild = lambda cid, token: (_ for _ in ()).throw(RuntimeError("simulated crash"))
+
+_denied_in_gated_section = False
+try:
+    csg_mod.main.__globals__["sys"] = sys  # share sys so sys.exit propagates
+    # Simulate the Bash payload that hits the critical section.
+    import io
+    _payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": f"curl .../channels/{PRIVATE_CH}/messages?limit=5"}})
+    _orig_stdin = sys.stdin
+    sys.stdin = io.StringIO(_payload)
+    try:
+        csg_mod.main()
+    except SystemExit as _e:
+        _denied_in_gated_section = (_e.code == 0)  # _deny() calls sys.exit(0)
+    finally:
+        sys.stdin = _orig_stdin
+except Exception:
+    pass
+finally:
+    csg_mod._resolve_guild = _orig_resolve
+
+# The deny output should have been written to stdout — check it landed.
+# Since we can't capture it cleanly here (stdout isn't redirected), verify
+# the test completed without an unhandled exception and the SystemExit was raised.
+assert _denied_in_gated_section, "inner gated section: exception must fail-closed (deny), not fail-open"
+
 print("PASS: context-source-guard — serve public-ch blocks a private-guild read (Read- and cat-paths, "
       "+ fail-closed), allows public channels, serving the private channel reads itself, plain bash untouched, "
-      "+ SUTANDO_WORKSPACE ignored (#1698), + per-host CLAUDE_CONFIG_DIR resolves via nearest .claude-sutando ancestor)")
+      "+ SUTANDO_WORKSPACE ignored (#1698), + per-host CLAUDE_CONFIG_DIR resolves via nearest .claude-sutando ancestor, "
+      "+ inner gated section: exception fails-closed (security finding #4 fix)")
