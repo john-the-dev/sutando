@@ -1245,13 +1245,8 @@ function persistExpanded() {
 }
 
 // ─── Transcript persistence ──────────────────────────────
-// The conversation transcript (#transcript) was in-DOM only: append-only with
-// no persistence and no restore-on-load, so a page reload wiped the entire
-// chat. (The Tasks list survived via taskMap; the transcript did not — which is
-// why a reload left task entries but no chat bubbles.) Snapshot transcript
-// entries to localStorage and restore them on load. A MutationObserver captures
-// every append path (text replies, voice transcripts, images) without having to
-// edit each call site.
+// A MutationObserver is used so every append path is captured without editing
+// each call site.
 const PERSIST_KEY_TRANSCRIPT = 'sutando-transcript-v1';
 const TRANSCRIPT_MAX_ENTRIES = 50;
 const TRANSCRIPT_MAX_ENTRY_LEN = 20000; // skip oversized entries (e.g. data-URL images) to stay under localStorage quota
@@ -1270,11 +1265,8 @@ function snapshotTranscript() {
       return { cls: el.className, html: clone.innerHTML };
     }).map(e => {
       if (!e.html) return null;
-      // Oversized entries (data-URL images) can't fit in localStorage — but a
-      // silent drop would make the restored transcript lie by omission.
-      // Persist a small static placeholder instead, so the bubble survives
-      // the reload and says why the image didn't. (Static markup only, no
-      // user content.)
+      // Oversized entries get a static placeholder, not a silent drop: omitting
+      // the bubble would make the restored transcript lie. Never user content.
       if (e.html.length >= TRANSCRIPT_MAX_ENTRY_LEN) {
         return { cls: e.cls, html: '<em class="t-not-persisted">[image/attachment not kept across reloads — too large for local storage]</em>' };
       }
