@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Contract tests for src/render_plist_template.py and wiring tests for the
-four launchd installers that delegate to it.
-"""
+"""Contract tests for src/render_plist_template.py plus wiring tests for the
+four launchd installers that delegate to it."""
 
 import importlib.util
 import pathlib

@@ -109,10 +109,8 @@ case "$cmd" in
         echo "  brew bin:  $BREW_BIN"
         mkdir -p "$HOME/Library/LaunchAgents"
         mkdir -p "$WORKSPACE/logs"
-        # Shared renderer: literal substitution + XML escaping + a parse check.
-        # Every value here is caller-influenced, so all get the same treatment.
-        # Resolve via the shared helper: a bare python3 can be the Xcode-CLT
-        # stub, which passes an existence check and raises the install dialog.
+        # Escaping renderer + resolved interpreter: a bare python3 can be the
+        # Xcode-CLT stub, which passes an existence check and raises the dialog.
         . "$REPO/scripts/python-binary.sh"
         _PY="$(require_python "$REPO" "install the credential-proxy launchd job")" || exit 1
         "$_PY" "$REPO/src/render_plist_template.py" "$TEMPLATE" "$DEST" \
