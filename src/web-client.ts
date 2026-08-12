@@ -2543,8 +2543,10 @@ const PERSIST_KEY_CHAT_PENDING = 'sutando-dashboard-chat-pending-v1';
 const CHAT_POLL_FAST_MS = 2 * 1000;            // cadence during the fast window
 const CHAT_POLL_SLOW_MS = 15 * 1000;           // cadence after the fast window
 const CHAT_POLL_FAST_WINDOW_MS = 2 * 60 * 1000;// poll every 2s for the first 2 min
-const CHAT_POLL_MAX_MS = 30 * 60 * 1000;       // hard ceiling for one in-page poll
-const CHAT_PENDING_TTL_MS = 30 * 60 * 1000;    // GC persisted entries older than this on load
+const CHAT_POLL_MAX_MS = 30 * 60 * 1000;       // ceiling for ONE page session's polling
+// Must stay strictly greater than the poll ceiling: an entry kept for a reload
+// to recover is by definition already older than the ceiling that stopped it.
+const CHAT_PENDING_TTL_MS = 24 * 60 * 60 * 1000;
 function loadPendingChatSends() {
   try {
     const cutoff = Date.now() - CHAT_PENDING_TTL_MS;
@@ -2584,14 +2586,16 @@ function renderChatReply(el, resultText) {
   addCopyBtn(el);
 }
 // Poll the task bridge for a chat reply and render it into placeholderEl when
-// it arrives. startedAt lets a resumed poll honor the original send time so the
-// overall wait is bounded across reloads. Backs the cadence off after the fast
-// window. On completion it clears the persisted entry; on the hard ceiling it
-// stops the in-page timer but KEEPS the entry so a reload re-attaches and still
-// renders the reply (the result is served from results/archive indefinitely).
-function pollChatReply(taskId, placeholderEl, startedAt) {
+// it arrives. Backs the cadence off after the fast window. On completion it
+// clears the persisted entry; on the ceiling it stops this session's timer but
+// KEEPS the entry so a reload re-attaches and still renders the reply (the
+// result is served from results/archive indefinitely).
+// sentAt is display/context only. The ceiling deliberately runs from THIS
+// session's start: measuring it from the original send made a resumed poll
+// exceed it on its first tick and return without ever calling /result.
+function pollChatReply(taskId, placeholderEl, sentAt) {
   const apiBase = 'http://' + location.hostname + ':7843';
-  const begin = startedAt || Date.now();
+  const begin = Date.now();
   let timer = null;
   const stop = () => { if (timer) { clearTimeout(timer); timer = null; } };
   const schedule = (elapsed) => {
