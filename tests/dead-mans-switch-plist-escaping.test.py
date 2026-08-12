@@ -42,7 +42,7 @@ def check(label, cond, detail=""):
 def substitution_block() -> str:
     """The python heredoc install.sh actually runs."""
     src = INSTALL_SH.read_text(encoding="utf-8")
-    m = re.search(r"python3 - .*?<<'PY'\n(.*?)\nPY\n", src, re.DOTALL)
+    m = re.search(r"""[\w"$_]+ - .*?<<'PY'\n(.*?)\nPY\n""", src, re.DOTALL)
     assert m, "substitution block not found in install.sh — did the installer change shape?"
     return m.group(1)
 
