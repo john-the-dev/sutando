@@ -893,12 +893,8 @@ function getDefaultWsUrl() {
   return protocol + '//' + hostname + ':' + WS_PORT;
 }
 
-// The transcript + input bar live in #bottom-panel, which is position:fixed at
-// the bottom. The dashboard (#dynamic-region: tasks/notes/questions) is normal
-// flow above it. A static body padding-bottom can't reserve space for the
-// transcript, which grows up to 50vh — so a tall chat history would float over
-// and cover the dashboard's Questions panel. Keep body padding-bottom in sync
-// with the panel's real height so dashboard content is always pushed clear.
+// #bottom-panel is position:fixed and grows to 50vh, so a static body
+// padding-bottom cannot reserve its space — keep the two in sync.
 function syncBottomPad() {
   const bp = $('bottom-panel');
   if (bp) document.body.style.paddingBottom = (bp.offsetHeight + 12) + 'px';
