@@ -20,6 +20,22 @@ set -e
 LABEL="com.sutando.deadman-ping"
 SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$SKILL_DIR/../.." && pwd)"
+
+# A launchd job's PATH falls through to /usr/bin, where a clean Mac's `python3`
+# is the Xcode-CLT stub: `command -v` succeeds, then invoking it raises the
+# install dialog. Prove the interpreter RUNS before using it.
+_pick_py() {
+    local c
+    for c in "${SUTANDO_PY:-}" "$REPO/../runtime/python/bin/python3" \
+             /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
+        [ -n "$c" ] || continue
+        if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys' >/dev/null 2>&1; then
+            printf '%s\n' "$c"; return 0
+        fi
+    done
+    return 1
+}
+PY_BIN="$(_pick_py || true)"
 TEMPLATE="$SKILL_DIR/launchd/$LABEL.plist"
 DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
@@ -70,7 +86,7 @@ case "$cmd" in
         # Not sed: `&` in a replacement means "the matched text", `|` is the
         # delimiter, and plist values need XML escaping. A path with any of
         # those silently produced a corrupt ProgramArguments and exit 0.
-        python3 - "$TEMPLATE" "$DEST" "$REPO" "$WORKSPACE" "$BREW_BIN" <<'PY'
+        "$PY_BIN" - "$TEMPLATE" "$DEST" "$REPO" "$WORKSPACE" "$BREW_BIN" <<'PY'
 import sys
 from xml.sax.saxutils import escape
 
@@ -96,7 +112,7 @@ PY
         for _ in $(seq 1 10); do
             sleep 1
             if [ -f "$LOG" ]; then
-                mt="$(python3 -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' "$LOG" 2>/dev/null || echo 0)"
+                mt="$([ -n "$PY_BIN" ] && "$PY_BIN" -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' "$LOG" 2>/dev/null || echo 0)"
                 if [ "$mt" -ge "$before" ]; then ok=1; break; fi
             fi
             # A configured-and-healthy run writes nothing to the log (quiet
@@ -113,7 +129,7 @@ PY
             echo "    or check $LOG — same TCC gate as the health-check fallback (#1897)."
         fi
         echo
-        if [ -n "${HEALTHCHECKS_PING_URL:-}" ] || python3 "$REPO/skills/secret-vault/secret-vault.py" get HEALTHCHECKS_PING_URL >/dev/null 2>&1; then
+        if [ -n "${HEALTHCHECKS_PING_URL:-}" ] || { [ -n "$PY_BIN" ] && "$PY_BIN" "$REPO/skills/secret-vault/secret-vault.py" get HEALTHCHECKS_PING_URL >/dev/null 2>&1; }; then
             echo "Dead-man's switch is ARMED — pinging every 5 min."
         else
             echo "Job installed but UNARMED — no ping URL configured yet."

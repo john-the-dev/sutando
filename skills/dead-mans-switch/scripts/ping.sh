@@ -28,6 +28,22 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 
+# A launchd job's PATH falls through to /usr/bin, where a clean Mac's `python3`
+# is the Xcode-CLT stub: `command -v` succeeds, then invoking it raises the
+# install dialog. Prove the interpreter RUNS before using it.
+_pick_py() {
+    local c
+    for c in "${SUTANDO_PY:-}" "$REPO/../runtime/python/bin/python3" \
+             /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
+        [ -n "$c" ] || continue
+        if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys' >/dev/null 2>&1; then
+            printf '%s\n' "$c"; return 0
+        fi
+    done
+    return 1
+}
+PY_BIN="$(_pick_py || true)"
+
 # Per-host label — lockstep with `_host_label()` in src/util_paths.py (the
 # derivation the heartbeat writer uses for state/cores/<host>.alive). MUST match
 # it or the switch pings /fail forever on a host with a label override even
@@ -55,7 +71,7 @@ _host_label() {
 
 URL="${HEALTHCHECKS_PING_URL:-}"
 if [ -z "$URL" ]; then
-    URL="$(command -v python3 >/dev/null 2>&1 && python3 "$REPO/skills/secret-vault/secret-vault.py" get HEALTHCHECKS_PING_URL 2>/dev/null || true)"
+    URL="$([ -n "$PY_BIN" ] && "$PY_BIN" "$REPO/skills/secret-vault/secret-vault.py" get HEALTHCHECKS_PING_URL 2>/dev/null || true)"
 fi
 if [ -z "$URL" ]; then
     # Not configured — installed-but-unarmed is a supported state.
@@ -77,7 +93,7 @@ fi
 # across BSD/GNU). Missing file or unreadable mtime = down.
 suffix="/fail"
 if [ -f "$ALIVE" ]; then
-    age="$(python3 -c 'import os,sys,time; print(int(time.time() - os.path.getmtime(sys.argv[1])))' "$ALIVE" 2>/dev/null || echo 99999)"
+    age="$([ -n "$PY_BIN" ] && "$PY_BIN" -c 'import os,sys,time; print(int(time.time() - os.path.getmtime(sys.argv[1])))' "$ALIVE" 2>/dev/null || echo 99999)"
     if [ "$age" -le 90 ] 2>/dev/null; then
         suffix=""
     fi
