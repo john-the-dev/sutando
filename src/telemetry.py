@@ -235,23 +235,21 @@ def _install_surface() -> str:
     return "oss"
 
 
-# A model id is a short categorical token (``claude-opus-4-8``,
-# ``claude-sonnet-5``, …). The sources below — env vars and Claude Code's
-# settings.json — are user/tenant-controlled, so a value can be a custom alias
-# carrying a tenant name, endpoint, path, or other identifier. Enforce the
-# documented categorical/no-PII contract at the boundary: lowercase, length-cap,
-# and require a safe charset ([a-z0-9._-], leading alphanumeric); anything else
-# collapses to ``unknown`` so no unbounded-cardinality or sensitive string can
-# reach PostHog through this property (CR #2148, qingyun-wu).
+# Model sources are tenant-controlled, so an alias like `acme-prod` satisfies any
+# charset check; only a family allow-list keeps it off the wire.
+_MODEL_FAMILIES = ("claude", "gpt", "o1", "o3", "o4", "gemini", "llama", "mistral",
+                   "qwen", "deepseek", "grok", "codex", "haiku", "sonnet", "opus")
 _MODEL_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,39}")
 
 
 def _coarse_model(raw: str) -> str:
-    """Normalize a raw model string to a bounded categorical token, or
-    ``unknown``. Blocks whitespace, path/endpoint separators (``/``, ``:``,
-    ``@``), and over-long values — the vectors for PII / high cardinality."""
+    """Normalize to a known model family token, else ``unknown``: an
+    environment-controlled alias must never reach the wire verbatim."""
     s = (raw or "").strip().lower()
-    return s if _MODEL_RE.fullmatch(s) else "unknown"
+    if not _MODEL_RE.fullmatch(s):
+        return "unknown"
+    return s if s.split("-", 1)[0] in _MODEL_FAMILIES or any(
+        s.startswith(f + "-") or s == f for f in _MODEL_FAMILIES) else "unknown"
 
 
 def _core_model() -> str:
@@ -358,9 +356,8 @@ def _bucket_pct(x) -> int:
     return int(round(v / 5.0) * 5)
 
 
-# The five documented rate-limit statuses. The value arrives as free text from
-# the quota script, so validate it here — anything unexpected becomes ``unknown``
-# rather than high-cardinality or sensitive telemetry (CR #2148, qingyun-wu).
+# Arrives as free text from the quota script, so anything outside this set
+# becomes ``unknown`` rather than high-cardinality or sensitive telemetry.
 _TOKEN_STATUSES = frozenset(
     {"allowed", "allowed_warning", "rejected", "unknown", "unavailable"}
 )

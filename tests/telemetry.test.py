@@ -12,9 +12,8 @@ and that a normal capture DOES reach the sink when enabled.
 
 Run: python3 tests/telemetry.test.py
 """
-# PEP 604 (`X | None`) in annotations is evaluated at def-time on Python < 3.10;
-# defer all annotation evaluation so this file runs on the 3.9 baseline (CR #2088,
-# @qingyun-wu). No runtime annotation introspection here, so this is semantics-safe.
+# PEP 604 (`X | None`) is evaluated at def-time before 3.10, so defer annotation
+# evaluation to keep this file runnable on the 3.9 baseline.
 from __future__ import annotations
 
 import importlib.util
@@ -430,10 +429,8 @@ def run():
         passed += 1
         print("ok   token_usage bucketed (5%) + status + model; _bucket_pct clamps/sentinels")
 
-    # 17b) core_model enforces the categorical/no-PII contract. Env vars and
-    #      settings.json are user/tenant-controlled, so a custom alias carrying a
-    #      tenant name, path, endpoint, or secret must collapse to 'unknown' —
-    #      never reach PostHog as an unbounded/sensitive property (CR #2148).
+    # 17b) core_model sources are tenant-controlled, so a custom alias must
+    #      collapse to 'unknown' rather than reach PostHog verbatim.
     with tempfile.TemporaryDirectory() as td:
         mod = _load(Path(td), key="phc_live")
         # Safe categorical ids pass (lowercased); PII/high-cardinality → unknown.
@@ -442,6 +439,13 @@ def run():
         assert mod._coarse_model("acme-tenant/prod-model") == "unknown"       # path sep
         assert mod._coarse_model("https://ep.acme.com/v1") == "unknown"       # endpoint
         assert mod._coarse_model("user@acme.com") == "unknown"                # email
+        # A tenant alias satisfies the charset check, so the family allow-list is
+        # what stops it reaching the wire verbatim.
+        assert mod._coarse_model("acme-prod") == "unknown"
+        assert mod._coarse_model("customer_foo") == "unknown"
+        assert mod._coarse_model("internal-claude-clone") == "unknown"
+        assert mod._coarse_model("gpt-5") == "gpt-5"
+        assert mod._coarse_model("gemini-2.5-pro") == "gemini-2.5-pro"
         assert mod._coarse_model("model with spaces") == "unknown"
         assert mod._coarse_model("x" * 60) == "unknown"                       # over length cap
         assert mod._coarse_model("") == "unknown"
