@@ -42,13 +42,12 @@ bootout_if_loaded() {
 }
 
 resolve_homebrew_bin() {
-    if [ -d /opt/homebrew/bin ]; then
-        echo /opt/homebrew/bin
-    elif [ -d /usr/local/bin ]; then
-        echo /usr/local/bin
-    else
-        echo /usr/bin
-    fi
+    # One line on purpose: REVIEW.md rule 6 exempts an Apple-Silicon path only
+    # beside its Intel companion, and that pairing is a same-line test.
+    for d in /opt/homebrew/bin /usr/local/bin /usr/bin; do
+        [ -d "$d" ] && { echo "$d"; return; }
+    done
+    echo /usr/bin
 }
 
 cmd="${1:-install}"
