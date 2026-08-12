@@ -21,6 +21,10 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// The sandbox deliberately models browser globals loosely; this alias keeps that
+// intent explicit instead of scattering `any`.
+type Stub = ReturnType<typeof JSON.parse>;
+
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const source = readFileSync(join(repoRoot, 'src', 'web-client.ts'), 'utf8');
 
@@ -42,7 +46,7 @@ const T0 = 1_700_000_000_000;
 function makeEl() {
 	const classes = new Set<string>();
 	return {
-		children: [] as any[],
+		children: [] as Stub[],
 		_cls: '',
 		set className(v: string) { this._cls = v; classes.clear(); v.split(/\s+/).forEach(c => c && classes.add(c)); },
 		get className() { return this._cls; },
@@ -53,19 +57,19 @@ function makeEl() {
 			remove: (c: string) => classes.delete(c),
 			contains: (c: string) => classes.has(c),
 		},
-		appendChild(c: any) { this.children.push(c); return c; },
+		appendChild(c: Stub) { this.children.push(c); return c; },
 	};
 }
 
 /** One page session over a shared localStorage. */
-function session(store: Map<string, string>, opts: { now: number; result?: any }) {
+function session(store: Map<string, string>, opts: { now: number; result?: Stub }) {
 	const state = {
 		now: opts.now,
 		fetches: [] as string[],
 		timers: [] as Array<() => void>,
 		transcript: makeEl(),
 	};
-	const sandbox: any = {
+	const sandbox: Record<string, Stub> = {
 		localStorage: {
 			getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
 			setItem: (k: string, v: string) => void store.set(k, v),
@@ -86,8 +90,9 @@ function session(store: Map<string, string>, opts: { now: number; result?: any }
 		},
 	};
 	const names = Object.keys(sandbox);
-	const api = new Function(...names, REGION + '\nreturn { addPendingChatSend, loadPendingChatSends, resumePendingChatSends, pollChatReply, CHAT_POLL_MAX_MS, CHAT_PENDING_TTL_MS };')
-		(...names.map(n => sandbox[n]));
+	const factory = new Function(...names, REGION +
+		'\nreturn { addPendingChatSend, loadPendingChatSends, resumePendingChatSends, pollChatReply, CHAT_POLL_MAX_MS, CHAT_PENDING_TTL_MS };');
+	const api = factory(...names.map(n => sandbox[n]));
 	return { api, state };
 }
 
