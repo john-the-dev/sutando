@@ -42,12 +42,15 @@ bootout_if_loaded() {
 }
 
 resolve_homebrew_bin() {
-    # One line on purpose: REVIEW.md rule 6 exempts an Apple-Silicon path only
-    # beside its Intel companion, and that pairing is a same-line test.
-    for d in /opt/homebrew/bin /usr/local/bin /usr/bin; do
-        [ -d "$d" ] && { echo "$d"; return; }
-    done
-    echo /usr/bin
+    # Ask brew rather than guessing its prefix: the hardcoded Apple-Silicon /
+    # Intel pair is also wrong for any custom HOMEBREW_PREFIX.
+    local prefix=""
+    command -v brew >/dev/null 2>&1 && prefix="$(brew --prefix 2>/dev/null)"
+    if [ -n "$prefix" ] && [ -d "$prefix/bin" ]; then
+        echo "$prefix/bin"
+    else
+        echo /usr/bin
+    fi
 }
 
 cmd="${1:-install}"
