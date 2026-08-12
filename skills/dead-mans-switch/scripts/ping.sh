@@ -1,36 +1,13 @@
 #!/bin/bash
-# Dead-man's-switch ping — the one outbound heartbeat that proves "this Mac is
-# awake AND the Sutando core is alive" to an off-machine monitor
-# (healthchecks.io or compatible). Missed pings there → the owner gets a
-# phone-visible alert even when every local process is dead.
-#
-# Semantics (empty GETs, no payload — nothing about the system leaves the box):
-#   core alive  → GET <url>        (healthy ping; resets the monitor's timer)
-#   core down   → GET <url>/fail   (machine awake but core dead → instant alert,
-#                                    no grace-period wait)
-#   machine asleep/dead → no ping at all → monitor's grace period expires → alert
-#
-# "Core alive" = <workspace>/state/cores/<host>.alive mtime younger than 90s
-# (the cross-host liveness contract from src/core_heartbeat.py).
-#
-# URL resolution: $HEALTHCHECKS_PING_URL env > vault key HEALTHCHECKS_PING_URL.
-# Not configured → silent no-op (exit 0) so the launchd job is safe to install
-# before the owner has signed up.
-#
-# Fail-open by design: THIS script must never be the thing that breaks. Any
-# curl/vault/resolution failure logs one stderr line and exits 0.
-#
-# Test hook: $SUTANDO_DEADMAN_ALIVE_FILE overrides the alive-file path so the
-# hermetic suite (tests/dead-mans-switch-ping.test.sh) runs without a real
-# workspace.
+# Dead-man's-switch ping: the outbound heartbeat proving this Mac is alive.
+# Silence at the external monitor is the alert.
 
 set -u
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 
-# A launchd job's PATH falls through to /usr/bin, where a clean Mac's `python3`
-# is the Xcode-CLT stub: `command -v` succeeds, then invoking it raises the
-# install dialog. Prove the interpreter RUNS before using it.
+# A launchd job's PATH reaches /usr/bin, where a clean Mac's python3 is the
+# CLT stub: it satisfies `command -v` but raises the install dialog when run.
 _pick_py() {
     local c
     for c in "${SUTANDO_PY:-}" "$REPO/../runtime/python/bin/python3" \
@@ -44,14 +21,8 @@ _pick_py() {
 }
 PY_BIN="$(_pick_py || true)"
 
-# Per-host label — lockstep with `_host_label()` in src/util_paths.py (the
-# derivation the heartbeat writer uses for state/cores/<host>.alive). MUST match
-# it or the switch pings /fail forever on a host with a label override even
-# while the core is healthy. Precedence:
-#   1. $SUTANDO_HOST_LABEL (or legacy $SUTANDO_HOST_OVERRIDE)
-#   2. macOS `scutil --get LocalHostName` (stable Bonjour name; guards the
-#      DHCP-hostname-drift split, 2026-06-22 incident)
-#   3. short `hostname`
+# Per-host label, lockstep with `_host_label()` in src/util_paths.py: the
+# heartbeat file is per-host and both sides must agree on the name.
 _host_label() {
     local env="${SUTANDO_HOST_LABEL:-${SUTANDO_HOST_OVERRIDE:-}}"
     if [ -n "$env" ]; then

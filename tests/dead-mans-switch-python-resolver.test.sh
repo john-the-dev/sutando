@@ -1,8 +1,6 @@
 #!/bin/bash
-# The ping job runs from launchd every 300s with PATH falling through to
-# /usr/bin, where a clean Mac's python3 is the Xcode-CLT stub: `command -v`
-# succeeds, invoking it raises the install dialog. A 5-minute timer would
-# reopen that modal indefinitely, so the resolver must prove it RUNS.
+# The ping job runs from launchd every 300s and can reach the CLT stub, which
+# satisfies `command -v`, so the resolver must prove the interpreter runs.
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 pass=0; fail=0

@@ -1,19 +1,6 @@
 #!/bin/bash
 # Install / uninstall the dead-man's-switch ping launchd job.
-#
-# Mirrors src/install-health-check-launchd.sh conventions (bootstrap via
-# `launchctl bootstrap gui/$UID`, idempotent re-install, --status verb) and
-# carries the #1897 lesson forward: a post-install self-test kickstarts one
-# tick and verifies the job actually produced a log line — catching the
-# silent-EPERM TCC failure mode (launchd bash blocked from the workspace
-# under ~/Documents) at install time instead of days later.
-#
-# Strictly opt-in: not called by startup.sh.
-#
-# Usage:
-#   bash skills/dead-mans-switch/install.sh             # install (idempotent)
-#   bash skills/dead-mans-switch/install.sh --uninstall # remove (idempotent)
-#   bash skills/dead-mans-switch/install.sh --status    # print job state
+# Usage: install.sh [install|--uninstall|--status]
 
 set -e
 
@@ -21,9 +8,8 @@ LABEL="com.sutando.deadman-ping"
 SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$SKILL_DIR/../.." && pwd)"
 
-# A launchd job's PATH falls through to /usr/bin, where a clean Mac's `python3`
-# is the Xcode-CLT stub: `command -v` succeeds, then invoking it raises the
-# install dialog. Prove the interpreter RUNS before using it.
+# A launchd job's PATH reaches /usr/bin, where a clean Mac's python3 is the
+# CLT stub: it satisfies `command -v` but raises the install dialog when run.
 _pick_py() {
     local c
     for c in "${SUTANDO_PY:-}" "$REPO/../runtime/python/bin/python3" \
@@ -83,9 +69,8 @@ case "$cmd" in
         echo "  workspace: $WORKSPACE"
         mkdir -p "$HOME/Library/LaunchAgents"
         mkdir -p "$WORKSPACE/logs"
-        # Not sed: `&` in a replacement means "the matched text", `|` is the
-        # delimiter, and plist values need XML escaping. A path with any of
-        # those silently produced a corrupt ProgramArguments and exit 0.
+        # Not sed: `&` in a replacement means the matched text, `|` is the delimiter,
+        # and plist values need XML escaping.
         "$PY_BIN" - "$TEMPLATE" "$DEST" "$REPO" "$WORKSPACE" "$BREW_BIN" <<'PY'
 import sys
 from xml.sax.saxutils import escape
@@ -102,10 +87,8 @@ PY
         launchctl bootstrap "$DOMAIN" "$DEST"
         echo "  Loaded via $SERVICE"
 
-        # Post-install self-test (#1897 pattern): force one tick, verify the
-        # job ran. RunAtLoad already fired once at bootstrap; kickstart makes
-        # the check deterministic. The TCC failure mode is a HUNG or silent
-        # run — no log growth — so log mtime is the probe.
+        # The TCC failure mode is a hung or silent run with no log growth, so log
+        # mtime is the probe.
         before="$(date +%s)"
         launchctl kickstart "$SERVICE" 2>/dev/null || true
         ok=""
@@ -115,9 +98,8 @@ PY
                 mt="$([ -n "$PY_BIN" ] && "$PY_BIN" -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' "$LOG" 2>/dev/null || echo 0)"
                 if [ "$mt" -ge "$before" ]; then ok=1; break; fi
             fi
-            # A configured-and-healthy run writes nothing to the log (quiet
-            # success) — treat a clean exit as pass: launchd records the last
-            # exit status once the run finishes.
+            # A configured-and-healthy run logs nothing, so absence of output is not
+            # evidence of failure.
             state="$(launchctl print "$SERVICE" 2>/dev/null | grep -E 'last exit code' | head -1)"
             case "$state" in *"= 0"*) ok=1; break ;; esac
         done

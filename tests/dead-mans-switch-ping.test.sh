@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Hermetic tests for skills/dead-mans-switch/scripts/ping.sh — a local HTTP
-# capture server stands in for healthchecks.io; $SUTANDO_DEADMAN_ALIVE_FILE
-# and $HEALTHCHECKS_PING_URL keep everything off the real workspace/vault.
-# Standalone shell test; exits non-zero on first failure.
+# Hermetic tests for ping.sh: a local HTTP capture stands in for the external
+# monitor, so no outbound request leaves the host.
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd -P)"
