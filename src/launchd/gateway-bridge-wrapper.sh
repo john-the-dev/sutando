@@ -65,13 +65,14 @@ if [ -z "$REMOTE_TASK_TOKEN" ]; then
     exit 0
 fi
 
-# Evict any already-running bridge before we exec. The bridge has NO
-# single-instance lock, so a leftover bare (nohup) launch or a straggler from a
-# prior supervised run would double-poll the gateway and double-process every
-# message. Safe to run here: at this point we're still the bash wrapper (argv =
-# gateway-bridge-wrapper.sh), so this pattern does not match — and cannot kill —
-# our own process; only the python bridge instances match.
-pkill -f 'remote-gateway-bridge\.py$' 2>/dev/null || true
-sleep 0.3
+# Evict an already-running gateway bridge that belongs to THIS checkout: it has no
+# single-instance lock, so a straggler would double-poll and double-process.
+_EVICT_HELPER="$REPO/src/launchd/evict-own-bridge.sh"
+if [ -f "$_EVICT_HELPER" ]; then
+  # shellcheck source=evict-own-bridge.sh
+  . "$_EVICT_HELPER"
+  evict_own_bridge "remote-gateway" "$REPO"
+  sleep 0.3
+fi
 
 exec python3 "$REPO/src/remote-gateway-bridge.py"

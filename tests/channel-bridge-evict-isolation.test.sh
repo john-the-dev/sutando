@@ -61,6 +61,23 @@ assert_dead  "checkout A's bridge (absolute path) was evicted" "$PID_A2"
 assert_alive "checkout B's bridge (absolute, other checkout) SURVIVED" "$PID_B2"
 kill "$PID_A2" "$PID_B2" 2>/dev/null || true
 
+# --- gateway bridge: same isolation must hold for the non-"channel" bridge ----
+# The launchd gateway wrapper used a bare `pkill -f 'remote-gateway-bridge\.py$'`,
+# which matched any checkout's gateway bridge on the host.
+mk_gw() { mkdir -p "$1/src"; printf 'import time\ntime.sleep(120)\n' > "$1/src/remote-gateway-bridge.py"; }
+mk_gw "$A"; mk_gw "$B"
+( cd "$A" && exec "$PY" src/remote-gateway-bridge.py ) & PID_GA=$!
+( cd "$B" && exec "$PY" src/remote-gateway-bridge.py ) & PID_GB=$!
+sleep 0.6
+assert_alive "gateway A started" "$PID_GA"
+assert_alive "gateway B started" "$PID_GB"
+
+evict_own_bridge remote-gateway "$A"
+sleep 0.4
+assert_dead  "gateway A (this checkout) was evicted" "$PID_GA"
+assert_alive "gateway B (other checkout) SURVIVED" "$PID_GB"
+kill "$PID_GA" "$PID_GB" 2>/dev/null || true
+
 echo
 if [ "$FAILED" -eq 0 ]; then echo "PASS — channel-bridge evict isolation"; exit 0; fi
 echo "FAIL — channel-bridge evict isolation"; exit 1
