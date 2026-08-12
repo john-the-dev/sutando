@@ -1,23 +1,6 @@
 #!/usr/bin/env python3
-"""Regression: the installed plist survives special characters in host paths.
-
-The installer templated the launchd plist with `sed -e "s|__REPO__|$REPO|g"`.
-Three things go wrong there, and all of them exit 0 with a plist on disk:
-
-  * `&` in a sed REPLACEMENT means "the text that matched", so a repo path
-    containing `&` produced `.../test__REPO__path/...` in ProgramArguments;
-  * `|` is the delimiter, so a path containing it breaks the expression;
-  * `&`, `<` and `>` are XML metacharacters and must be escaped in a plist
-    value regardless of sed.
-
-A launchd job whose ProgramArguments path is silently wrong never runs, which
-for this skill means the dead-man's switch is installed and dead.
-
-The substitution block is extracted from `install.sh` and executed, so this
-covers the shipped code rather than a copy of it. Assertions parse the result
-with `plistlib`: that proves the output is well-formed XML *and* that the value
-round-trips exactly, which a string comparison alone would not.
-"""
+"""The installed plist must survive & | < > in host paths; the substitution
+block is executed from install.sh so this covers the shipped code."""
 
 import plistlib
 import re
