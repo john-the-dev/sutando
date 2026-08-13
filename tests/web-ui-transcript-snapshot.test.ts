@@ -42,23 +42,36 @@ const MAX_ENTRY_LEN = constant('TRANSCRIPT_MAX_ENTRY_LEN');
 const KEY = 'sutando-transcript-v1';
 
 /** Minimal element: only the surface snapshotTranscript() actually touches. */
-function el(cls: string, html: string, opts: { copyBtn?: boolean } = {}) {
-  const node: any = {
+interface CloneStub {
+  className: string;
+  innerHTML: string;
+  querySelectorAll(sel: string): { remove(): void }[];
+}
+interface ElStub {
+  className: string;
+  innerHTML: string;
+  cloneNode(deep?: boolean): CloneStub;
+}
+
+function el(cls: string, html: string, opts: { copyBtn?: boolean } = {}): ElStub {
+  const copyBtn = '<span class="copy-btn">Copy</span>';
+  const hasCopy = !!opts.copyBtn;
+  return {
     className: cls,
-    innerHTML: html,
-    _copy: !!opts.copyBtn,
-    cloneNode() {
-      const c: any = { className: cls, innerHTML: html + (node._copy ? '<span class="copy-btn">Copy</span>' : '') };
-      c.querySelectorAll = (sel: string) => (sel === '.copy-btn' && node._copy
-        ? [{ remove() { c.innerHTML = html; } }] : []);
+    innerHTML: hasCopy ? html + copyBtn : html,
+    cloneNode(): CloneStub {
+      const c: CloneStub = {
+        className: cls,
+        innerHTML: hasCopy ? html + copyBtn : html,
+        querySelectorAll: (sel: string) => (sel === '.copy-btn' && hasCopy
+          ? [{ remove() { c.innerHTML = html; } }] : []),
+      };
       return c;
     },
   };
-  if (opts.copyBtn) node.innerHTML = html + '<span class="copy-btn">Copy</span>';
-  return node;
 }
 
-function harness(children: any[], { failFirstSet = false } = {}) {
+function harness(children: ElStub[], { failFirstSet = false } = {}) {
   const store: Record<string, string> = {};
   let sets = 0;
   const localStorage = {
