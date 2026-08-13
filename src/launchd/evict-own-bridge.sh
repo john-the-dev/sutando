@@ -12,7 +12,7 @@
 # command path is under THIS repo, OR its working directory IS this repo.
 #
 # Usage (sourced): `. evict-own-bridge.sh; evict_own_bridge <channel> <repo>`
-# Usage (script, for tests): `evict-own-bridge.sh <channel> <repo>`
+# Usage (script, for tests): `evict-own-bridge.sh <channel> <repo> [inst-var] [inst-value]`
 
 # Resolve a pid's working directory, cross-platform: /proc on Linux (CI), lsof on
 # macOS (production). Empty string if it can't be determined.
@@ -91,5 +91,5 @@ evict_own_bridge() {
 
 # Run directly when invoked as a script (tests / manual), not when sourced.
 if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
-  evict_own_bridge "${1:-}" "${2:-}"
+  evict_own_bridge "$@"
 fi
