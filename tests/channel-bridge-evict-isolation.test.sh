@@ -111,6 +111,21 @@ else
 fi
 kill "$PID_LIVE" 2>/dev/null || true
 
+# --- LIVE process whose env cannot be read: the real restricted-introspection case
+# The nonexistent-pid case above is a proxy. This is the production shape: the
+# process exists and is ours by checkout, but introspection fails, so identity is
+# unknown and it must survive. (Repro technique from bassilkhilo-ag2 on #2068.)
+mk_gw "$A"
+( cd "$A" && GATEWAY_INSTANCE=dev exec "$PY" src/remote-gateway-bridge.py ) & PID_BLIND=$!
+sleep 0.6
+assert_alive "blind-case: dev instance started" "$PID_BLIND"
+SHADOW="$TMP/shadow"; mkdir -p "$SHADOW"
+printf '#!/bin/sh\nexit 1\n' > "$SHADOW/ps"; chmod +x "$SHADOW/ps"
+( PATH="$SHADOW:$PATH"; . "$HELPER"; evict_own_bridge remote-gateway "$A" GATEWAY_INSTANCE "" ) 2>/dev/null
+sleep 0.4
+assert_alive "blind-case: env unreadable -> live instance SURVIVED (never kills on unknown)" "$PID_BLIND"
+kill "$PID_BLIND" 2>/dev/null || true
+
 echo
 if [ "$FAILED" -eq 0 ]; then echo "PASS — channel-bridge evict isolation"; exit 0; fi
 echo "FAIL — channel-bridge evict isolation"; exit 1
