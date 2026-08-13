@@ -131,10 +131,9 @@ class LatestTranscriptTests(unittest.TestCase):
     """Cover _latest_transcript(): happy path + no-candidates failure."""
 
     def _fake_projects(self, with_files):
-        import re as _re
         tmp = Path(tempfile.mkdtemp())
         repo = Path(context_resume.__file__).parent.parent
-        slug = _re.sub(r"[^a-zA-Z0-9]", "-", str(repo))
+        slug = context_resume.claude_project_slug(repo)
         d = tmp / slug
         d.mkdir()
         if with_files:
@@ -142,7 +141,8 @@ class LatestTranscriptTests(unittest.TestCase):
             old.write_text(json.dumps(_user("old")) + "\n")
             new = d / "new.jsonl"
             new.write_text(json.dumps(_user("new")) + "\n")
-            import os, time
+            import os
+            import time
             past = time.time() - 1000
             os.utime(old, (past, past))
         return tmp
