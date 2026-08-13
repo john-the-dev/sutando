@@ -78,6 +78,21 @@ assert_dead  "gateway A (this checkout) was evicted" "$PID_GA"
 assert_alive "gateway B (other checkout) SURVIVED" "$PID_GB"
 kill "$PID_GA" "$PID_GB" 2>/dev/null || true
 
+# --- same checkout, DIFFERENT gateway instance: prod must not evict dev --------
+# One script path serves every instance, so checkout scope alone cannot separate
+# them; identity has to come from GATEWAY_INSTANCE.
+( cd "$A" && exec "$PY" src/remote-gateway-bridge.py ) & PID_PROD=$!
+( cd "$A" && GATEWAY_INSTANCE=dev exec "$PY" src/remote-gateway-bridge.py ) & PID_DEV=$!
+sleep 0.8
+assert_alive "prod gateway started" "$PID_PROD"
+assert_alive "dev gateway started" "$PID_DEV"
+
+evict_own_bridge remote-gateway "$A" GATEWAY_INSTANCE ""
+sleep 0.4
+assert_dead  "prod gateway (matching instance) was evicted" "$PID_PROD"
+assert_alive "dev gateway (same checkout, other instance) SURVIVED" "$PID_DEV"
+kill "$PID_PROD" "$PID_DEV" 2>/dev/null || true
+
 echo
 if [ "$FAILED" -eq 0 ]; then echo "PASS — channel-bridge evict isolation"; exit 0; fi
 echo "FAIL — channel-bridge evict isolation"; exit 1

@@ -71,7 +71,9 @@ _EVICT_HELPER="$REPO/src/launchd/evict-own-bridge.sh"
 if [ -f "$_EVICT_HELPER" ]; then
   # shellcheck source=evict-own-bridge.sh
   . "$_EVICT_HELPER"
-  evict_own_bridge "remote-gateway" "$REPO"
+  # Same script path serves every gateway instance in this checkout, so scope by
+  # GATEWAY_INSTANCE too — unset here means the primary/prod gateway.
+  evict_own_bridge "remote-gateway" "$REPO" "GATEWAY_INSTANCE" "${GATEWAY_INSTANCE:-}"
   sleep 0.3
 fi
 

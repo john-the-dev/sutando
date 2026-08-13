@@ -16,6 +16,17 @@
 
 # Resolve a pid's working directory, cross-platform: /proc on Linux (CI), lsof on
 # macOS (production). Empty string if it can't be determined.
+# Read one env var from a running pid: /proc on Linux, `ps eww` on macOS. Empty
+# when it cannot be determined — callers must treat that as UNKNOWN, not "unset".
+_pid_env() {
+  pid="$1"; name="$2"
+  if [ -r "/proc/$pid/environ" ]; then
+    tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n "s/^$name=//p" | head -1
+  else
+    ps eww -o command= -p "$pid" 2>/dev/null | tr ' ' '\n' | sed -n "s/^$name=//p" | head -1
+  fi
+}
+
 _pid_cwd() {
   pid="$1"
   if [ -r "/proc/$pid/cwd" ]; then
@@ -25,14 +36,27 @@ _pid_cwd() {
   fi
 }
 
+# evict_own_bridge <channel> <repo> [instance-var] [instance-value]
+# With an instance discriminator, a candidate is killed only when its own value of
+# <instance-var> equals <instance-value>; indeterminate identity never kills.
 evict_own_bridge() {
   channel="$1"
   repo="$2"
+  inst_var="${3:-}"
+  inst_val="${4:-}"
   rel="src/$channel-bridge.py"
   # Candidates: any process whose command line ends with `src/<channel>-bridge.py`
   # (matches both relative and absolute launches).
   for pid in $(pgrep -f "src/$channel-bridge\.py\$" 2>/dev/null); do
     [ "$pid" = "$$" ] && continue
+    if [ -n "$inst_var" ]; then
+      # Same script path serves every instance, so identity must come from the env.
+      got="$(_pid_env "$pid" "$inst_var")"
+      if [ "$got" != "$inst_val" ]; then
+        echo "evict_own_bridge: skip pid $pid ($inst_var='$got' != '$inst_val')" >&2
+        continue
+      fi
+    fi
     cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
     case "$cmd" in
       *"$repo/$rel"*)
@@ -45,7 +69,10 @@ evict_own_bridge() {
     # PHYSICAL paths so a symlinked checkout or macOS's /tmp -> /private/tmp
     # (lsof reports the resolved path) doesn't cause a false mismatch.
     cwd="$(_pid_cwd "$pid")"
-    [ -n "$cwd" ] || continue
+    if [ -z "$cwd" ]; then
+      echo "evict_own_bridge: skip pid $pid (cwd unresolvable; not evicting)" >&2
+      continue
+    fi
     cwd_p="$(cd "$cwd" 2>/dev/null && pwd -P || echo "$cwd")"
     repo_p="$(cd "$repo" 2>/dev/null && pwd -P || echo "$repo")"
     if [ "$cwd_p" = "$repo_p" ]; then
