@@ -217,8 +217,15 @@ PY
 }
 
 configure_startup_runtime() {
-  if [ -f .env ]; then
-    set -a; source .env; set +a
+  # Repo-relative, not cwd-relative: the app bundle invokes startup from its own
+  # working directory, where a bare `.env` silently resolves to nothing.
+  local _repo
+  _repo="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+  if [ -f "$_repo/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$_repo/.env"
+    set +a
   else
     echo "  ~ .env not found — continuing with credential-free services"
   fi
