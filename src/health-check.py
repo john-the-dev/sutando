@@ -8808,7 +8808,18 @@ def summary_line(checks) -> str:
     Pure and importable on purpose, so a regression test exercises THIS code
     rather than a copy of it.
     """
+    # Anything not ok/warn/stale renders as ✗ above, so it is a failure here.
+    # Naming the states to exclude keeps a new failure status reported, not lost.
+    fails = [c for c in checks
+             if c.get("status") not in ("ok", "warn", "stale")]
     warns = [c for c in checks if c.get("status") == "warn"]
+    if fails:
+        line = (f"{len(fails)} FAILURE(S): "
+                + ", ".join(c["name"] for c in fails))
+        if warns:
+            line += (f" — plus {len(warns)} warning(s): "
+                     + ", ".join(c["name"] for c in warns))
+        return line
     if not warns:
         return "All systems operational."
     return (f"No failures — {len(warns)} warning(s): "

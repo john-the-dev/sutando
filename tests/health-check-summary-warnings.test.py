@@ -31,6 +31,9 @@ def summarise(checks):
 OK = {"name": "task-queue", "status": "ok", "detail": ""}
 WARN1 = {"name": "core-supervisor", "status": "warn", "detail": "core degraded"}
 WARN2 = {"name": "screen-capture", "status": "warn", "detail": "not running"}
+DOWN1 = {"name": "voice-agent", "status": "down", "detail": "port 9900"}
+DOWN2 = {"name": "web-client", "status": "down", "detail": "port 8080"}
+STALE = {"name": "bodhi-dist", "status": "stale", "detail": "rebuilt"}
 
 
 class SummaryTests(unittest.TestCase):
@@ -54,6 +57,41 @@ class SummaryTests(unittest.TestCase):
         """Guard the property we deliberately did NOT change."""
         issues = [c for c in [OK, WARN1, WARN2] if c["status"] not in ("ok", "warn")]
         self.assertEqual(issues, [])
+
+
+class FailureTests(unittest.TestCase):
+    """The same defect one state over: a ✗ row and the summary said health.
+
+    Observed on a live core 2026-08-13 — voice-agent and web-client both down,
+    summary read "No failures — 8 warning(s)".
+    """
+
+    def test_down_alone_is_not_operational(self):
+        out = summarise([OK, DOWN1])
+        self.assertNotIn("All systems operational", out)
+        self.assertIn("voice-agent", out)
+        self.assertIn("FAILURE", out)
+
+    def test_down_with_warns_does_not_claim_no_failures(self):
+        out = summarise([OK, DOWN1, WARN1])
+        self.assertNotIn("No failures", out)
+        self.assertIn("voice-agent", out)
+        self.assertIn("core-supervisor", out)
+
+    def test_every_failure_is_named(self):
+        out = summarise([DOWN1, DOWN2])
+        self.assertIn("2 FAILURE(S)", out)
+        self.assertIn("voice-agent", out)
+        self.assertIn("web-client", out)
+
+    def test_stale_is_not_counted_as_a_failure(self):
+        """`stale` renders as ♻, not ✗ — it must not become a failure here."""
+        self.assertEqual(summarise([OK, STALE]), "All systems operational.")
+
+    def test_an_unknown_future_status_is_reported_not_swallowed(self):
+        odd = {"name": "new-probe", "status": "erupted", "detail": ""}
+        out = summarise([OK, odd])
+        self.assertIn("new-probe", out)
 
 
 class SourceTests(unittest.TestCase):
