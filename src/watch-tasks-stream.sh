@@ -580,6 +580,11 @@ fallback_outstanding_handlers() {
       "$DISPATCH_DIR/settled/claim-"*; do
     rm -f "$settled"
   done
+  # The claims loop above already settled or released every one of these, so the
+  # retry receipts are spent; leaving any would keep the tempdir undeletable.
+  for marker in "$DISPATCH_DIR/unsettled/"*; do
+    rm -f "$marker"
+  done
   rmdir "$DISPATCH_DIR/lock" 2>/dev/null || true
   shopt -u nullglob
   cleanup_ready=1
@@ -588,6 +593,7 @@ fallback_outstanding_handlers() {
   rmdir "$DISPATCH_DIR/running" 2>/dev/null || cleanup_ready=0
   rmdir "$DISPATCH_DIR/settled" 2>/dev/null || cleanup_ready=0
   rmdir "$DISPATCH_DIR/workers" 2>/dev/null || cleanup_ready=0
+  rmdir "$DISPATCH_DIR/unsettled" 2>/dev/null || cleanup_ready=0
   if [ "$cleanup_ready" -eq 1 ]; then
     rm -f "$DISPATCH_DIR/shutting-down"
     rmdir "$DISPATCH_DIR" 2>/dev/null || true

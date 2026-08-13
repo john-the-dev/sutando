@@ -117,14 +117,25 @@ class Harness:
         wait_for(lambda: all(not alive(p) for p in pids), 8.0)
         return pids
 
-    def stop(self) -> None:
+    def stop(self, graceful: bool = False) -> None:
+        """SIGKILL by default — fast and certain. `graceful` sends TERM to the
+        watcher so its trap runs, which is the only way to observe teardown."""
         if self.proc is None:
             return
+        if graceful:
+            try:
+                self.proc.send_signal(signal.SIGTERM)
+                self.proc.wait(timeout=15)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                pass
         try:
             os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-        self.proc.wait(timeout=5)
+        try:
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def scenario_slot_recovery() -> None:
@@ -331,6 +342,31 @@ def scenario_unsettled_task_is_retried_on_a_later_sweep() -> None:
         h.stop()
 
 
+def scenario_dispatch_tempdir_is_removed_on_shutdown() -> None:
+    """Every dispatch subdir must be swept, or the tempdir survives the watcher.
+    An unswept `unsettled/` kept the whole `sutando-task-dispatch.*` tree alive."""
+    h = Harness()
+    h.task("task-leak.txt")
+    h.start()
+    try:
+        if not wait_for(lambda: len(names(h.dispatch() and h.dispatch() / "running")) >= 1):
+            check("tempdir scenario: slot filled", False)
+            return
+        (h.ws / "results" / "task-leak.txt").write_text("  \n")
+        h.kill_workers()
+        h.deliver("task-lll.txt")
+        wait_for(lambda: (h.dispatch() / "unsettled" / "task-leak.txt").is_file(),
+                 nudge=lambda n: h.deliver(f"task-nudge-leak-{n}.txt"))
+        d = h.dispatch()
+        check("an unsettled receipt exists before shutdown", (d / "unsettled").is_dir())
+        h.stop(graceful=True)
+        check("the dispatch tempdir is removed on shutdown",
+              wait_for(lambda: not d.exists(), timeout=15.0),
+              f"survived with {[p.name for p in d.iterdir()] if d.exists() else '-'}")
+    finally:
+        h.stop()
+
+
 def main() -> int:
     scenario_slot_recovery()
     scenario_reap_publishes_only_without_an_exact_result()
@@ -339,6 +375,7 @@ def main() -> int:
     scenario_unready_destination_is_left_untouched_and_unsettled()
     scenario_answer_landing_during_the_reap_stays_deliverable()
     scenario_unsettled_task_is_retried_on_a_later_sweep()
+    scenario_dispatch_tempdir_is_removed_on_shutdown()
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s)")
         return 1
