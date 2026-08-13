@@ -79,6 +79,7 @@ RESULTS_DIR="${SUTANDO_RESULTS_DIR:-$WORKSPACE_DIR/results}"
 # of spawning an unbounded process fanout. Unhandled work still emits its
 # TASK_FILE event immediately, even while the provider queue is full.
 TASK_HANDLER_WORKERS=2
+SUTANDO_PY_BIN="$(bash "$__REPO_ROOT/scripts/sutando-config.sh" python-bin 2>/dev/null || true)"
 DISPATCH_DIR=""
 WATCH_RUNTIME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sutando-task-watch.XXXXXX")"
 mkfifo "$WATCH_RUNTIME_DIR/events"
@@ -171,13 +172,21 @@ claim_disposition() {
 publish_terminal_failure() {
   local filename="$1" reason="$2" result temporary rc
   result="$RESULTS_DIR/$filename"
-  [ -f "$result" ] && return 0
+  # -s not -f: a zero-byte result is the undeliverable placeholder state, so it
+  # must not read as "already answered" and suppress this failure.
+  [ -s "$result" ] && return 0
   mkdir -p "$RESULTS_DIR"
   temporary="$(mktemp "$RESULTS_DIR/.$filename.XXXXXX.tmp")" || return 1
   chmod 600 "$temporary" 2>/dev/null || true
   printf '%s\n' "I could not safely process this Team-tier task because the restricted runtime $reason. No unrestricted fallback was used." > "$temporary"
-  ln "$temporary" "$result" 2>/dev/null || [ -f "$result" ]
-  rc=$?
+  if ln "$temporary" "$result" 2>/dev/null; then
+    rc=0
+  elif [ ! -s "$result" ]; then
+    mv -f "$temporary" "$result" 2>/dev/null
+    rc=$?
+  else
+    rc=0
+  fi
   rm -f "$temporary"
   return "$rc"
 }
@@ -245,25 +254,25 @@ finish_handler_task() {
 }
 
 handler_result_exists() {
-  # Delivery CONSUMES the live result file, so a task that already answered may
-  # survive only in the archive. Missing that would make the reap below publish
-  # a terminal failure for a task that succeeded — and an id delivers once, so
-  # that reply could never be sent and would strand as an orphan result.
-  local filename="$1" base
-  [ -f "$RESULTS_DIR/$filename" ] && return 0
-  base="${filename%.txt}"
-  [ -d "$RESULTS_DIR/archive" ] || return 1
-  [ -n "$(find "$RESULTS_DIR/archive" -type f -name "$base*" -print -quit 2>/dev/null)" ]
+  # Deliverable means EXACT id and NON-EMPTY: a prefix match or a zero-byte
+  # placeholder would release the claim and suppress the terminal failure.
+  local filename="$1" task_id="${filename%.txt}"
+  [ -s "$RESULTS_DIR/$filename" ] && return 0
+  [ -n "$SUTANDO_PY_BIN" ] || return 1
+  "$SUTANDO_PY_BIN" - "$__REPO_ROOT" "$RESULTS_DIR" "$task_id" <<'PYEOF' 2>/dev/null
+import pathlib, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "src"))
+from local_task_protocol import find_archived_result
+found = find_archived_result(pathlib.Path(sys.argv[2]), sys.argv[3])
+raise SystemExit(0 if found and found.stat().st_size > 0 else 1)
+PYEOF
 }
 
 drain_dispatch_queue() {
   local marker candidate task_path running_marker worker_receipt running_count=0
   local filename worker_pid
-  # Re-entrancy guard. The reap below calls finish_handler_task, which ends by
-  # calling this function again — and acquire_dispatch_lock is a mkdir spinlock
-  # with NO timeout, so a nested call would spin forever against the lock this
-  # frame already holds. The nested drain is redundant anyway: this frame
-  # dispatches everything pending before it returns.
+  # finish_handler_task ends by calling this function, and the dispatch lock is
+  # a mkdir spinlock with no timeout — a nested call would deadlock on it.
   [ -n "${DRAIN_ACTIVE:-}" ] && return
   [ -n "$DISPATCH_DIR" ] && [ ! -e "$DISPATCH_DIR/shutting-down" ] || return
   acquire_dispatch_lock || return
@@ -273,10 +282,8 @@ drain_dispatch_queue() {
   fi
   DRAIN_ACTIVE=1
   shopt -s nullglob
-  # Count LIVE workers, not marker files. A worker killed or crashed before it
-  # emitted HANDLER_DONE leaves its marker behind; counting files then retires a
-  # slot permanently, and TASK_HANDLER_WORKERS such deaths stall the lane for the
-  # life of the watcher with no error anywhere.
+  # Count LIVE workers, not marker files: a worker that died before emitting
+  # HANDLER_DONE leaves its marker and would retire the slot permanently.
   for marker in "$DISPATCH_DIR/running/"*; do
     filename="$(basename "$marker")"
     worker_pid="$(cat "$DISPATCH_DIR/workers/$filename" 2>/dev/null)"
@@ -284,9 +291,8 @@ drain_dispatch_queue() {
       running_count=$((running_count + 1))
       continue
     fi
-    # rc decides whether the sender gets a terminal-failure reply: only when the
-    # worker died before producing anything. finish_handler_task does not take
-    # the dispatch lock, so calling it here is safe.
+    # rc decides whether the sender gets a terminal-failure reply — only when
+    # the worker died before producing a deliverable result.
     if handler_result_exists "$filename"; then
       finish_handler_task "$marker" "$(cat "$marker" 2>/dev/null)" 0
     else

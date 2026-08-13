@@ -1,27 +1,6 @@
 #!/usr/bin/env python3
-"""A handler worker that dies without emitting HANDLER_DONE must not hold its slot.
-
-`drain_dispatch_queue()` counted FILES in `running/` rather than live workers, so
-a worker killed (or reaped) before it emitted `HANDLER_DONE` left its marker
-forever. With TASK_HANDLER_WORKERS=2, two such deaths stall the required-handler
-lane for the life of the watcher: every later Team-tier task queues in `pending/`
-and is never processed, while health-check still reports the watcher healthy.
-
-Observed live 2026-08-13 — 2 running markers, both worker pids dead, one task
-pending 10+ minutes, zero dispatches.
-
-WHY A REAL-PROCESS TEST: the defect lives in the interaction between the drain
-loop, the worker receipts and the FIFO, and `watch-tasks-stream.sh` has no
-BASH_SOURCE guard, so its functions cannot be sourced in isolation.
-
-CLEANUP DISCIPLINE (from tests/watch-tasks-stream-sentinel-ownership.test.py):
-`cleanup()` ends in `kill 0`, which signals the whole process group — every
-watcher here is started with start_new_session=True or the code under test kills
-this test. Never `pkill -f watch-tasks-stream`: that pattern matches the
-operator's own live watcher. Only pids this test recorded are killed.
-
-Run: python3 tests/watch-tasks-stream-dead-worker-reap.test.py
-"""
+"""A dead handler worker must not hold its dispatch slot, and the reap must publish
+a terminal failure unless an EXACT, non-empty result for that task already exists."""
 from __future__ import annotations
 
 import os
@@ -33,6 +12,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 FAILURES: list[str] = []
+FAILURE_TEXT = "could not safely process"
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -50,33 +30,12 @@ def wait_for(pred, timeout: float = 12.0, step: float = 0.25) -> bool:
     return False
 
 
-def write_stub_fswatch(bin_dir: Path, feed: Path) -> None:
-    """Emitting stub: holds stdout open AND replays paths the test appends.
-
-    The blocking `exec sleep` stub used by the sentinel test is not enough here —
-    the stall only becomes observable when a NEW task arrives and finds no free
-    slot, and arrival is what triggers a drain. `tail -f` gives both properties
-    in one process whose death closes the fd.
-    """
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    stub = bin_dir / "fswatch"
-    stub.write_text("#!/bin/sh\nexec tail -n +1 -f " + str(feed) + "\n")
-    stub.chmod(0o755)
-
-
-def write_stub_handler(path: Path) -> None:
-    """--probe exits 4 (required handler); a real run blocks so it can be killed."""
-    path.write_text(
-        "#!/bin/sh\n"
-        'for a in "$@"; do [ "$a" = "--probe" ] && exit 4; done\n'
-        "exec sleep 100000\n"
-    )
-    path.chmod(0o755)
-
-
-def dispatch_dir(tmp: Path) -> Path | None:
-    cands = sorted(tmp.glob("sutando-task-dispatch.*"), key=lambda p: p.stat().st_mtime)
-    return cands[-1] if cands else None
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 def names(d: Path | None) -> set[str]:
@@ -85,96 +44,175 @@ def names(d: Path | None) -> set[str]:
     return {p.name for p in d.iterdir() if p.is_file()}
 
 
-def main() -> int:
-    tmp = Path(tempfile.mkdtemp(prefix="reap-test-"))
-    ws = tmp / "ws"
-    (ws / "tasks").mkdir(parents=True)
-    (ws / "results").mkdir()
-    (ws / "state").mkdir()
-    feed = tmp / "feed"
-    feed.write_text("")
-    handler = tmp / "handler.sh"
-    write_stub_handler(handler)
-    write_stub_fswatch(tmp / "bin", feed)
+class Harness:
+    """One isolated watcher: own workspace, own TMPDIR, own session.
 
-    def task(name: str) -> Path:
-        p = ws / "tasks" / name
+    start_new_session because cleanup() ends in `kill 0`, which would otherwise
+    signal this test's process group. Only pids recorded here are ever killed —
+    never `pkill -f watch-tasks-stream`, which matches the operator's watcher.
+    """
+
+    def __init__(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="reap-test-"))
+        self.ws = self.tmp / "ws"
+        (self.ws / "tasks").mkdir(parents=True)
+        (self.ws / "results" / "archive").mkdir(parents=True)
+        (self.ws / "state").mkdir()
+        self.feed = self.tmp / "feed"
+        self.feed.write_text("")
+        # `tail -f` holds stdout open AND emits on demand: the stall is only
+        # observable when a NEW task arrives, and arrival is what drains.
+        stub_dir = self.tmp / "bin"
+        stub_dir.mkdir()
+        (stub_dir / "fswatch").write_text(f"#!/bin/sh\nexec tail -n +1 -f {self.feed}\n")
+        (stub_dir / "fswatch").chmod(0o755)
+        self.handler = self.tmp / "handler.sh"
+        self.handler.write_text(
+            '#!/bin/sh\nfor a in "$@"; do [ "$a" = "--probe" ] && exit 4; done\nexec sleep 100000\n')
+        self.handler.chmod(0o755)
+        self.proc: subprocess.Popen | None = None
+
+    def task(self, name: str) -> Path:
+        p = self.ws / "tasks" / name
         p.write_text(f"id: {name[:-4]}\naccess_tier: team\ntask: probe\n")
         return p
 
-    # A and B fill both worker slots via the startup sweep; C arrives later.
-    a, b = task("task-aaa.txt"), task("task-bbb.txt")
+    def start(self) -> None:
+        env = dict(os.environ)
+        env["PATH"] = f"{self.tmp/'bin'}:{env['PATH']}"
+        env["TMPDIR"] = str(self.tmp)
+        env["SUTANDO_RESULTS_DIR"] = str(self.ws / "results")
+        env["SUTANDO_TASK_EVENT_HANDLER"] = str(self.handler)
+        # The watched dir is $1, NOT an env var — passing it as one would fall
+        # through to the resolver and watch the REAL workspace.
+        self.proc = subprocess.Popen(
+            ["bash", "src/watch-tasks-stream.sh", str(self.ws / "tasks")],
+            cwd=str(REPO), env=env, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
 
-    env = dict(os.environ)
-    env["PATH"] = f"{tmp/'bin'}:{env['PATH']}"
-    env["TMPDIR"] = str(tmp)                      # makes the watcher's mktemp dirs findable
-    env["SUTANDO_WORKSPACE_DIR"] = str(ws)
-    env["SUTANDO_RESULTS_DIR"] = str(ws / "results")
-    env["SUTANDO_TASK_EVENT_HANDLER"] = str(handler)
+    def dispatch(self) -> Path | None:
+        c = sorted(self.tmp.glob("sutando-task-dispatch.*"), key=lambda p: p.stat().st_mtime)
+        return c[-1] if c else None
 
-    # The watched dir is $1, NOT an env var — passing it as an env var would
-    # silently fall through to the resolver and watch the REAL workspace.
-    proc = subprocess.Popen(
-        ["bash", "src/watch-tasks-stream.sh", str(ws / "tasks")], cwd=str(REPO), env=env,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-    )
-    try:
-        got = wait_for(lambda: len(names(dispatch_dir(tmp) and dispatch_dir(tmp) / "running")) >= 2)
-        d = dispatch_dir(tmp)
-        check("both worker slots filled by the startup sweep", got,
-              f"running={names(d and d/'running')} dispatch_dir={d}")
-        if not got:
-            return 1
+    def deliver(self, name: str) -> None:
+        p = self.task(name)
+        with self.feed.open("a") as fh:
+            fh.write(str(p.resolve()) + "\n")
 
-        # Record the worker pids, then kill them WITHOUT letting them emit
-        # HANDLER_DONE — exactly what a crashed/reaped worker leaves behind.
+    def kill_workers(self) -> list[int]:
         pids = []
+        d = self.dispatch()
         for r in (d / "workers").iterdir():
             try:
                 pids.append(int(r.read_text().strip()))
             except (ValueError, OSError):
                 pass
-        check("worker receipts recorded pids", len(pids) >= 2, str(pids))
         for pid in pids:
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        check("both workers are dead",
-              wait_for(lambda: all(not _alive(p) for p in pids), 8.0), str(pids))
+        wait_for(lambda: all(not alive(p) for p in pids), 8.0)
+        return pids
 
-        # C arrives. Its arrival triggers a drain; with both markers orphaned the
-        # buggy drain sees running_count == TASK_HANDLER_WORKERS and never spawns.
-        c = task("task-ccc.txt")
-        with feed.open("a") as fh:
-            fh.write(str(c.resolve()) + "\n")
-
-        dispatched = wait_for(lambda: "task-ccc.txt" in names(dispatch_dir(tmp) / "running"), 12.0)
-        d = dispatch_dir(tmp)
-        check("a task arriving after both workers died still gets dispatched",
-              dispatched,
-              f"pending={names(d/'pending')} running={names(d/'running')} "
-              "— dead workers still hold both slots (the defect)")
-    finally:
+    def stop(self) -> None:
+        if self.proc is None:
+            return
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-        proc.wait(timeout=5)
+        self.proc.wait(timeout=5)
 
+
+def scenario_slot_recovery() -> None:
+    """The defect: dead workers held both slots, so nothing dispatched again."""
+    h = Harness()
+    h.task("task-aaa.txt")
+    h.task("task-bbb.txt")
+    h.start()
+    try:
+        if not wait_for(lambda: len(names(h.dispatch() and h.dispatch() / "running")) >= 2):
+            check("both worker slots filled by the startup sweep", False, str(h.dispatch()))
+            return
+        check("both worker slots filled by the startup sweep", True)
+        check("worker pids recorded and killed", len(h.kill_workers()) >= 2)
+        h.deliver("task-ccc.txt")
+        got = wait_for(lambda: "task-ccc.txt" in names(h.dispatch() / "running"))
+        d = h.dispatch()
+        check("a task arriving after both workers died still gets dispatched", got,
+              f"pending={names(d/'pending')} running={names(d/'running')}")
+    finally:
+        h.stop()
+
+
+def scenario_reap_publishes_only_without_an_exact_result() -> None:
+    """Controls for both false positives, driven through the production reap.
+
+    A prefix-colliding archive entry and a zero-byte live result must each still
+    yield the terminal failure; a genuine archived result must still suppress it.
+    """
+    h = Harness()
+    arch = h.ws / "results" / "archive"
+    # `task-1234` must not satisfy `task-123` (prefix collision).
+    (arch / "task-1234-999.txt").write_text("a different task's answer\n")
+    # A genuine archived result for task-abc — the reap must stay silent here.
+    (arch / "task-abc-999.txt").write_text("the real answer\n")
+    h.task("task-123.txt")
+    h.task("task-abc.txt")
+    h.start()
+    try:
+        if not wait_for(lambda: len(names(h.dispatch() and h.dispatch() / "running")) >= 2):
+            check("collision scenario: both slots filled", False)
+            return
+        h.kill_workers()
+        h.deliver("task-zzz.txt")
+
+        res = h.ws / "results"
+        published = wait_for(lambda: (res / "task-123.txt").is_file()
+                             and (res / "task-123.txt").stat().st_size > 0)
+        check("prefix-colliding archive does NOT count as this task's result",
+              published and FAILURE_TEXT in (res / "task-123.txt").read_text(),
+              "no terminal failure published for task-123")
+        # Negative control: the fix must not become "always publish".
+        time.sleep(1.0)
+        check("a genuine archived result still suppresses the terminal failure",
+              not (res / "task-abc.txt").exists(),
+              f"spurious failure written: {(res/'task-abc.txt').read_text()[:60] if (res/'task-abc.txt').exists() else ''}")
+    finally:
+        h.stop()
+
+
+def scenario_empty_live_result_is_not_delivered() -> None:
+    """A zero-byte result is the undeliverable placeholder state, not an answer."""
+    h = Harness()
+    h.task("task-456.txt")
+    h.start()
+    try:
+        if not wait_for(lambda: len(names(h.dispatch() and h.dispatch() / "running")) >= 1):
+            check("empty-result scenario: slot filled", False)
+            return
+        (h.ws / "results" / "task-456.txt").write_text("")
+        h.kill_workers()
+        h.deliver("task-yyy.txt")
+        res = h.ws / "results" / "task-456.txt"
+        check("a zero-byte live result does NOT suppress the terminal failure",
+              wait_for(lambda: res.is_file() and res.stat().st_size > 0)
+              and FAILURE_TEXT in res.read_text(),
+              f"size={res.stat().st_size if res.exists() else 'missing'}")
+    finally:
+        h.stop()
+
+
+def main() -> int:
+    scenario_slot_recovery()
+    scenario_reap_publishes_only_without_an_exact_result()
+    scenario_empty_live_result_is_not_delivered()
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s)")
         return 1
-    print("\nPASS — dead handler workers do not hold dispatch slots")
+    print("\nPASS — dead workers free their slot; the reap publishes unless an exact result exists")
     return 0
-
-
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
 
 
 if __name__ == "__main__":
