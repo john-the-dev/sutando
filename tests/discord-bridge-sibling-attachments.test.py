@@ -15,8 +15,11 @@ the cap, oldest-first ordering, and defensive handling of empty/attachmentless
 messages.
 """
 
+import atexit
 import importlib.util
+import json
 import os
+import shutil
 import sys
 import tempfile
 import types
@@ -36,6 +39,20 @@ _token_dir = Path(_HOME_TMP) / ".claude" / "channels" / "discord"
 _token_dir.mkdir(parents=True, exist_ok=True)
 (_token_dir / ".env").write_text("DISCORD_BOT_TOKEN=test-token-not-real\n")
 os.environ.setdefault("DISCORD_BOT_TOKEN", "test-token-not-real")
+
+
+# Isolate BEFORE the bridge is imported: it resolves channel config at module
+# level, so an unset CLAUDE_CONFIG_DIR reads the developer's real allowlist.
+_CFG = tempfile.mkdtemp(prefix="ccd-sibling-attachments-")
+atexit.register(lambda: shutil.rmtree(_CFG, ignore_errors=True))
+os.environ["CLAUDE_CONFIG_DIR"] = _CFG
+os.environ["HOME"] = _CFG
+os.environ.setdefault("DISCORD_BOT_TOKEN", "test-token-not-real")
+# Seeding access.json is the load-bearing half: a temp dir alone still falls
+# back to the operator's file.
+_cfg_discord = Path(_CFG) / "channels" / "discord"
+_cfg_discord.mkdir(parents=True, exist_ok=True)
+(_cfg_discord / "access.json").write_text(json.dumps({"allowFrom": []}))
 
 
 def _load(name: str, path: Path):
