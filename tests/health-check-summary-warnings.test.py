@@ -70,7 +70,7 @@ class FailureTests(unittest.TestCase):
         out = summarise([OK, DOWN1])
         self.assertNotIn("All systems operational", out)
         self.assertIn("voice-agent", out)
-        self.assertIn("FAILURE", out)
+        self.assertIn("ISSUE", out)
 
     def test_down_with_warns_does_not_claim_no_failures(self):
         out = summarise([OK, DOWN1, WARN1])
@@ -80,13 +80,38 @@ class FailureTests(unittest.TestCase):
 
     def test_every_failure_is_named(self):
         out = summarise([DOWN1, DOWN2])
-        self.assertIn("2 FAILURE(S)", out)
+        self.assertIn("2 ISSUE(S)", out)
         self.assertIn("voice-agent", out)
         self.assertIn("web-client", out)
 
-    def test_stale_is_not_counted_as_a_failure(self):
-        """`stale` renders as ♻, not ✗ — it must not become a failure here."""
-        self.assertEqual(summarise([OK, STALE]), "All systems operational.")
+    def test_stale_is_reported_because_it_exits_non_zero(self):
+        """`stale` renders ♻ rather than ✗, which is why I first excluded it —
+        but the exit-code list counts it, so an all-clear here would contradict."""
+        out = summarise([OK, STALE])
+        self.assertNotIn("All systems operational", out)
+        self.assertIn("bodhi-dist", out)
+
+    def test_summary_and_exit_code_cannot_disagree(self):
+        """Both must read the same predicate; this is the regression that
+        matters, not the wording."""
+        for combo in ([OK, STALE], [OK, DOWN1], [OK, WARN1], [OK],
+                      [OK, STALE, WARN1], [DOWN1, STALE]):
+            issues = [c for c in combo if hc.is_issue(c)]
+            says_clear = summarise(combo) == "All systems operational."
+            # One direction only: a warning yields a non-clear summary with no
+            # issues, which is correct. What must never happen is exit!=0 + clear.
+            if issues:
+                self.assertFalse(says_clear,
+                                 f"exits 1 on {[c['name'] for c in issues]} "
+                                 f"but summary reads {summarise(combo)!r}")
+
+    def test_is_issue_reads_the_shared_benign_constant(self):
+        """_BENIGN_STATUSES existed and nothing used it; that is how the two
+        rules drifted in the first place."""
+        self.assertEqual(hc._BENIGN_STATUSES, ("ok", "warn"))
+        self.assertFalse(hc.is_issue({"status": "ok"}))
+        self.assertFalse(hc.is_issue({"status": "warn"}))
+        self.assertTrue(hc.is_issue({"status": "stale"}))
 
     def test_an_unknown_future_status_is_reported_not_swallowed(self):
         odd = {"name": "new-probe", "status": "erupted", "detail": ""}

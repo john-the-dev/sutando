@@ -8765,7 +8765,7 @@ def community_support_line() -> str:
 
 
 #: Statuses that are NOT problems. Everything else is, by the same rule the
-#: issue list uses: `issues = [c for c in checks if c["status"] not in ("ok", "warn")]`.
+#: issue list uses: `issues = [c for c in checks if is_issue(c)]`.
 #: `stale` is an issue but gets its own glyph because it names a specific remedy.
 _BENIGN_STATUSES = ("ok", "warn")
 
@@ -8797,6 +8797,12 @@ def status_icon(status: str) -> str:
     return "✗"
 
 
+def is_issue(check) -> bool:
+    """The single definition of "not healthy". `summary_line` and the exit-code
+    list must use this one, or a run exits non-zero while printing an all-clear."""
+    return check.get("status") not in _BENIGN_STATUSES
+
+
 def summary_line(checks) -> str:
     """The no-failures summary. Warnings are deliberately NOT issues — they must
     not fail the exit code or wake the launchd notifier, and that is unchanged.
@@ -8808,13 +8814,10 @@ def summary_line(checks) -> str:
     Pure and importable on purpose, so a regression test exercises THIS code
     rather than a copy of it.
     """
-    # Anything not ok/warn/stale renders as ✗ above, so it is a failure here.
-    # Naming the states to exclude keeps a new failure status reported, not lost.
-    fails = [c for c in checks
-             if c.get("status") not in ("ok", "warn", "stale")]
+    fails = [c for c in checks if is_issue(c)]
     warns = [c for c in checks if c.get("status") == "warn"]
     if fails:
-        line = (f"{len(fails)} FAILURE(S): "
+        line = (f"{len(fails)} ISSUE(S): "
                 + ", ".join(c["name"] for c in fails))
         if warns:
             line += (f" — plus {len(warns)} warning(s): "
@@ -8835,7 +8838,7 @@ def main():
     quiet = "--quiet" in sys.argv or "-q" in sys.argv
 
     checks = run_all_checks()
-    issues = [c for c in checks if c["status"] not in ("ok", "warn")]
+    issues = [c for c in checks if is_issue(c)]
     codex_notifier = (
         next(
             (
