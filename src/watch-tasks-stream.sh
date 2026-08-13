@@ -88,6 +88,9 @@ CLEANING_UP=0
 GROUP_TERM_SENT=0
 CLAIMS_DIR="$WORKSPACE_DIR/state/task-event-handler-claims"
 FALLBACKS_DIR="$WORKSPACE_DIR/state/task-event-handler-fallbacks"
+# Durable, NOT under DISPATCH_DIR: a retry receipt that dies with the process
+# leaves an unready destination no later watcher knows to settle.
+UNSETTLED_DIR="$WORKSPACE_DIR/state/task-event-handler-unsettled"
 WATCHER_ID="$$-${RANDOM:-0}"
 
 claim_is_live() {
@@ -198,13 +201,22 @@ publish_terminal_failure() {
 if [ -n "${SUTANDO_TASK_EVENT_HANDLER:-}" ] && [ -x "$SUTANDO_TASK_EVENT_HANDLER" ]; then
   DISPATCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sutando-task-dispatch.XXXXXX")"
   mkdir "$DISPATCH_DIR/pending" "$DISPATCH_DIR/running" "$DISPATCH_DIR/settled" \
-    "$DISPATCH_DIR/workers" "$DISPATCH_DIR/unsettled"
-  mkdir -p "$CLAIMS_DIR" "$FALLBACKS_DIR"
+    "$DISPATCH_DIR/workers"
+  mkdir -p "$CLAIMS_DIR" "$FALLBACKS_DIR" "$UNSETTLED_DIR"
   shopt -s nullglob
   for claim in "$CLAIMS_DIR"/task-*.txt; do
     # Overlapping watchers preserve a live owner's claim. A dead owner's
     # record is atomically quarantined before the new sweep retries it.
     claim_is_live "$claim" || retire_stale_claim "$claim" || true
+  done
+  # A previous watcher left these unsettled. Retry the publish first: the task
+  # is already done, and re-dispatching it would repeat the handler's effects.
+  for marker in "$UNSETTLED_DIR"/*; do
+    filename="$(basename "$marker")"
+    if publish_terminal_failure "$filename" "failed"; then
+      release_task_claim "$filename" 2>/dev/null || rm -f "$CLAIMS_DIR/$filename"
+      rm -f "$marker"
+    fi
   done
   shopt -u nullglob
 fi
@@ -241,7 +253,7 @@ finish_handler_task() {
           # needs its own artifact or later drains cannot see the task at all.
           if ! publish_terminal_failure "$filename" "failed"; then
             claim_settled=0
-            printf '%s\n' "$task_path" > "$DISPATCH_DIR/unsettled/$filename"
+            printf '%s\n' "$task_path" > "$UNSETTLED_DIR/$filename"
           fi
           ;;
         1)
@@ -297,9 +309,9 @@ drain_dispatch_queue() {
   shopt -s nullglob
   # Retry publishes that could not settle: the destination was owned by someone
   # else then, and this is the only path that revisits them before a restart.
-  for marker in "$DISPATCH_DIR/unsettled/"*; do
+  for marker in "$UNSETTLED_DIR"/*; do
     filename="$(basename "$marker")"
-    claim_is_ours "$filename" || { rm -f "$marker"; continue; }
+    claim_is_ours "$filename" || continue
     if publish_terminal_failure "$filename" "failed"; then
       release_task_claim "$filename" || true
       rm -f "$marker"
@@ -479,7 +491,7 @@ _tmux_wake() {
 #   to re-send to ourselves closes that window; the process is exiting
 #   either way so nothing downstream needs to observe them again.
 fallback_outstanding_handlers() {
-  local marker task_path filename settled made_progress found claim owner_id cleanup_ready
+  local marker task_path filename settled made_progress found claim owner_id cleanup_ready claim_settled
   local worker_receipt worker_pid job_pid
   [ -n "$DISPATCH_DIR" ] && [ -d "$DISPATCH_DIR" ] || return
   : > "$DISPATCH_DIR/shutting-down"
@@ -530,11 +542,17 @@ fallback_outstanding_handlers() {
     task_path="$(sed -n '3p' "$claim" 2>/dev/null)"
     [ -n "$task_path" ] || continue
     filename="$(basename "$task_path")"
+    claim_settled=1
     claim_disposition "$filename"
     case $? in
       0)
         echo "watch-tasks-stream: required Team handler interrupted for $filename; publishing safe terminal failure" >&2
-        publish_terminal_failure "$filename" "was interrupted" || true
+        # Releasing here would drop the last record of a task that is neither
+        # delivered nor failed; the durable receipt is what a later watcher retries.
+        if ! publish_terminal_failure "$filename" "was interrupted"; then
+          claim_settled=0
+          printf '%s\n' "$task_path" > "$UNSETTLED_DIR/$filename"
+        fi
         ;;
       1)
         printf '%s\n' "$task_path" > "$FALLBACKS_DIR/$filename"
@@ -545,7 +563,7 @@ fallback_outstanding_handlers() {
         echo "watch-tasks-stream: claim for $filename has no recognised disposition; not publishing it to the live core" >&2
         ;;
     esac
-    release_task_claim "$filename" || true
+    [ "$claim_settled" -eq 1 ] && { release_task_claim "$filename" || true; }
   done
 
   # Claims and fallback events are durable now. TERM the whole process group,
@@ -580,11 +598,6 @@ fallback_outstanding_handlers() {
       "$DISPATCH_DIR/settled/claim-"*; do
     rm -f "$settled"
   done
-  # The claims loop above already settled or released every one of these, so the
-  # retry receipts are spent; leaving any would keep the tempdir undeletable.
-  for marker in "$DISPATCH_DIR/unsettled/"*; do
-    rm -f "$marker"
-  done
   rmdir "$DISPATCH_DIR/lock" 2>/dev/null || true
   shopt -u nullglob
   cleanup_ready=1
@@ -593,7 +606,6 @@ fallback_outstanding_handlers() {
   rmdir "$DISPATCH_DIR/running" 2>/dev/null || cleanup_ready=0
   rmdir "$DISPATCH_DIR/settled" 2>/dev/null || cleanup_ready=0
   rmdir "$DISPATCH_DIR/workers" 2>/dev/null || cleanup_ready=0
-  rmdir "$DISPATCH_DIR/unsettled" 2>/dev/null || cleanup_ready=0
   if [ "$cleanup_ready" -eq 1 ]; then
     rm -f "$DISPATCH_DIR/shutting-down"
     rmdir "$DISPATCH_DIR" 2>/dev/null || true
