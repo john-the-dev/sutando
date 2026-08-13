@@ -21,11 +21,17 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         FAILURES.append(name)
 
 
-def wait_for(pred, timeout: float = 30.0, step: float = 0.25) -> bool:
+def wait_for(pred, timeout: float = 30.0, step: float = 0.25, nudge=None) -> bool:
+    """`nudge` re-arms the event that drives the drain. The reap runs on task
+    ARRIVAL, so one delivery racing the loop's readiness can be consumed early."""
     end = time.time() + timeout
+    ticks = 0
     while time.time() < end:
         if pred():
             return True
+        ticks += 1
+        if nudge is not None and ticks % 8 == 0:
+            nudge(ticks)
         time.sleep(step)
     return False
 
@@ -194,7 +200,8 @@ def scenario_empty_live_result_is_not_delivered() -> None:
         for tid, label in (("task-456.txt", "a zero-byte"), ("task-space.txt", "a whitespace-only")):
             res = h.ws / "results" / tid
             check(f"{label} live result does NOT suppress the terminal failure",
-                  wait_for(lambda r=res: r.is_file() and FAILURE_TEXT in r.read_text()),
+                  wait_for(lambda r=res: r.is_file() and FAILURE_TEXT in r.read_text(),
+                           nudge=lambda n, t=tid: h.deliver(f"task-nudge-{t[:-4]}-{n}.txt")),
                   f"body={res.read_text()[:40]!r}" if res.exists() else "missing")
     finally:
         h.stop()
@@ -221,11 +228,40 @@ def scenario_whitespace_archived_result_is_not_delivered() -> None:
         h.stop()
 
 
+def scenario_unready_body_is_preserved_not_overwritten() -> None:
+    """The bytes of an unready destination survive the terminal failure. A dead
+    wrapper pid does not prove its writer stopped, so nothing may be clobbered."""
+    h = Harness()
+    h.task("task-keep.txt")
+    h.start()
+    try:
+        if not wait_for(lambda: len(names(h.dispatch() and h.dispatch() / "running")) >= 1):
+            check("preserve scenario: slot filled", False)
+            return
+        # Unready by the shared contract but carrying bytes: any body that
+        # strips to text is a real answer and must be left alone entirely.
+        placeholder = "   \n\t\n"
+        (h.ws / "results" / "task-keep.txt").write_text(placeholder)
+        h.kill_workers()
+        h.deliver("task-zzz.txt")
+        res = h.ws / "results" / "task-keep.txt"
+        check("the terminal failure is still published over an unready body",
+              wait_for(lambda: res.is_file() and FAILURE_TEXT in res.read_text()),
+              f"body={res.read_text()[:40]!r}" if res.exists() else "missing")
+        kept = [p for p in (h.ws / "results").glob(".task-keep.txt.superseded.*")
+                if p.read_text() == placeholder]
+        check("the unready bytes are preserved, not destroyed", bool(kept),
+              f"superseded files={[p.name for p in (h.ws / 'results').glob('.task-keep.txt.superseded.*')]}")
+    finally:
+        h.stop()
+
+
 def main() -> int:
     scenario_slot_recovery()
     scenario_reap_publishes_only_without_an_exact_result()
     scenario_empty_live_result_is_not_delivered()
     scenario_whitespace_archived_result_is_not_delivered()
+    scenario_unready_body_is_preserved_not_overwritten()
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s)")
         return 1

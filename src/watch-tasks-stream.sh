@@ -170,7 +170,7 @@ claim_disposition() {
 }
 
 publish_terminal_failure() {
-  local filename="$1" reason="$2" result temporary rc
+  local filename="$1" reason="$2" result temporary quarantine rc
   result="$RESULTS_DIR/$filename"
   # The shared readiness contract, not -f/-s: an empty OR whitespace-only body
   # is the undeliverable placeholder state and must not suppress this failure.
@@ -179,13 +179,31 @@ publish_terminal_failure() {
   temporary="$(mktemp "$RESULTS_DIR/.$filename.XXXXXX.tmp")" || return 1
   chmod 600 "$temporary" 2>/dev/null || true
   printf '%s\n' "I could not safely process this Team-tier task because the restricted runtime $reason. No unrestricted fallback was used." > "$temporary"
+  # A dead wrapper pid does not prove its writer stopped, so an unready body is
+  # moved aside and kept rather than overwritten; `ln` only ever creates.
   if ln "$temporary" "$result" 2>/dev/null; then
     rc=0
-  elif ! handler_result_exists "$filename"; then
-    mv -f "$temporary" "$result" 2>/dev/null
-    rc=$?
-  else
+  elif handler_result_exists "$filename"; then
     rc=0
+  else
+    quarantine="$(mktemp "$RESULTS_DIR/.$filename.superseded.XXXXXX")" || {
+      rm -f "$temporary"
+      return 1
+    }
+    if mv -f "$result" "$quarantine" 2>/dev/null; then
+      # A writer that raced us to the destination wins it; ours is dropped.
+      ln "$temporary" "$result" 2>/dev/null || true
+      if [ -s "$quarantine" ]; then
+        echo "watch-tasks-stream: $filename held an unready body when the terminal failure was published; kept it at $quarantine rather than destroying it" >&2
+      else
+        rm -f "$quarantine"
+      fi
+      rc=0
+    else
+      rm -f "$quarantine"
+      echo "watch-tasks-stream: could not set aside the unready result for $filename; left it untouched and published nothing" >&2
+      rc=1
+    fi
   fi
   rm -f "$temporary"
   return "$rc"
