@@ -225,7 +225,8 @@ def scenario_whitespace_archived_result_is_not_delivered() -> None:
         h.deliver("task-www.txt")
         res = h.ws / "results" / "task-wsa.txt"
         check("a whitespace-only ARCHIVED result does NOT suppress the failure",
-              wait_for(lambda: res.is_file() and FAILURE_TEXT in res.read_text()),
+              wait_for(lambda: res.is_file() and FAILURE_TEXT in res.read_text(),
+                       nudge=lambda n: h.deliver(f"task-nudge-wsa-{n}.txt")),
               f"exists={res.exists()}")
     finally:
         h.stop()
@@ -294,6 +295,42 @@ def scenario_answer_landing_during_the_reap_stays_deliverable() -> None:
         h.stop()
 
 
+def scenario_unsettled_task_is_retried_on_a_later_sweep() -> None:
+    """An unsettled publish keeps a retry artifact: once the destination clears,
+    a later drain settles it, without a watcher restart."""
+    h = Harness()
+    h.task("task-stuck.txt")
+    h.start()
+    try:
+        if not wait_for(lambda: len(names(h.dispatch() and h.dispatch() / "running")) >= 1):
+            check("retry scenario: slot filled", False)
+            return
+        res = h.ws / "results" / "task-stuck.txt"
+        res.write_text("   \n")
+        claims = h.ws / "state" / "task-event-handler-claims" / "task-stuck.txt"
+        h.kill_workers()
+        h.deliver("task-rrr.txt")
+        got = wait_for(lambda: (h.dispatch() / "unsettled" / "task-stuck.txt").is_file(),
+                       nudge=lambda n: h.deliver(f"task-nudge-stuck-{n}.txt"))
+        check("an unsettled task keeps a dispatch artifact a later drain can see", got,
+              f"unsettled={names(h.dispatch() / 'unsettled')}")
+        check("and its claim is still held", claims.is_file())
+        # Clear the obstruction the way a provider finishing would, then prove a
+        # later sweep settles it rather than waiting for a restart.
+        res.unlink()
+        settled = wait_for(lambda: res.is_file() and FAILURE_TEXT in res.read_text(),
+                           nudge=lambda n: h.deliver(f"task-nudge-clear-{n}.txt"))
+        check("a later sweep settles it once the destination is free", settled,
+              f"body={res.read_text()[:50]!r}" if res.exists() else "still absent")
+        check("the claim is released once it settles",
+              wait_for(lambda: not claims.is_file(), timeout=8.0))
+        check("and the retry artifact is cleaned up",
+              wait_for(lambda: not (h.dispatch() / "unsettled" / "task-stuck.txt").is_file(),
+                       timeout=8.0))
+    finally:
+        h.stop()
+
+
 def main() -> int:
     scenario_slot_recovery()
     scenario_reap_publishes_only_without_an_exact_result()
@@ -301,6 +338,7 @@ def main() -> int:
     scenario_whitespace_archived_result_is_not_delivered()
     scenario_unready_destination_is_left_untouched_and_unsettled()
     scenario_answer_landing_during_the_reap_stays_deliverable()
+    scenario_unsettled_task_is_retried_on_a_later_sweep()
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s)")
         return 1
