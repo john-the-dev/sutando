@@ -1,18 +1,8 @@
 #!/usr/bin/env python3
-"""Behavioral tests for _deliver_pairing_prompt (pairing-code security fix).
+"""Behavioral tests for _deliver_pairing_prompt.
 
-The pairing code is the approval credential; posting it in a shared channel
-leaks it to every member (owner catch 2026-07-17). Guards:
-
-  1. Owner reachable  -> code goes to the owner DM; the channel message is
-     generic and does NOT contain the code.
-  2. No enrolled owner + private DM -> code returns in that DM so the first
-     owner can self-pair.
-  3. An enrolled owner exists but is unreachable -> fail-SAFE fallback: a
-     generic, code-free channel notice (the code is never posted to the shared
-     channel — #2158 CR).
-
-Run: python3 tests/discord-bridge-pairing-dm.test.py   (exit 0 pass / 1 fail)
+The pairing code is an approval credential, so it must never reach a shared
+channel on ANY branch — reachable owner, fresh install, or unreachable owner.
 """
 from __future__ import annotations
 
@@ -26,10 +16,8 @@ from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parent.parent
 
-# The bridge needs discord.py. Importing it under an interpreter WITHOUT it
-# triggers the bridge's rescue re-exec, which execs the BRIDGE (not this test)
-# as __main__ — colliding with a live bridge's singleton lock. So resolve the
-# interpreter HERE: re-exec this test under one that has discord.py, or skip.
+# Importing the bridge without discord.py triggers its rescue re-exec, which
+# would exec the BRIDGE as __main__ and collide with a live singleton lock.
 try:
     import discord  # noqa: F401
 except ImportError:
@@ -52,12 +40,8 @@ spec = importlib.util.spec_from_file_location("discordbridge_pair", REPO / "src"
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
-# HARD-isolate ACCESS_FILE (#2158 CR). Setting CLAUDE_CONFIG_DIR is NOT enough:
-# channel_access_path() prefers the canonical path but FALLS BACK to the real
-# legacy ~/.claude/channels/discord/access.json when the (fresh tmp) canonical
-# doesn't exist at import — so mod.ACCESS_FILE can resolve to the developer's
-# REAL allowlist, and Case 4's pairing write would clobber it. Pin it to a
-# throwaway temp file so no case can ever touch a real access.json.
+# CLAUDE_CONFIG_DIR alone is not isolation: channel_access_path() falls back to
+# the real legacy access.json when the fresh canonical path does not exist.
 mod.ACCESS_FILE = Path(tempfile.mkdtemp(prefix="pair-acl-")) / "channels" / "discord" / "access.json"
 
 failures: list[str] = []
@@ -114,15 +98,12 @@ check("channel got exactly one message", len(channel.sent) == 1)
 check("channel message does NOT contain the code",
       all(CODE not in m for m in channel.sent), f"leaked: {channel.sent}")
 
-# ── Case 1b: explicit BEFORE/AFTER channel-leak contrast (CR #2158) ───────────
-# BEFORE (the pre-fix behavior this PR replaced): the pairing branch posted the
-# code straight into the originating channel, leaking the approval credential
-# to every member. Reconstruct that exact call to show the leak concretely.
+# ── Case 1b: BEFORE/AFTER channel-leak contrast ──────────────────────────────
+# Reconstructs the pre-fix call so the leak is demonstrated, not just asserted.
 _before_ch = FakeMessageable(name="pr-review")
 asyncio.run(_before_ch.send(f"Pairing required. Ask the owner to run:\n`/discord:access pair {CODE}`"))
 before_leaked = any(CODE in m for m in _before_ch.sent)
-# AFTER (this PR): same pairing event, owner reachable → the channel post is
-# generic; the code travels only via the owner DM (reuse Case 1's results).
+# AFTER: same event, owner reachable → channel post generic, code only in DM.
 after_channel_leaked = any(CODE in m for m in channel.sent)
 after_dm_has_code = any(CODE in m for m in owner.sent)
 check("BEFORE-fix: the in-channel pairing post leaked the code to the channel",
@@ -133,9 +114,7 @@ check("AFTER-fix: the code is delivered only via the owner DM",
       after_dm_has_code and not after_channel_leaked)
 
 # ── Case 2: owner unreachable → fail-SAFE fallback, code NOT leaked ──────────
-# #2158 CR: the fallback must NOT recreate the leak. When no owner DM is
-# reachable, the channel gets a generic, code-free notice; the code stays in
-# access.json `pending` + the owner-only bridge log for retrieval.
+# The fallback must not recreate the leak: channel notice stays code-free.
 channel2 = FakeMessageable(name="pr-review")
 with patch.object(mod, "client", FakeClient(None)):
     route2 = asyncio.run(
@@ -157,12 +136,7 @@ check("fresh-install DM contains the pairing code",
       any(CODE in m for m in channel3.sent), f"{channel3.sent}")
 
 # ── Case 4: on_message pairing branch drives _deliver_pairing_prompt ──────────
-# The isolation cases above exercise _deliver_pairing_prompt directly; this one
-# drives the on_message dispatch (_handle_discord_message) into the pairing
-# branch so the changed CALL SITE — `route = await _deliver_pairing_prompt(...)`
-# plus the "Pairing requested" log — is covered. A DM from an unpaired sender
-# under dmPolicy=pairing reaches that branch; _deliver_pairing_prompt is stubbed
-# so the test asserts the dispatch wiring, not the (separately-tested) delivery.
+# Covers the changed CALL SITE; delivery itself is stubbed and tested above.
 import json as _json
 from unittest.mock import AsyncMock
 
@@ -193,10 +167,8 @@ class _FakeMsg:
         self.id = 555
         self.message_snapshots: list = []
 
-# Isolated ACCESS_FILE (CLAUDE_CONFIG_DIR was tmp'd before import): pairing on,
-# empty allowFrom → the sender is unpaired, so the pairing branch fires. Create
-# the nested channels/discord/ parent first — a fresh tmp CLAUDE_CONFIG_DIR
-# (CI) has no such dir, and both this seed AND the code-under-test write it.
+# Empty allowFrom leaves the sender unpaired, so the pairing branch fires. The
+# nested parent must exist first: both this seed and the code under test write it.
 mod.ACCESS_FILE.parent.mkdir(parents=True, exist_ok=True)
 mod.ACCESS_FILE.write_text(_json.dumps({"dmPolicy": "pairing", "allowFrom": [], "pending": {}}))
 

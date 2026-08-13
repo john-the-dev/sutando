@@ -2387,19 +2387,13 @@ intents.message_content = True
 if os.environ.get("DISCORD_GUILD_MEMBERS_INTENT", "").lower() in ("1", "true", "yes"):
     intents.members = True
 async def _deliver_pairing_prompt(channel, code, username, sender_id, allowed):
-    """Route a pairing code to the owner via DM, never the public channel.
+    """Route a pairing code to the owner via DM, never a shared channel.
 
-    The code IS the approval credential — anyone who sees it can ask the
-    owner to pair them, and posting it in a shared channel leaks it to every
-    member (owner catch 2026-07-17). DM each global-allowlist owner; the
-    originating channel only learns that a request was sent. On a fresh install
-    with no enrolled owner, the requester's private DM receives the code so the
-    first owner can self-pair. If an owner exists but no owner DM can be
-    delivered, it falls back to a GENERIC, code-free channel notice — never the
-    code (#2158 CR: the in-channel code post was the original leak; recreating
-    it in a shared-channel fallback just relocates the leak). Pairing stays
-    completable because the code is persisted to access.json `pending` and
-    logged to the owner-only bridge log. Returns "dm" or "channel".
+    The code is the approval credential, so no branch may put it in a shared
+    channel: owner reachable -> owner DM; fresh install (no enrolled owner) ->
+    the requester's own private DM; owner unreachable -> a generic, code-free
+    notice, with the code recoverable from access.json `pending` and the
+    owner-only bridge log. Returns "dm" or "channel".
     """
     where = getattr(channel, "name", None) or "DM"
     prompt = (
@@ -2419,15 +2413,12 @@ async def _deliver_pairing_prompt(channel, code, username, sender_id, allowed):
         await channel.send("Pairing required — the request has been sent to the owner for approval.")
         return "dm"
     if not allowed and isinstance(channel, discord.DMChannel):
-        # Fresh-install bootstrap: there is no enrolled owner to notify yet.
-        # Returning the credential in the requester's private DM preserves the
-        # original self-pair flow without exposing it to a shared channel.
+        # Fresh install: no enrolled owner exists yet, so the requester's own
+        # private DM is the only non-shared surface that preserves self-pairing.
         await channel.send(prompt)
         return "dm"
-    # Fail SAFE: no owner DM reachable. Do NOT post the code to the (shared)
-    # channel — it's the approval credential. It's already in access.json
-    # `pending`; log it to the owner-only bridge log so the owner can retrieve
-    # it and approve, then give the requester a generic, code-free notice.
+    # Fail SAFE: with no reachable owner the code must still not reach a shared
+    # channel. It stays in access.json `pending` and the owner-only bridge log.
     print(f"  [pairing] owner DM unreachable — code NOT posted to #{where}; retrieve pending code={code} from access.json/this log to approve @{username} ({sender_id}).", flush=True)
     await channel.send(
         "Pairing required, but I couldn't reach the owner to deliver the approval code. "
