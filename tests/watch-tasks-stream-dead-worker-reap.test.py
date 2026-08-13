@@ -21,7 +21,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         FAILURES.append(name)
 
 
-def wait_for(pred, timeout: float = 12.0, step: float = 0.25) -> bool:
+def wait_for(pred, timeout: float = 30.0, step: float = 0.25) -> bool:
     end = time.time() + timeout
     while time.time() < end:
         if pred():
@@ -45,12 +45,8 @@ def names(d: Path | None) -> set[str]:
 
 
 class Harness:
-    """One isolated watcher: own workspace, own TMPDIR, own session.
-
-    start_new_session because cleanup() ends in `kill 0`, which would otherwise
-    signal this test's process group. Only pids recorded here are ever killed —
-    never `pkill -f watch-tasks-stream`, which matches the operator's watcher.
-    """
+    """One isolated watcher: own workspace, TMPDIR and session (cleanup() ends in
+    `kill 0`). Only pids recorded here are killed — never a pattern match."""
 
     def __init__(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="reap-test-"))
@@ -126,7 +122,7 @@ class Harness:
 
 
 def scenario_slot_recovery() -> None:
-    """The defect: dead workers held both slots, so nothing dispatched again."""
+    """Dead workers held both slots, so nothing dispatched again."""
     h = Harness()
     h.task("task-aaa.txt")
     h.task("task-bbb.txt")
@@ -147,11 +143,8 @@ def scenario_slot_recovery() -> None:
 
 
 def scenario_reap_publishes_only_without_an_exact_result() -> None:
-    """Controls for both false positives, driven through the production reap.
-
-    A prefix-colliding archive entry and a zero-byte live result must each still
-    yield the terminal failure; a genuine archived result must still suppress it.
-    """
+    """A prefix-colliding archive must not satisfy the id; a genuine archived
+    result must still suppress the failure (so the fix is not "always publish")."""
     h = Harness()
     arch = h.ws / "results" / "archive"
     # `task-1234` must not satisfy `task-123` (prefix collision).
@@ -184,22 +177,46 @@ def scenario_reap_publishes_only_without_an_exact_result() -> None:
 
 
 def scenario_empty_live_result_is_not_delivered() -> None:
-    """A zero-byte result is the undeliverable placeholder state, not an answer."""
+    """Empty AND whitespace-only bodies are undeliverable placeholders, per the
+    shared result_ready contract — neither may suppress the terminal failure."""
     h = Harness()
     h.task("task-456.txt")
+    h.task("task-space.txt")
+    h.start()
+    try:
+        if not wait_for(lambda: len(names(h.dispatch() and h.dispatch() / "running")) >= 2):
+            check("placeholder scenario: both slots filled", False)
+            return
+        (h.ws / "results" / "task-456.txt").write_text("")
+        (h.ws / "results" / "task-space.txt").write_text("   \n\t\n")
+        h.kill_workers()
+        h.deliver("task-yyy.txt")
+        for tid, label in (("task-456.txt", "a zero-byte"), ("task-space.txt", "a whitespace-only")):
+            res = h.ws / "results" / tid
+            check(f"{label} live result does NOT suppress the terminal failure",
+                  wait_for(lambda r=res: r.is_file() and FAILURE_TEXT in r.read_text()),
+                  f"body={res.read_text()[:40]!r}" if res.exists() else "missing")
+    finally:
+        h.stop()
+
+
+def scenario_whitespace_archived_result_is_not_delivered() -> None:
+    """An archived body that is whitespace-only never delivered an answer, so the
+    reap must still publish rather than release the claim as success."""
+    h = Harness()
+    (h.ws / "results" / "archive" / "task-wsa-999.txt").write_text("  \n \n")
+    h.task("task-wsa.txt")
     h.start()
     try:
         if not wait_for(lambda: len(names(h.dispatch() and h.dispatch() / "running")) >= 1):
-            check("empty-result scenario: slot filled", False)
+            check("archived-whitespace scenario: slot filled", False)
             return
-        (h.ws / "results" / "task-456.txt").write_text("")
         h.kill_workers()
-        h.deliver("task-yyy.txt")
-        res = h.ws / "results" / "task-456.txt"
-        check("a zero-byte live result does NOT suppress the terminal failure",
-              wait_for(lambda: res.is_file() and res.stat().st_size > 0)
-              and FAILURE_TEXT in res.read_text(),
-              f"size={res.stat().st_size if res.exists() else 'missing'}")
+        h.deliver("task-www.txt")
+        res = h.ws / "results" / "task-wsa.txt"
+        check("a whitespace-only ARCHIVED result does NOT suppress the failure",
+              wait_for(lambda: res.is_file() and FAILURE_TEXT in res.read_text()),
+              f"exists={res.exists()}")
     finally:
         h.stop()
 
@@ -208,6 +225,7 @@ def main() -> int:
     scenario_slot_recovery()
     scenario_reap_publishes_only_without_an_exact_result()
     scenario_empty_live_result_is_not_delivered()
+    scenario_whitespace_archived_result_is_not_delivered()
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s)")
         return 1

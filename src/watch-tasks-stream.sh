@@ -172,16 +172,16 @@ claim_disposition() {
 publish_terminal_failure() {
   local filename="$1" reason="$2" result temporary rc
   result="$RESULTS_DIR/$filename"
-  # -s not -f: a zero-byte result is the undeliverable placeholder state, so it
-  # must not read as "already answered" and suppress this failure.
-  [ -s "$result" ] && return 0
+  # The shared readiness contract, not -f/-s: an empty OR whitespace-only body
+  # is the undeliverable placeholder state and must not suppress this failure.
+  handler_result_exists "$filename" && return 0
   mkdir -p "$RESULTS_DIR"
   temporary="$(mktemp "$RESULTS_DIR/.$filename.XXXXXX.tmp")" || return 1
   chmod 600 "$temporary" 2>/dev/null || true
   printf '%s\n' "I could not safely process this Team-tier task because the restricted runtime $reason. No unrestricted fallback was used." > "$temporary"
   if ln "$temporary" "$result" 2>/dev/null; then
     rc=0
-  elif [ ! -s "$result" ]; then
+  elif ! handler_result_exists "$filename"; then
     mv -f "$temporary" "$result" 2>/dev/null
     rc=$?
   else
@@ -254,17 +254,20 @@ finish_handler_task() {
 }
 
 handler_result_exists() {
-  # Deliverable means EXACT id and NON-EMPTY: a prefix match or a zero-byte
-  # placeholder would release the claim and suppress the terminal failure.
+  # Readiness is result_ready's contract (rejects whitespace-only too) and the
+  # archive lookup is local_task_protocol's; this must not re-decide either.
   local filename="$1" task_id="${filename%.txt}"
-  [ -s "$RESULTS_DIR/$filename" ] && return 0
   [ -n "$SUTANDO_PY_BIN" ] || return 1
-  "$SUTANDO_PY_BIN" - "$__REPO_ROOT" "$RESULTS_DIR" "$task_id" <<'PYEOF' 2>/dev/null
+  "$SUTANDO_PY_BIN" - "$__REPO_ROOT" "$RESULTS_DIR" "$task_id" "$filename" <<'PYEOF' 2>/dev/null
 import pathlib, sys
 sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "src"))
 from local_task_protocol import find_archived_result
-found = find_archived_result(pathlib.Path(sys.argv[2]), sys.argv[3])
-raise SystemExit(0 if found and found.stat().st_size > 0 else 1)
+from result_ready import read_ready_result
+results = pathlib.Path(sys.argv[2])
+if read_ready_result(results / sys.argv[4]) is not None:
+    raise SystemExit(0)
+found = find_archived_result(results, sys.argv[3])
+raise SystemExit(0 if found is not None and read_ready_result(found) is not None else 1)
 PYEOF
 }
 
