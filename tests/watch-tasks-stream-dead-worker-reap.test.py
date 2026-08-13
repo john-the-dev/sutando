@@ -182,9 +182,9 @@ def scenario_reap_publishes_only_without_an_exact_result() -> None:
         h.stop()
 
 
-def scenario_empty_live_result_is_not_delivered() -> None:
-    """Empty AND whitespace-only bodies are undeliverable placeholders, per the
-    shared result_ready contract — neither may suppress the terminal failure."""
+def scenario_placeholder_never_settles_the_task_as_success() -> None:
+    """Empty and whitespace-only bodies are undeliverable, so neither may settle
+    the task — the claim is held rather than released as if an answer existed."""
     h = Harness()
     h.task("task-456.txt")
     h.task("task-space.txt")
@@ -195,14 +195,17 @@ def scenario_empty_live_result_is_not_delivered() -> None:
             return
         (h.ws / "results" / "task-456.txt").write_text("")
         (h.ws / "results" / "task-space.txt").write_text("   \n\t\n")
+        claims = h.ws / "state" / "task-event-handler-claims"
         h.kill_workers()
         h.deliver("task-yyy.txt")
+        wait_for(lambda: False, timeout=6.0,
+                 nudge=lambda n: h.deliver(f"task-nudge-ph-{n}.txt"))
         for tid, label in (("task-456.txt", "a zero-byte"), ("task-space.txt", "a whitespace-only")):
             res = h.ws / "results" / tid
-            check(f"{label} live result does NOT suppress the terminal failure",
-                  wait_for(lambda r=res: r.is_file() and FAILURE_TEXT in r.read_text(),
-                           nudge=lambda n, t=tid: h.deliver(f"task-nudge-{t[:-4]}-{n}.txt")),
-                  f"body={res.read_text()[:40]!r}" if res.exists() else "missing")
+            check(f"{label} live result is not overwritten by the failure",
+                  FAILURE_TEXT not in res.read_text(), f"body={res.read_text()[:40]!r}")
+            check(f"{label} live result does NOT settle the claim as success",
+                  (claims / tid).is_file(), "claim was released despite no answer")
     finally:
         h.stop()
 
@@ -228,30 +231,65 @@ def scenario_whitespace_archived_result_is_not_delivered() -> None:
         h.stop()
 
 
-def scenario_unready_body_is_preserved_not_overwritten() -> None:
-    """The bytes of an unready destination survive the terminal failure. A dead
-    wrapper pid does not prove its writer stopped, so nothing may be clobbered."""
+def scenario_unready_destination_is_left_untouched_and_unsettled() -> None:
+    """A destination a provider may still own is neither read-then-moved nor
+    replaced: no publish, no `.superseded.*`, and the claim stays held."""
     h = Harness()
     h.task("task-keep.txt")
     h.start()
     try:
         if not wait_for(lambda: len(names(h.dispatch() and h.dispatch() / "running")) >= 1):
-            check("preserve scenario: slot filled", False)
+            check("untouched scenario: slot filled", False)
             return
-        # Unready by the shared contract but carrying bytes: any body that
-        # strips to text is a real answer and must be left alone entirely.
         placeholder = "   \n\t\n"
-        (h.ws / "results" / "task-keep.txt").write_text(placeholder)
+        res = h.ws / "results" / "task-keep.txt"
+        res.write_text(placeholder)
+        claims = h.ws / "state" / "task-event-handler-claims" / "task-keep.txt"
+        held_before = claims.is_file()
         h.kill_workers()
         h.deliver("task-zzz.txt")
-        res = h.ws / "results" / "task-keep.txt"
-        check("the terminal failure is still published over an unready body",
-              wait_for(lambda: res.is_file() and FAILURE_TEXT in res.read_text()),
-              f"body={res.read_text()[:40]!r}" if res.exists() else "missing")
-        kept = [p for p in (h.ws / "results").glob(".task-keep.txt.superseded.*")
-                if p.read_text() == placeholder]
-        check("the unready bytes are preserved, not destroyed", bool(kept),
-              f"superseded files={[p.name for p in (h.ws / 'results').glob('.task-keep.txt.superseded.*')]}")
+        # Give the reap the same room the publishing scenarios get, then assert
+        # the invariant: it must NOT have acted on a destination it cannot own.
+        wait_for(lambda: False, timeout=6.0,
+                 nudge=lambda n: h.deliver(f"task-nudge-keep-{n}.txt"))
+        check("an unready destination is left byte-for-byte untouched",
+              res.read_text() == placeholder, f"body={res.read_text()[:60]!r}")
+        check("no terminal failure is published over it",
+              FAILURE_TEXT not in res.read_text())
+        check("it is not moved aside to a hidden sibling either",
+              not list((h.ws / "results").glob(".task-keep.txt.superseded.*")),
+              f"found={[p.name for p in (h.ws / 'results').glob('.task-keep.txt.superseded.*')]}")
+        check("the claim is left held, so the task is unsettled not falsely done",
+              held_before and claims.is_file(),
+              f"held_before={held_before} still_held={claims.is_file()}")
+    finally:
+        h.stop()
+
+
+def scenario_answer_landing_during_the_reap_stays_deliverable() -> None:
+    """The control qingyun-wu asked for: an answer arriving after the readiness
+    check must remain at the DELIVERY path, not a hidden sibling."""
+    h = Harness()
+    h.task("task-late.txt")
+    h.start()
+    try:
+        if not wait_for(lambda: len(names(h.dispatch() and h.dispatch() / "running")) >= 1):
+            check("late-answer scenario: slot filled", False)
+            return
+        res = h.ws / "results" / "task-late.txt"
+        res.write_text("  \n")
+        h.kill_workers()
+        h.deliver("task-qqq.txt")
+        answer = "the answer the provider finished writing\n"
+        tmp = h.ws / "results" / ".late-writer.tmp"
+        tmp.write_text(answer)
+        os.replace(tmp, res)
+        wait_for(lambda: False, timeout=6.0,
+                 nudge=lambda n: h.deliver(f"task-nudge-late-{n}.txt"))
+        check("an answer that lands during the reap is still at the delivery path",
+              res.read_text() == answer, f"delivery path holds {res.read_text()[:60]!r}")
+        check("and was not relocated to a hidden sibling",
+              not list((h.ws / "results").glob(".task-late.txt.superseded.*")))
     finally:
         h.stop()
 
@@ -259,9 +297,10 @@ def scenario_unready_body_is_preserved_not_overwritten() -> None:
 def main() -> int:
     scenario_slot_recovery()
     scenario_reap_publishes_only_without_an_exact_result()
-    scenario_empty_live_result_is_not_delivered()
+    scenario_placeholder_never_settles_the_task_as_success()
     scenario_whitespace_archived_result_is_not_delivered()
-    scenario_unready_body_is_preserved_not_overwritten()
+    scenario_unready_destination_is_left_untouched_and_unsettled()
+    scenario_answer_landing_during_the_reap_stays_deliverable()
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s)")
         return 1

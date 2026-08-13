@@ -169,8 +169,10 @@ claim_disposition() {
   esac
 }
 
+# 0 = the task is settled (failure published, or a real answer already exists).
+# 1 = NOT settled: another writer may own the destination, so nothing was touched.
 publish_terminal_failure() {
-  local filename="$1" reason="$2" result temporary quarantine rc
+  local filename="$1" reason="$2" result temporary rc
   result="$RESULTS_DIR/$filename"
   # The shared readiness contract, not -f/-s: an empty OR whitespace-only body
   # is the undeliverable placeholder state and must not suppress this failure.
@@ -179,31 +181,15 @@ publish_terminal_failure() {
   temporary="$(mktemp "$RESULTS_DIR/.$filename.XXXXXX.tmp")" || return 1
   chmod 600 "$temporary" 2>/dev/null || true
   printf '%s\n' "I could not safely process this Team-tier task because the restricted runtime $reason. No unrestricted fallback was used." > "$temporary"
-  # A dead wrapper pid does not prove its writer stopped, so an unready body is
-  # moved aside and kept rather than overwritten; `ln` only ever creates.
+  # `ln` is the only write to the destination: it establishes ownership or fails.
+  # Reading then mutating a path a provider can still claim has no safe ordering.
   if ln "$temporary" "$result" 2>/dev/null; then
     rc=0
   elif handler_result_exists "$filename"; then
     rc=0
   else
-    quarantine="$(mktemp "$RESULTS_DIR/.$filename.superseded.XXXXXX")" || {
-      rm -f "$temporary"
-      return 1
-    }
-    if mv -f "$result" "$quarantine" 2>/dev/null; then
-      # A writer that raced us to the destination wins it; ours is dropped.
-      ln "$temporary" "$result" 2>/dev/null || true
-      if [ -s "$quarantine" ]; then
-        echo "watch-tasks-stream: $filename held an unready body when the terminal failure was published; kept it at $quarantine rather than destroying it" >&2
-      else
-        rm -f "$quarantine"
-      fi
-      rc=0
-    else
-      rm -f "$quarantine"
-      echo "watch-tasks-stream: could not set aside the unready result for $filename; left it untouched and published nothing" >&2
-      rc=1
-    fi
+    echo "watch-tasks-stream: $filename holds an unready result this watcher does not own; leaving it and the claim unsettled rather than publishing a failure over a provider that may still be writing" >&2
+    rc=1
   fi
   rm -f "$temporary"
   return "$rc"
@@ -236,7 +222,7 @@ release_dispatch_lock() {
 }
 
 finish_handler_task() {
-  local marker="$1" task_path="$2" rc="$3" filename settled worker_receipt
+  local marker="$1" task_path="$2" rc="$3" filename settled worker_receipt claim_settled
   filename="$(basename "$task_path")"
   worker_receipt="$DISPATCH_DIR/workers/$filename"
   settled="$DISPATCH_DIR/settled/$filename.worker"
@@ -246,11 +232,14 @@ finish_handler_task() {
   # event during cleanup, but it cannot strand the task without either path.
   if mv "$marker" "$settled" 2>/dev/null; then
     if [ "$rc" -ne 0 ] && claim_is_ours "$filename"; then
+      claim_settled=1
       claim_disposition "$filename"
       case $? in
         0)
           echo "watch-tasks-stream: required Team handler failed for $filename (exit $rc); publishing safe terminal failure" >&2
-          publish_terminal_failure "$filename" "failed" || true
+          # An unsettled failure means a provider may still own the destination;
+          # keeping the claim lets a later sweep retry instead of faking success.
+          publish_terminal_failure "$filename" "failed" || claim_settled=0
           ;;
         1)
           printf '%s\n' "$task_path" > "$FALLBACKS_DIR/$filename"
@@ -261,7 +250,7 @@ finish_handler_task() {
           echo "watch-tasks-stream: claim for $filename has no recognised disposition; not publishing it to the live core" >&2
           ;;
       esac
-      release_task_claim "$filename" || true
+      [ "$claim_settled" -eq 1 ] && { release_task_claim "$filename" || true; }
     elif [ "$rc" -eq 0 ]; then
       release_task_claim "$filename" || true
     fi
