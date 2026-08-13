@@ -10,7 +10,7 @@ loaded into every session (see CLAUDE.md's note on context budget).
 If an entry reads wrong, the file's header comment is wrong: fix the header
 and re-run `python3 scripts/gen-src-map.py`.
 
-209 modules indexed.
+210 modules indexed.
 
 ## `src/`
 
@@ -118,6 +118,7 @@ and re-run `python3 scripts/gen-src-map.py`.
 - **`send_failure_policy.py`** — Classify an outbound-send failure as transient (retry) or permanent (park).
 - **`services_status.py`** — Per-host services-status emitter for the bundled Sutando runtime.
 - **`session-handoff.sh`** — Session handoff — writes a summary for the next session to pick up.
+- **`shutdown.py`** — Graceful-shutdown sentinel — a durable, cross-process "we are shutting down on purpose (not crashing)" signal.
 - **`single_instance.py`** — Single-instance guard for long-running bridge daemons.
 - **`slack-bridge.py`** — Slack bridge for Sutando — receives DMs + @mentions via Socket Mode, writes to tasks/, sends replies from results/.
 - **`slack_owner.py`** — Slack owner-recipient resolution helpers.
