@@ -18,13 +18,18 @@
 # macOS (production). Empty string if it can't be determined.
 # Read one env var from a running pid: /proc on Linux, `ps eww` on macOS. Empty
 # when it cannot be determined — callers must treat that as UNKNOWN, not "unset".
+# Echoes the value and returns 0 when the environment was READ (an unset var is an
+# empty string); returns 1 when identity is INDETERMINATE, which must never kill.
 _pid_env() {
-  pid="$1"; name="$2"
+  pid="$1"; name="$2"; raw=""
   if [ -r "/proc/$pid/environ" ]; then
-    tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n "s/^$name=//p" | head -1
+    raw="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null)"
   else
-    ps eww -o command= -p "$pid" 2>/dev/null | tr ' ' '\n' | sed -n "s/^$name=//p" | head -1
+    raw="$(ps eww -o command= -p "$pid" 2>/dev/null | tr ' ' '\n')"
   fi
+  [ -n "$raw" ] || return 1
+  printf '%s\n' "$raw" | sed -n "s/^$name=//p" | head -1
+  return 0
 }
 
 _pid_cwd() {
@@ -51,7 +56,10 @@ evict_own_bridge() {
     [ "$pid" = "$$" ] && continue
     if [ -n "$inst_var" ]; then
       # Same script path serves every instance, so identity must come from the env.
-      got="$(_pid_env "$pid" "$inst_var")"
+      if ! got="$(_pid_env "$pid" "$inst_var")"; then
+        echo "evict_own_bridge: skip pid $pid (env unreadable; identity indeterminate)" >&2
+        continue
+      fi
       if [ "$got" != "$inst_val" ]; then
         echo "evict_own_bridge: skip pid $pid ($inst_var='$got' != '$inst_val')" >&2
         continue

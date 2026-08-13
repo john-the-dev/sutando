@@ -93,6 +93,24 @@ assert_dead  "prod gateway (matching instance) was evicted" "$PID_PROD"
 assert_alive "dev gateway (same checkout, other instance) SURVIVED" "$PID_DEV"
 kill "$PID_PROD" "$PID_DEV" 2>/dev/null || true
 
+# --- _pid_env contract: "unset" and "unreadable" must NOT be the same answer ----
+# The primary gateway evicts with instance-value "", so if an unreadable env also
+# returned "" it would compare equal and kill an instance it could not identify.
+( sleep 60 ) & PID_LIVE=$!
+sleep 0.3
+if v="$(_pid_env "$PID_LIVE" GATEWAY_INSTANCE)"; then
+  [ -z "$v" ] && echo "  ok   _pid_env: live pid, var unset -> rc=0 and empty (readable)" \
+              || { echo "  FAIL _pid_env returned '$v' for an unset var"; FAILED=1; }
+else
+  echo "  FAIL _pid_env said indeterminate for a readable live pid"; FAILED=1
+fi
+if _pid_env 999999 GATEWAY_INSTANCE >/dev/null 2>&1; then
+  echo "  FAIL _pid_env claimed to read a nonexistent pid (would kill on '' match)"; FAILED=1
+else
+  echo "  ok   _pid_env: unreadable pid -> rc=1 (indeterminate, never kills)"
+fi
+kill "$PID_LIVE" 2>/dev/null || true
+
 echo
 if [ "$FAILED" -eq 0 ]; then echo "PASS — channel-bridge evict isolation"; exit 0; fi
 echo "FAIL — channel-bridge evict isolation"; exit 1
