@@ -103,10 +103,15 @@ case "$cmd" in
             fi
         fi
         BREW_BIN="$(resolve_brew_bin)"
+        # Baked in because launchd inherits no shell env; an empty value would
+        # install a proxy that silently reads the vanilla keychain item.
+        CLAUDE_CFG="$(SUTANDO_SUPPRESS_CCD_FALLBACK_BANNER=1 bash "$REPO/scripts/sutando-config.sh" claude-home-path 2>/dev/null)"
+        [ -n "$CLAUDE_CFG" ] || { echo "ERROR: could not resolve canonical Claude config directory" >&2; exit 1; }
         echo "Installing $LABEL"
         echo "  repo:      $REPO"
         echo "  workspace: $WORKSPACE"
         echo "  brew bin:  $BREW_BIN"
+        echo "  config:    $CLAUDE_CFG"
         mkdir -p "$HOME/Library/LaunchAgents"
         mkdir -p "$WORKSPACE/logs"
         # Escaping renderer + resolved interpreter: a bare python3 can be the
@@ -118,6 +123,7 @@ case "$cmd" in
             "WORKSPACE=$WORKSPACE" \
             "BREW_BIN=$BREW_BIN" \
             "SUTANDO_NODE=${SUTANDO_NODE:-}" \
+            "CLAUDE_CONFIG_DIR=$CLAUDE_CFG" \
             "HOME=$HOME" || exit 1
         bootout_if_loaded
         launchctl bootstrap "$DOMAIN" "$DEST"
