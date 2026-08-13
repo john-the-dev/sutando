@@ -509,11 +509,17 @@ fallback_outstanding_handlers() {
       task_path="$(cat "$settled")"
       filename="$(basename "$task_path")"
       if claim_is_ours "$filename"; then
+        claim_settled=1
         claim_disposition "$filename"
         case $? in
           0)
             echo "watch-tasks-stream: required Team handler interrupted for $filename; publishing safe terminal failure" >&2
-            publish_terminal_failure "$filename" "was interrupted" || true
+            # This loop owns the receipt, so the later claim sweep never sees the
+            # task: an unsettled publish must record its own durable receipt here.
+            if ! publish_terminal_failure "$filename" "was interrupted"; then
+              claim_settled=0
+              printf '%s\n' "$task_path" > "$UNSETTLED_DIR/$filename"
+            fi
             ;;
           1)
             printf '%s\n' "$task_path" > "$FALLBACKS_DIR/$filename"
@@ -524,7 +530,7 @@ fallback_outstanding_handlers() {
             echo "watch-tasks-stream: claim for $filename has no recognised disposition; not publishing it to the live core" >&2
             ;;
         esac
-        release_task_claim "$filename" || true
+        [ "$claim_settled" -eq 1 ] && { release_task_claim "$filename" || true; }
       fi
       rm -f "$settled"
       made_progress=1

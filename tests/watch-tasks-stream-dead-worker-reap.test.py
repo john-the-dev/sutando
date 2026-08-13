@@ -394,6 +394,32 @@ def scenario_unsettled_state_survives_shutdown_and_a_later_watcher_settles_it() 
         h.stop()
 
 
+def scenario_shutdown_while_the_receipt_is_still_running() -> None:
+    """SIGTERM before any reap: cleanup's FIRST loop owns the running receipt, so
+    the later claim sweep never sees the task and this loop must record it."""
+    h = Harness()
+    h.task("task-early.txt")
+    h.start()
+    try:
+        if not wait_for(lambda: "task-early.txt" in names(h.dispatch() and h.dispatch() / "running")):
+            check("early-shutdown scenario: receipt is in running/", False)
+            return
+        res = h.ws / "results" / "task-early.txt"
+        res.write_text("  \n")
+        # No kill_workers() and no drain: the worker is alive and the receipt has
+        # never been reaped, which is the ordering the other scenarios skip past.
+        h.stop(graceful=True)
+        unsettled = h.ws / "state" / "task-event-handler-unsettled" / "task-early.txt"
+        claim = h.ws / "state" / "task-event-handler-claims" / "task-early.txt"
+        check("a direct shutdown still records a durable retry receipt", unsettled.is_file(),
+              f"unsettled={names(h.ws / 'state' / 'task-event-handler-unsettled')}")
+        check("and does not release the claim as settled", claim.is_file())
+        check("and leaves the unready body untouched", res.read_text() == "  \n",
+              f"body={res.read_text()[:40]!r}")
+    finally:
+        h.stop()
+
+
 def main() -> int:
     scenario_slot_recovery()
     scenario_reap_publishes_only_without_an_exact_result()
@@ -403,6 +429,7 @@ def main() -> int:
     scenario_answer_landing_during_the_reap_stays_deliverable()
     scenario_unsettled_task_is_retried_on_a_later_sweep()
     scenario_unsettled_state_survives_shutdown_and_a_later_watcher_settles_it()
+    scenario_shutdown_while_the_receipt_is_still_running()
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s)")
         return 1
