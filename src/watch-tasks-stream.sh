@@ -244,17 +244,54 @@ finish_handler_task() {
   drain_dispatch_queue
 }
 
+handler_result_exists() {
+  # Delivery CONSUMES the live result file, so a task that already answered may
+  # survive only in the archive. Missing that would make the reap below publish
+  # a terminal failure for a task that succeeded — and an id delivers once, so
+  # that reply could never be sent and would strand as an orphan result.
+  local filename="$1" base
+  [ -f "$RESULTS_DIR/$filename" ] && return 0
+  base="${filename%.txt}"
+  [ -d "$RESULTS_DIR/archive" ] || return 1
+  [ -n "$(find "$RESULTS_DIR/archive" -type f -name "$base*" -print -quit 2>/dev/null)" ]
+}
+
 drain_dispatch_queue() {
   local marker candidate task_path running_marker worker_receipt running_count=0
+  local filename worker_pid
+  # Re-entrancy guard. The reap below calls finish_handler_task, which ends by
+  # calling this function again — and acquire_dispatch_lock is a mkdir spinlock
+  # with NO timeout, so a nested call would spin forever against the lock this
+  # frame already holds. The nested drain is redundant anyway: this frame
+  # dispatches everything pending before it returns.
+  [ -n "${DRAIN_ACTIVE:-}" ] && return
   [ -n "$DISPATCH_DIR" ] && [ ! -e "$DISPATCH_DIR/shutting-down" ] || return
   acquire_dispatch_lock || return
   if [ -e "$DISPATCH_DIR/shutting-down" ]; then
     release_dispatch_lock
     return
   fi
+  DRAIN_ACTIVE=1
   shopt -s nullglob
+  # Count LIVE workers, not marker files. A worker killed or crashed before it
+  # emitted HANDLER_DONE leaves its marker behind; counting files then retires a
+  # slot permanently, and TASK_HANDLER_WORKERS such deaths stall the lane for the
+  # life of the watcher with no error anywhere.
   for marker in "$DISPATCH_DIR/running/"*; do
-    running_count=$((running_count + 1))
+    filename="$(basename "$marker")"
+    worker_pid="$(cat "$DISPATCH_DIR/workers/$filename" 2>/dev/null)"
+    if [ -n "$worker_pid" ] && kill -0 "$worker_pid" 2>/dev/null; then
+      running_count=$((running_count + 1))
+      continue
+    fi
+    # rc decides whether the sender gets a terminal-failure reply: only when the
+    # worker died before producing anything. finish_handler_task does not take
+    # the dispatch lock, so calling it here is safe.
+    if handler_result_exists "$filename"; then
+      finish_handler_task "$marker" "$(cat "$marker" 2>/dev/null)" 0
+    else
+      finish_handler_task "$marker" "$(cat "$marker" 2>/dev/null)" 1
+    fi
   done
   while [ "$running_count" -lt "$TASK_HANDLER_WORKERS" ]; do
     marker=""
@@ -286,6 +323,7 @@ drain_dispatch_queue() {
   done
   shopt -u nullglob
   release_dispatch_lock
+  DRAIN_ACTIVE=""
 }
 
 queue_handler_task() {
