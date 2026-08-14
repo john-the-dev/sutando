@@ -28,8 +28,14 @@ CONSUMERS = {
 
 
 class ContractTest(unittest.TestCase):
-    def _write(self, td: str, text: str | None) -> Path:
-        p = Path(td) / "task-abc.txt"
+    # DELIBERATE: this fixture was `task-abc.txt`, which matches the stamping
+    # gate, so every readiness assertion below was silently also asserting "no
+    # ID is added" — and they broke the moment stamping landed. `proactive-` is
+    # a real result filename that is exempt, so these cases test the readiness
+    # contract ALONE. The stamping behaviour gets its own tests in StampTest,
+    # where it can be asserted on purpose instead of as a side effect.
+    def _write(self, td: str, text: str | None, name: str = "proactive-abc.txt") -> Path:
+        p = Path(td) / name
         if text is not None:
             p.write_text(text)
         return p
@@ -62,6 +68,84 @@ class ContractTest(unittest.TestCase):
     def test_body_is_returned_stripped(self):
         with tempfile.TemporaryDirectory() as td:
             self.assertEqual(read_ready_result(self._write(td, "  hi \n")), "hi")
+
+    def test_task_file_is_stamped_exactly_once_under_concurrency(self):
+        """Two consumers reading one result must mint ONE id, not two.
+
+        This is the defect the review named: read, allocate and persist were
+        three separate steps, so both readers saw the unstamped body, both
+        allocated, and the id delivered on the wire disagreed with the one left
+        in the archive — while burning two counts for one completion.
+
+        Fails without the single-lock transaction: the two threads return
+        different ids and the counter advances twice.
+
+        The interleaving is FORCED, not hoped for. Simply starting two threads
+        on a barrier does not reproduce it — measured: that version passed
+        against the pre-fix code, because one thread ran to completion before
+        the other read. So both threads are held at the decide-to-stamp point
+        until each has seen the unstamped body, which is exactly the window the
+        old read-then-allocate-then-write shape left open.
+        """
+        import json
+        import threading
+        import result_ready
+        with tempfile.TemporaryDirectory() as td:
+            results = Path(td) / "results"
+            results.mkdir()
+            p = results / "task-race.txt"
+            p.write_text("the answer")
+            out = []
+            both_have_read = threading.Barrier(2, timeout=10)
+            real_needs = result_ready.needs_task_stamp
+
+            waited = set()
+            waited_lock = threading.Lock()
+
+            def gated(name, body):
+                verdict = real_needs(name, body)
+                # Once per THREAD: the fixed path re-checks this inside the
+                # transaction, and gating that second call would block a thread
+                # against a barrier its partner has already cleared.
+                with waited_lock:
+                    first = threading.get_ident() not in waited
+                    waited.add(threading.get_ident())
+                if verdict and first:
+                    both_have_read.wait()   # neither proceeds until both have read
+                return verdict
+
+            result_ready.needs_task_stamp = gated
+            self.addCleanup(setattr, result_ready, "needs_task_stamp", real_needs)
+
+            def go():
+                out.append(read_ready_result(p))
+
+            ts = [threading.Thread(target=go) for _ in range(2)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+
+            ids = {re.match(r"\[task (\d{8}-\d{3})\]", b or "").group(1) for b in out}
+            self.assertEqual(len(ids), 1, f"two ids minted for one result: {out}")
+            counter = json.loads((Path(td) / "state" / "task-counter.json").read_text())
+            self.assertEqual(counter["count"], 1, "counter advanced more than once")
+            # And the file on disk carries the same id that was delivered.
+            self.assertTrue(p.read_text().startswith(f"[task {ids.pop()}]"))
+
+    def test_a_result_that_cannot_be_stamped_is_not_delivered(self):
+        """Fail CLOSED. An unstampable result must read as not-ready, not send
+        unstamped: the file survives and is retried, which is recoverable —
+        a reply already sent without an id is not."""
+        with tempfile.TemporaryDirectory() as td:
+            results = Path(td) / "results"
+            results.mkdir()
+            p = results / "task-nostamp.txt"
+            p.write_text("the answer")
+            # state/ occupied by a regular file → mkdir and the counter both fail
+            (Path(td) / "state").write_text("not a directory")
+            self.assertIsNone(read_ready_result(p), "delivered without an id")
+            self.assertEqual(p.read_text(), "the answer", "file must survive for retry")
 
     def test_marker_only_body_is_ready(self):
         """[no-send] is a real body — marker handling belongs to result_markers."""

@@ -59,20 +59,17 @@ def needs_task_stamp(name: str, body: str) -> bool:
     )
 
 
-def alloc_task_id(results_dir: Path) -> str | None:
-    """Next YYYYMMDD-NNN, from the state/ beside `results_dir`. None on failure.
+def _alloc_locked(state: Path) -> str | None:
+    """Allocate the next ID. THE CALLER MUST ALREADY HOLD the counter lock.
 
-    Same file, lock and monotonic-floor rules as the stamping hook, which imports
-    this rather than keeping a second copy.
+    Split out so the stamp can be one transaction: reading the file, deciding it
+    needs an ID, allocating, and persisting all happen inside a single lock hold
+    (see `_stamp_locked`). Allocating under its own short-lived lock and writing
+    outside it is what let two readers each mint an ID for one result.
     """
-    state = Path(results_dir).parent / "state"
     counter, history = state / "task-counter.json", state / "task-completions-daily.json"
     today = date.today().strftime("%Y%m%d")
-    lockf = None
     try:
-        state.mkdir(parents=True, exist_ok=True)
-        lockf = open(state / ".task-counter.lock", "a+")
-        fcntl.flock(lockf, fcntl.LOCK_EX)
         try:
             s = json.loads(counter.read_text())
         except Exception:
@@ -100,6 +97,77 @@ def alloc_task_id(results_dir: Path) -> str | None:
             htmp.write_text(json.dumps(hist))
             htmp.replace(history)
         return f"{today}-{s['count']:03d}"
+    except Exception:
+        return None
+
+
+def alloc_task_id(results_dir: Path) -> str | None:
+    """Next YYYYMMDD-NNN, from the state/ beside `results_dir`. None on failure.
+
+    Same file, lock and monotonic-floor rules as the stamping hook, which imports
+    this rather than keeping a second copy. Standalone callers get the lock taken
+    for them; `read_ready_result` uses `_stamp_locked` instead so the allocation
+    and the persist share one hold.
+    """
+    state = Path(results_dir).parent / "state"
+    lockf = None
+    try:
+        state.mkdir(parents=True, exist_ok=True)
+        lockf = open(state / ".task-counter.lock", "a+")
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        return _alloc_locked(state)
+    except Exception:
+        return None
+    finally:
+        if lockf is not None:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+                lockf.close()
+            except Exception:
+                pass
+
+
+def _stamp_locked(p: Path, body: str) -> str | None:
+    """Stamp `p` as ONE transaction. Returns the stamped body, or None to fail closed.
+
+    Read-decide-allocate-persist happens inside a single hold of the counter
+    lock, and the file is RE-READ under that lock. Without the re-read, two
+    consumers that both read the unstamped body outside the lock each allocate:
+    two counts burned for one completion, and the ID delivered on the wire
+    disagrees with the one left in the archive.
+
+    Every failure returns None, which the caller turns into "not ready" rather
+    than an unstamped send. That is deliberate and it is the safer direction:
+    a result left on disk is retried next pass and is visible to anyone looking,
+    whereas a reply delivered without an ID — or carrying an ID that was never
+    durably recorded — is silently wrong and unrecoverable once sent.
+    """
+    state = p.parent.parent / "state"
+    lockf = None
+    try:
+        state.mkdir(parents=True, exist_ok=True)
+        lockf = open(state / ".task-counter.lock", "a+")
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        # Re-read INSIDE the lock: a racing consumer may have stamped it already,
+        # in which case that ID is authoritative and we must not mint a second.
+        try:
+            fresh = p.read_text().strip()
+        except (OSError, UnicodeDecodeError):
+            return None
+        if not fresh:
+            return None
+        if not needs_task_stamp(p.name, fresh):
+            return fresh  # already stamped (or exempt) — adopt what is on disk
+        tid = _alloc_locked(state)
+        if not tid:
+            return None
+        stamped = f"[task {tid}]\n\n{fresh}"
+        # Atomic replace, not truncate-in-place: this module's own contract is
+        # that a partial write must never be observable as a body.
+        tmp = p.with_name(p.name + ".stamp.tmp")
+        tmp.write_text(stamped + "\n")
+        tmp.replace(p)
+        return stamped
     except Exception:
         return None
     finally:
@@ -134,11 +202,7 @@ def read_ready_result(path: str | Path) -> str | None:
     if not body:
         return None
     if needs_task_stamp(p.name, body):
-        tid = alloc_task_id(p.parent)
-        if tid:
-            body = f"[task {tid}]\n\n{body}"
-            try:
-                p.write_text(body + "\n")  # persist so archive/audit see the sent text
-            except OSError:
-                pass  # deliver the stamped body regardless; the ID is what matters
+        # Fail CLOSED: no ID, or an ID we could not durably persist, means this
+        # result is not ready. It stays on disk and is retried on the next pass.
+        return _stamp_locked(p, body)
     return body
