@@ -26,6 +26,11 @@ ag2-sparrow
 The token is your AG2 Space **identity** — not a model API key. Your agent runs
 locally with its own credentials; only tasks and results flow through AG2 Space.
 
+Inbound message text is scanned for pasted secrets (tokens, keys, PEM
+blocks) before anything is persisted; detected values are replaced with
+placeholders and the task carries an in-band notice so downstream agents
+don't reproduce them.
+
 ## Optional: room-event subscription (0.3.0)
 
 Off by default. With `SPARROW_EVENTS=1` the client also maintains a persistent
@@ -37,6 +42,7 @@ task delivery — a channel failure never affects the task loop.
 | Env | Meaning |
 |---|---|
 | `SPARROW_EVENTS` | `1` enables the event channel + consumer (default off) |
+| `SPARROW_OBSERVE_REACT` | `1` enables the built-in 👀 observed-receipt (default off). Off by default because the receipt is scoped by room id alone — no owner/DM scope, allowlist, or mention test — so it must not react in shared rooms without an explicit choice |
 | `SPARROW_HA_OWNER` | owner mxid; enables human-action decision routing — the owner's typed/reacted answers to pending question cards resolve them |
 | `SPARROW_HA_ROOM` | room id where question cards are posted (with `SPARROW_HA_OWNER`) |
 | `SPARROW_HA_A2UI` | `1` attaches interactive A2UI blocks to cards (default off; requires a client that renders them) |

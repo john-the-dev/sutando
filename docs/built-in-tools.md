@@ -39,6 +39,8 @@ gws gmail +read <messageId>                     # read a message
 gws gmail users messages list --params 'q=keyword'  # search
 ```
 
+**Signatures are never auto-inserted — append one yourself.** Gmail attaches the configured signature in its *composer*, so anything that writes a message some other way (the Gmail API, an IMAP `APPEND`-created draft) produces mail with no signature, and no Gmail setting changes that. When drafting or sending on the owner's behalf, append their signature to the body yourself — plain text plus an HTML alternative, so links render in both parts.
+
 **Finding a specific email** — when the obvious query fails, invoke `/email-find <description>`. Broad-before-narrow playbook (full-inbox scan → partner-domain fanout → thread re-walk) that refuses to give up after one or two failed queries. See `skills/email-find/SKILL.md` for the workflow and rules around subject-mismatch + `get_thread` truncation. Per-user partner-domain mappings live in your own memory (the skill describes the file format).
 
 **Contacts** — look up people by name or email:
@@ -145,6 +147,24 @@ npx tsx -e "import 'dotenv/config'; import { summonTool } from './skills/zoom/to
 
 **Local skills** — check `$CLAUDE_CONFIG_DIR/skills/` for user-installed skills (video processing, etc.). Always prefer a local skill over raw commands when one exists for the task.
 
+**Trusted capability catalog** — discover, inspect, install, and update skills
+from the allowlisted repositories declared in
+`skills/trusted-capabilities/manifest.json`:
+```bash
+C=skills/trusted-capabilities/scripts/catalog.py
+python3 "$C" sources
+python3 "$C" search browser
+python3 "$C" inspect anthropic-skills skills/skill-creator
+python3 "$C" install anthropic-skills skills/skill-creator        # dry run
+# Review the dry-run output, then copy its exact commit into the write:
+python3 "$C" install anthropic-skills skills/skill-creator --commit <40-char-sha> --yes
+python3 "$C" update skill-creator                                 # dry run
+python3 "$C" update skill-creator --commit <40-char-sha> --yes
+```
+Skill installs are pinned to an upstream commit and record provenance for later
+updates. Tool repositories can be searched and inspected but are
+install-disabled because their setup and permissions are source-specific.
+
 **App launcher** — open any macOS app:
 ```bash
 open -a "Safari"                    # open by name
@@ -154,4 +174,4 @@ open "https://github.com"           # open URL in default browser
 
 **Context drop + shortcuts** — the Sutando menu bar app (`src/Sutando/`) provides global hotkeys. **Live config**: `~/.config/sutando/hotkeys.json` (per-user override) with defaults registered in `src/Sutando/main.swift:944` (`registerHotKey()` action list). When the user asks "what hotkeys do I have", read those sources — don't quote a static list from this file (it would drift behind the actual registration).
 
-Launches automatically via `startup.sh`. Check `tasks/` for dropped context.
+The menu-bar app is optional and is not built or launched by the headless core's `startup.sh`; compile and launch the app separately, including `bash skills/context-drop/build.sh` when enabling context-drop. Check `tasks/` for dropped context.
