@@ -7,10 +7,10 @@
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "Stopping Sutando services..."
-# Graceful-shutdown signal: mark BEFORE killing so the core loop (which
-# restart.sh does NOT kill) sees an intentional stop and can finish the
-# current task + exit cleanly, and health-check reads a graceful stop vs a
-# crash. Cleared on the restart path below and by startup.sh on boot.
+# Marked before killing so the watcher's intake gate holds new tasks while the
+# services go down, and health-check reads an intentional stop, not a crash.
+# On --stop-only this stays set and IS the core's clean-exit signal; a plain
+# restart clears it below, where the core is meant to survive (see CLAUDE.md).
 python3 "$REPO/src/shutdown.py" mark "restart.sh${1:+ $1}" >/dev/null 2>&1 || true
 # Voice-agent stop goes through the GUARDED lock takeover, never a broad
 # `pkill -f voice-agent` (voice-reliability plan amendment U2): the old blind

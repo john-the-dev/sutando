@@ -9,10 +9,12 @@ check to *finish the current task and exit cleanly* rather than be killed
 mid-pass and leave an orphaned task recovered only after the result-watcher
 timeout.
 
-This sentinel is that signal. Writers (restart.sh --stop-only, an explicit
-"stop" path) call mark_shutdown(); startup.sh clears it on boot; readers (the
-proactive loop at the top of a pass, bridges) call is_shutting_down() to
-short-circuit gracefully. It lives under state/ next to the other liveness
+This sentinel is that signal on the STOP paths only. Writers (restart.sh
+--stop-only, an explicit "stop") call mark_shutdown(); startup.sh clears it on
+boot; readers (the proactive loop at the top of a pass, bridges) call
+is_shutting_down(). A plain restart marks and clears it within seconds and the
+core is meant to survive, so clean core exit is a --stop-only guarantee; what
+holds on BOTH paths is the watcher's intake gate. It lives under state/ next to the other liveness
 files and carries a reason + timestamp so health-check can distinguish a
 graceful stop from a crash.
 
