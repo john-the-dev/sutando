@@ -347,11 +347,18 @@ _check(
 # ---------------------------------------------------------------------------
 
 _GUARDED_PY_WRITERS = {
+    # The centralized write side (serialize_task_last). Its guard is
+    # structural, not ZWSP-defang: header values reject newlines outright and
+    # the body is serialized after the single task: line, so the task-last
+    # parser can never promote body content to a header.
+    "src/local_task_protocol.py",
+    "skills/schedule-crons/scripts/codex-scheduler.py",
     "src/discord-bridge.py",
     "src/telegram-bridge.py",
     "src/slack-bridge.py",
     "src/github-webhook.py",
     "src/agent-api.py",
+    "src/cron-runner.py",
 }
 
 _TASK_FIELD_PATTERN = 'f"task: {'
