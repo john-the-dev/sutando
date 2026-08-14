@@ -236,11 +236,10 @@ fi
 
 apply_tmux_defaults
 if ws="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null)" && [ -n "$ws" ]; then
-  mkdir -p "$ws/state"
-  printf '{"runtime":"codex","session":"%s","started_at":%s}\n' "$SESSION" "$(date +%s)" > "$ws/state/core-runtime.json"
-  printf '{"host":"%s","session_started_at":%s,"iso":"%s","source":"start-cli","runtime":"codex"}\n' \
-    "$(hostname | sed 's/\..*//')" "$(date +%s)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    >> "$ws/state/session-starts.log"
+  # Schema and atomicity belong to the shared writer; inject only the resolved
+  # workspace and this launcher's runtime.
+  "${PY:-python3}" "$REPO/src/core_runtime_marker.py" \
+    "$ws" codex "$SESSION" start-cli > /dev/null 2>&1 || true
 fi
 
 if [ -t 1 ] && [ -z "${TMUX:-}" ]; then

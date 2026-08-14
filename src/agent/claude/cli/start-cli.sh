@@ -440,20 +440,14 @@ ensure_core_monitor() {
   fi
 }
 
-# Declare THIS core as the Claude runtime. Must run on EVERY path that launches a
-# core: the heal path exits before the create path's stamp, and it is the path
-# `sutando-ctl.sh restart-core` takes. Best-effort — never block the launch.
+# Must run on EVERY path that launches a core: the heal path exits before the
+# create path's stamp, and restart-core takes it. Schema/atomicity: shared writer.
 stamp_runtime_claude() {
   local _ws
   _ws="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null)" || return 0
   [ -n "$_ws" ] || return 0
-  mkdir -p "$_ws/state" 2>/dev/null || true
-  printf '{"runtime":"claude","session":"%s","started_at":%s}\n' \
-    "$SESSION" "$(date +%s)" > "$_ws/state/core-runtime.json" 2>/dev/null || true
-  printf '{"host":"%s","session_started_at":%s,"iso":"%s","source":"%s","runtime":"claude"}\n' \
-    "$(hostname | sed 's/\..*//')" "$(date +%s)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    "${1:-start-cli}" \
-    >> "$_ws/state/session-starts.log" 2>/dev/null || true
+  "${PY:-python3}" "$REPO/src/core_runtime_marker.py" \
+    "$_ws" claude "$SESSION" "${1:-start-cli}" > /dev/null 2>&1 || true
 }
 
 # Already running — attach if interactive, else exit cleanly. A managed core is
@@ -525,20 +519,8 @@ if ! command -v tmux > /dev/null 2>&1 && command -v brew > /dev/null 2>&1; then
   brew install tmux 2>&1 | tail -3
 fi
 
-# Stamp the core session start into an append-only per-boot log. One JSONL
-# line per launch; consecutive entries bound each session's lifetime, which
-# is what session-recap tooling needs to pick the right transcript (owner
-# ask 2026-07-13). Best-effort: never block the launch on it.
-#
-# ALSO write the runtime marker state/core-runtime.json declaring THIS core as
-# the Claude runtime. The Codex launcher (src/agent/codex/cli/start-cli.sh)
-# writes runtime:"codex" the same way; the Claude launcher previously wrote
-# neither the marker nor the runtime field on session-starts.log. So after a
-# Codex->Claude switch, core-runtime.json stayed whatever the last Codex boot
-# wrote ("codex"), or was absent — readers (health-check's Codex-repair path,
-# the dashboard, rollback logic) then saw a runtime that no longer matched
-# reality. It failed closed via a tmux-env cross-check, but the marker should
-# just be accurate. Best-effort, same as the log stamp — never block the launch.
+# Consecutive session-start entries bound each session's lifetime, which is what
+# session-recap needs to pick the right transcript.
 stamp_runtime_claude "start-cli"
 
 # Fall back to a bare `exec claude` if tmux is still missing.
