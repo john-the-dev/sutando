@@ -36,7 +36,12 @@ PRODUCERS = {
 # string/heredoc/Swift multiline string. Matches `source: slack\n`,
 # "`source: chat`," and a bare `source: chat` template line.
 def write_sites(text: str, value: str):
-    pat = re.compile(rf"^.*\bsource: {re.escape(value)}(\\n|`|\n|$)", re.MULTILINE)
+    # Two write shapes: serialized header lines in string literals, and the
+    # centralized write_task_file tuple form ("source", "<value>").
+    pat = re.compile(
+        rf"^.*\bsource: {re.escape(value)}(\\n|`|\n|$)"
+        rf"|^.*\(\s*[\"']source[\"']\s*,\s*[\"']{re.escape(value)}[\"']\s*\)",
+        re.MULTILINE)
     return [text[: m.start()].count("\n") for m in pat.finditer(text)]
 
 
@@ -59,7 +64,7 @@ for rel, values in PRODUCERS.items():
         for ln in sites:
             window = "\n".join(lines[max(0, ln - 6): ln + 7])
             checked += 1
-            if "interaction_type:" not in window:
+            if "interaction_type:" not in window and '"interaction_type"' not in window:
                 failures.append(
                     f"{rel}:{ln + 1}: `source: {value}` write site has no "
                     f"interaction_type: header within 6 lines")
@@ -90,8 +95,10 @@ for marker, expect, want_source in (
             f"{'missing' if want_source else 'present (double-DM regression — see comment at the writer)'}")
 
 # remote-gateway-bridge serializes from _TASK_FIELDS — assert pass-through is
-# wired, vocabulary-whitelisted, and defaults to message.
-gw = (REPO / "src/remote-gateway-bridge.py").read_text()
+# wired, vocabulary-whitelisted, and defaults to message. The implementation is
+# canonical in the ag2-sparrow package (src/remote-gateway-bridge.py is a thin
+# loader shim post-#2082), so the guard reads the package source.
+gw = (REPO / "packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py").read_text()
 checked += 1
 if ('"interaction_type"' not in gw or "_INTERACTION_TYPES" not in gw
         or 'it = "message"' not in gw):

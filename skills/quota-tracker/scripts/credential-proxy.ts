@@ -12,11 +12,12 @@
  *   ANTHROPIC_BASE_URL=http://localhost:7846 claude ...  # route Claude through proxy
  */
 
-import { createServer, request as httpRequest, type RequestOptions } from 'node:http';
+import { createServer, type RequestOptions } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import { execSync, execFileSync } from 'node:child_process';
-import { writeFileSync, readFileSync, mkdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { createHash } from 'node:crypto';
 import { statusPath } from '../../../src/workspace_default.js';
 
 const PORT = 7846;
@@ -34,20 +35,54 @@ const UPSTREAM_IDLE_TIMEOUT_MS = Number(process.env.SUTANDO_PROXY_TIMEOUT_MS) ||
 // keep the skill-dir path as a last-resort fallback for one release.
 const QUOTA_FILE = statusPath('quota-state.json');
 
-// OAuth self-refresh. The proxy reads the DEFAULT `Claude Code-credentials`
-// keychain item, but nothing refreshes that item's accessToken on a headless
-// node (interactive `/login` refreshes it; a namespaced-CLAUDE_CONFIG_DIR core
-// refreshes its OWN `Claude Code-credentials-<hash>` item). So once `expiresAt`
-// passes the proxy injects an EXPIRED token → upstream 401 ("401 after a while").
-// Fix: when the stored token is at/near expiry, use the stored refreshToken to
-// mint a fresh one and write it back — making every proxy-routed node self-heal.
-// Endpoint + client_id verified from the Claude Code binary (v2.1.170 strings).
+// OAuth self-refresh. A namespaced CLAUDE_CONFIG_DIR uses a namespaced keychain
+// item (`Claude Code-credentials-<sha256(config-dir)[0..8]>`), while vanilla
+// Claude Code uses `Claude Code-credentials`. Prefer the scoped item so an
+// interactive `/login` in the Sutando core is the token the proxy injects, then
+// fall back to the vanilla item for older/global installs. When the chosen token
+// is at/near expiry, use its refreshToken to mint a fresh one and write it back
+// to the SAME keychain item. Endpoint + client_id verified from the Claude Code
+// binary (v2.1.170 strings).
 const TOKEN_ENDPOINT = 'https://platform.claude.com/v1/oauth/token';
 const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
-const KEYCHAIN_SERVICE = 'Claude Code-credentials';
+const DEFAULT_KEYCHAIN_SERVICE = 'Claude Code-credentials';
 // Refresh when the token expires within this window (ms). Tokens are ~8h-lived;
 // 5 min of slack avoids racing the expiry on a long-running upstream request.
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
+
+// Failure backoff. Once the stored token is at/near expiry, `needsRefresh` stays
+// true on EVERY subsequent request — so if the refresh itself keeps failing
+// (e.g. the stored refresh token was revoked/rotated out-of-band → HTTP 400),
+// the naive code re-attempts on each request and hammers the OAuth endpoint in
+// a tight loop. After a failure we hold off re-attempting until a backoff window
+// elapses, growing exponentially from BASE to MAX and resetting on the next
+// success. Overridable via env for tests / tuning.
+const REFRESH_FAIL_BACKOFF_BASE_MS =
+	Number(process.env.SUTANDO_PROXY_REFRESH_BACKOFF_BASE_MS) || 30 * 1000; // 30s
+const REFRESH_FAIL_BACKOFF_MAX_MS =
+	Number(process.env.SUTANDO_PROXY_REFRESH_BACKOFF_MAX_MS) || 15 * 60 * 1000; // 15 min
+
+// Pure: how long to wait before the next refresh attempt after `failCount`
+// consecutive failures. 0 failures → 0 (attempt immediately). Exponential
+// (BASE·2^(n-1)) capped at MAX.
+export function nextRefreshBackoffMs(failCount: number): number {
+	if (failCount <= 0) return 0;
+	return Math.min(
+		REFRESH_FAIL_BACKOFF_BASE_MS * 2 ** (failCount - 1),
+		REFRESH_FAIL_BACKOFF_MAX_MS,
+	);
+}
+
+// Pure: should we attempt a refresh right now? Only when the token needs it AND
+// we're past any active failure-backoff window. This is the guard that turns the
+// per-request retry storm into at most one attempt per backoff window.
+export function shouldAttemptRefresh(
+	needsRefresh: boolean,
+	now: number,
+	nextAllowedAt: number,
+): boolean {
+	return needsRefresh && now >= nextAllowedAt;
+}
 
 interface ClaudeOAuth {
 	accessToken: string;
@@ -56,30 +91,72 @@ interface ClaudeOAuth {
 	[k: string]: unknown;
 }
 
+interface StoredClaudeOAuth {
+	service: string;
+	oauth: ClaudeOAuth;
+}
+
 function ts(): string { return new Date().toISOString().slice(11, 23); }
 
-// Read the full cred object from the keychain (not just the accessToken).
-function readCred(): ClaudeOAuth | null {
+export function scopedKeychainService(configDir?: string): string | null {
+	const dir = (configDir ?? '').trim();
+	if (!dir) return null;
+	return `${DEFAULT_KEYCHAIN_SERVICE}-${createHash('sha256').update(dir).digest('hex').slice(0, 8)}`;
+}
+
+export function keychainServiceCandidates(configDir = process.env.CLAUDE_CONFIG_DIR): string[] {
+	const services = [scopedKeychainService(configDir), DEFAULT_KEYCHAIN_SERVICE].filter(Boolean) as string[];
+	return [...new Set(services)];
+}
+
+// Read the full cred object from one keychain service (not just accessToken).
+function readCredFromService(service: string): StoredClaudeOAuth | null {
 	try {
-		const raw = execSync(`security find-generic-password -s "${KEYCHAIN_SERVICE}" -w`, {
+		const raw = execFileSync('security', ['find-generic-password', '-s', service, '-w'], {
 			encoding: 'utf-8',
 			timeout: 5000,
 		}).trim();
 		const parsed = JSON.parse(raw);
 		const oauth = parsed?.claudeAiOauth;
-		return oauth && typeof oauth.accessToken === 'string' ? (oauth as ClaudeOAuth) : null;
+		return oauth && typeof oauth.accessToken === 'string' ? { service, oauth: oauth as ClaudeOAuth } : null;
 	} catch {
 		return null;
 	}
+}
+
+// All keychain candidates that currently hold a credential, scoped item first.
+function readCredCandidates(): StoredClaudeOAuth[] {
+	return keychainServiceCandidates()
+		.map(readCredFromService)
+		.filter((s): s is StoredClaudeOAuth => s !== null);
+}
+
+function readCred(): StoredClaudeOAuth | null {
+	return readCredCandidates()[0] ?? null;
+}
+
+// Pure: pick the credential to serve. First candidate whose token is usable
+// wins (scoped-first preference preserved); if none is usable, fall back to
+// the first present so degraded handling (pass-through / fail-fast) sees it.
+// A dead scoped item must not eclipse a fresh /login in the default item.
+export function selectCred(
+	candidates: StoredClaudeOAuth[],
+	now: number,
+	rejectedToken: string | null,
+): StoredClaudeOAuth | null {
+	for (const c of candidates) {
+		if (classifyCredential(c.oauth, now, rejectedToken) === 'ok') return c;
+	}
+	return candidates[0] ?? null;
 }
 
 // Atomically write the cred back to the keychain. Returns true ONLY after a
 // read-back confirms the new accessToken landed — the rotation-lockout guard:
 // if we consumed a (rotating) refresh token we MUST be sure its replacement
 // persisted, else the node can never refresh again.
-function keychainAccount(): string | null {
+function keychainAccount(service: string): string | null {
 	try {
-		const meta = execFileSync('security', ['find-generic-password', '-s', KEYCHAIN_SERVICE], {
+		const meta = execFileSync('security', ['find-generic-password', '-s', service], {
 			encoding: 'utf-8', timeout: 5000,
 		});
 		const m = meta.match(/"acct"<blob>="([^"]*)"/);
@@ -89,9 +166,9 @@ function keychainAccount(): string | null {
 	}
 }
 
-function writeCred(oauth: ClaudeOAuth): boolean {
+function writeCred(service: string, oauth: ClaudeOAuth): boolean {
 	try {
-		const acct = keychainAccount();
+		const acct = keychainAccount(service);
 		if (!acct) { console.error(`${ts()} [Proxy] keychain write: account not found`); return false; }
 		const payload = JSON.stringify({ claudeAiOauth: oauth });
 		// execFileSync (args array, no shell) — value passed as a single argv
@@ -100,10 +177,10 @@ function writeCred(oauth: ClaudeOAuth): boolean {
 		// single-user Mac, same as the rest of the vault path.)
 		execFileSync('security', [
 			'add-generic-password', '-U',
-			'-s', KEYCHAIN_SERVICE, '-a', acct, '-w', payload,
+			'-s', service, '-a', acct, '-w', payload,
 		], { timeout: 5000 });
-		const back = readCred();
-		return back?.accessToken === oauth.accessToken; // rotation-lockout read-back guard
+		const back = readCredFromService(service);
+		return back?.oauth.accessToken === oauth.accessToken; // rotation-lockout read-back guard
 	} catch (e) {
 		console.error(`${ts()} [Proxy] keychain write FAILED:`, (e as Error).message);
 		return false;
@@ -121,6 +198,18 @@ function writeCred(oauth: ClaudeOAuth): boolean {
 // access token that isn't a plausible non-empty string (never write garbage).
 // Exported so this — the highest-risk logic (field names + the guard) — is
 // unit-tested offline: no network, no keychain, no token rotation.
+// Redact + truncate an upstream response body before it goes to the log.
+// The OAuth token-endpoint ERROR body (e.g. `{"error":"invalid_grant",...}`)
+// is what we want to see when a refresh 400s — but never risk emitting a
+// token if one ever appears: mask any long token-like run (20+ base64url/JWT
+// chars, incl. dotted JWTs) and cap the length. Exported for offline testing.
+export function redactForLog(bodyText: string, max: number = 300): string {
+	const trimmed = (bodyText ?? '').trim();
+	if (!trimmed) return '(empty body)';
+	const redacted = trimmed.replace(/[A-Za-z0-9_-]{20,}(?:\.[A-Za-z0-9_-]{10,}){0,2}/g, '[redacted]');
+	return redacted.length > max ? redacted.slice(0, max) + '…(truncated)' : redacted;
+}
+
 export function parseRefreshResponse(
 	statusCode: number,
 	bodyText: string,
@@ -163,8 +252,15 @@ function refreshAccessToken(oauth: ClaudeOAuth): Promise<ClaudeOAuth | null> {
 			const cs: Buffer[] = [];
 			resp.on('data', (c) => cs.push(c));
 			resp.on('end', () => {
-				const fresh = parseRefreshResponse(resp.statusCode ?? 0, Buffer.concat(cs).toString('utf-8'), oauth);
-				if (!fresh) console.error(`${ts()} [Proxy] refresh unusable (HTTP ${resp.statusCode} or bad/empty response)`);
+				const rawBody = Buffer.concat(cs).toString('utf-8');
+				const fresh = parseRefreshResponse(resp.statusCode ?? 0, rawBody, oauth);
+				// Instrument the ACTUAL upstream failure. Previously this masked
+				// every failure as "HTTP N or bad/empty response", so a recurring
+				// refresh 400 (the fb556dd6 crash-loop root cause) was undiagnosable
+				// — "bad/empty response" hid the real token-endpoint error. Log the
+				// redacted+truncated body so the actual `error`/`error_description`
+				// is visible in credential-proxy.log.
+				if (!fresh) console.error(`${ts()} [Proxy] refresh unusable (HTTP ${resp.statusCode}): ${redactForLog(rawBody)}`);
 				resolve(fresh);
 			});
 		});
@@ -175,39 +271,294 @@ function refreshAccessToken(oauth: ClaudeOAuth): Promise<ClaudeOAuth | null> {
 	});
 }
 
-// Single-flight guard: at most one refresh in progress, so concurrent requests
-// never race to consume/rotate the refresh token twice.
-let refreshInFlight: Promise<void> | null = null;
+// Pure: is this credential safe to inject? 'expired' = hard expiry (the 5-min
+// REFRESH_SKEW only triggers refresh attempts — a not-yet-expired token still
+// works upstream). 'rejected' = upstream already 401'd this exact token, so it
+// is known-dead regardless of its expiry metadata.
+export function classifyCredential(
+	oauth: ClaudeOAuth,
+	now: number,
+	rejectedToken: string | null,
+): 'ok' | 'expired' | 'rejected' {
+	if (rejectedToken !== null && oauth.accessToken === rejectedToken) return 'rejected';
+	if (typeof oauth.expiresAt === 'number' && oauth.expiresAt <= now) return 'expired';
+	return 'ok';
+}
 
-// Return a usable accessToken, refreshing first if the stored one is at/near
-// expiry. Fail-safe at every step: any problem → return the existing token.
-async function getFreshOAuthToken(): Promise<string | null> {
-	const cred = readCred();
-	if (!cred) return null;
-	const needsRefresh =
-		typeof cred.expiresAt === 'number' &&
-		cred.expiresAt - Date.now() <= REFRESH_SKEW_MS &&
-		!!cred.refreshToken;
-	if (needsRefresh) {
+// Distinct fail-fast body: name the proxy and the remedy so a 401 from HERE is
+// never mistaken for an upstream auth failure.
+export function authUnavailableBody(verdict: 'expired' | 'rejected'): string {
+	return JSON.stringify({
+		type: 'error',
+		error: {
+			type: 'authentication_error',
+			message:
+				`sutando credential-proxy: stored OAuth token is ${verdict} and self-refresh is unavailable ` +
+				'(OAuth endpoint failing; backing off). Run /login in Claude Code — the proxy re-reads the ' +
+				'keychain on every request and will pick the new token up immediately.',
+		},
+	});
+}
+
+// Injectable seams (keychain, refresh, upstream, clock) so the proxy's failure
+// semantics are testable hermetically; defaults are the production bindings.
+export interface ProxyDeps {
+	readCredCandidates: () => StoredClaudeOAuth[];
+	writeCred: (service: string, oauth: ClaudeOAuth) => boolean;
+	refreshAccessToken: (oauth: ClaudeOAuth) => Promise<ClaudeOAuth | null>;
+	request: typeof httpsRequest;
+	upstreamUrl: URL;
+	updateQuotaState: (headers: Record<string, string>) => void;
+	now: () => number;
+	idleTimeoutMs: number;
+}
+
+export function createProxyServer(overrides: Partial<ProxyDeps> = {}) {
+	const deps: ProxyDeps = {
+		readCredCandidates,
+		writeCred,
+		refreshAccessToken,
+		request: httpsRequest,
+		upstreamUrl: new URL(UPSTREAM),
+		updateQuotaState,
+		now: Date.now,
+		idleTimeoutMs: UPSTREAM_IDLE_TIMEOUT_MS,
+		...overrides,
+	};
+	const upstreamPort = deps.upstreamUrl.port ? Number(deps.upstreamUrl.port) : 443;
+
+	// Single-flight guard: at most one refresh in progress, so concurrent requests
+	// never race to consume/rotate the refresh token twice.
+	let refreshInFlight: Promise<void> | null = null;
+
+	// Failure-backoff state (see nextRefreshBackoffMs / shouldAttemptRefresh).
+	// While now < nextRefreshAllowedAt, skip the refresh instead of hammering.
+	let refreshFailCount = 0;
+	let nextRefreshAllowedAt = 0;
+
+	// Last token an upstream 401 proved dead — never injected again until a
+	// refresh or /login replaces it (cleared on refresh success).
+	let rejectedToken: string | null = null;
+
+	function runSingleFlightRefresh(service: string, cred: ClaudeOAuth): Promise<void> {
 		if (!refreshInFlight) {
 			refreshInFlight = (async () => {
-				const fresh = await refreshAccessToken(cred);
-				if (fresh && writeCred(fresh)) {
+				const fresh = await deps.refreshAccessToken(cred);
+				if (fresh && deps.writeCred(service, fresh)) {
+					refreshFailCount = 0;
+					nextRefreshAllowedAt = 0;
+					rejectedToken = null;
 					console.log(`${ts()} [Proxy] OAuth token refreshed (new expiry ${new Date(fresh.expiresAt ?? 0).toISOString()})`);
 				} else {
-					console.error(`${ts()} [Proxy] refresh did not persist — keeping existing token`);
+					refreshFailCount += 1;
+					const backoff = nextRefreshBackoffMs(refreshFailCount);
+					nextRefreshAllowedAt = deps.now() + backoff;
+					console.error(`${ts()} [Proxy] refresh failed (failure ${refreshFailCount}, next attempt allowed in ${Math.round(backoff / 1000)}s)`);
 				}
 			})().finally(() => { refreshInFlight = null; });
 		}
-		await refreshInFlight;
-		return readCred()?.accessToken ?? cred.accessToken;
+		return refreshInFlight;
 	}
-	return cred.accessToken;
+
+	// Re-read the keychain (every call — no cache, so /login lands within one
+	// request) and refresh first when at/near expiry or upstream-rejected.
+	// selectCred scans ALL candidate items: a fresh /login in the default item
+	// must be found even while a dead scoped item exists.
+	async function resolveCredential(): Promise<StoredClaudeOAuth | null> {
+		const stored = selectCred(deps.readCredCandidates(), deps.now(), rejectedToken);
+		if (!stored) return null;
+		const { service, oauth: cred } = stored;
+		const nearExpiry =
+			typeof cred.expiresAt === 'number' &&
+			cred.expiresAt - deps.now() <= REFRESH_SKEW_MS;
+		const needsRefresh =
+			(nearExpiry || classifyCredential(cred, deps.now(), rejectedToken) !== 'ok') &&
+			!!cred.refreshToken;
+		if (shouldAttemptRefresh(needsRefresh, deps.now(), nextRefreshAllowedAt)) {
+			if (nearExpiry) console.log(`${ts()} [Proxy] stored token at/near expiry — attempting refresh`);
+			await runSingleFlightRefresh(service, cred);
+			return selectCred(deps.readCredCandidates(), deps.now(), rejectedToken) ?? stored;
+		}
+		return stored;
+	}
+
+	// Owner's 401 state machine: reload (keychain re-read) → refresh (if the
+	// backoff window allows) → rebuild → retry once. Null = give up loud.
+	async function recoverAfter401(failedToken: string): Promise<string | null> {
+		rejectedToken = failedToken;
+		const stored = selectCred(deps.readCredCandidates(), deps.now(), rejectedToken);
+		console.log(`${ts()} [Proxy] keychain re-read after 401: ${stored ? 'credential present' : 'no credential'}`);
+		if (!stored) return null;
+		if (
+			stored.oauth.accessToken !== failedToken &&
+			classifyCredential(stored.oauth, deps.now(), rejectedToken) === 'ok'
+		) {
+			return stored.oauth.accessToken; // a fresh /login already landed
+		}
+		if (stored.oauth.refreshToken && shouldAttemptRefresh(true, deps.now(), nextRefreshAllowedAt)) {
+			await runSingleFlightRefresh(stored.service, stored.oauth);
+			const after = selectCred(deps.readCredCandidates(), deps.now(), rejectedToken);
+			if (
+				after &&
+				after.oauth.accessToken !== failedToken &&
+				classifyCredential(after.oauth, deps.now(), rejectedToken) === 'ok'
+			) {
+				return after.oauth.accessToken;
+			}
+		}
+		return null;
+	}
+
+	return createServer((req, res) => {
+		const chunks: Buffer[] = [];
+		req.on('data', (c) => chunks.push(c));
+		req.on('end', async () => {
+			const body = Buffer.concat(chunks);
+
+			const headers: Record<string, string | number | string[] | undefined> = {
+				...(req.headers as Record<string, string>),
+				host: deps.upstreamUrl.host,
+				'content-length': body.length,
+			};
+
+			// Strip hop-by-hop headers
+			delete headers['connection'];
+			delete headers['keep-alive'];
+			delete headers['transfer-encoding'];
+
+			const hasClientAuth = !!headers['authorization'] || !!headers['x-api-key'];
+
+			// Read token fresh from keychain each request, refreshing it first if it
+			// is at/near expiry (self-refresh covers headless nodes).
+			const stored = await resolveCredential();
+			// The token this proxy injected, if any — non-null means WE authored the
+			// request's auth and own the 401-recovery duty for it.
+			let injectedToken: string | null = null;
+			if (!stored) {
+				if (!hasClientAuth) {
+					res.writeHead(502);
+					res.end('No OAuth token in keychain');
+					return;
+				}
+				console.log(`${ts()} [Proxy] no keychain credential — passing client credential through`);
+			} else {
+				const verdict = classifyCredential(stored.oauth, deps.now(), rejectedToken);
+				if (verdict === 'ok') {
+					// Inject OAuth token for auth requests
+					if (headers['authorization']) {
+						headers['authorization'] = `Bearer ${stored.oauth.accessToken}`;
+						injectedToken = stored.oauth.accessToken;
+					}
+				} else if (hasClientAuth) {
+					// Never inject a known-dead token over a client credential that may
+					// be fresher (the /login case) — pass it through untouched.
+					console.log(`${ts()} [Proxy] stored token ${verdict}, refresh unavailable — pass-through engaged (client credential forwarded untouched)`);
+				} else {
+					console.error(`${ts()} [Proxy] stored token ${verdict}, refresh unavailable, no client credential — failing fast (401)`);
+					res.writeHead(401, { 'content-type': 'application/json' });
+					res.end(authUnavailableBody(verdict));
+					return;
+				}
+			}
+
+			const forward = (attempt: number): void => {
+				let timedOut = false;
+
+				const upstream = deps.request(
+					{
+						hostname: deps.upstreamUrl.hostname,
+						port: upstreamPort,
+						path: req.url,
+						method: req.method,
+						headers,
+						timeout: deps.idleTimeoutMs,
+					} as RequestOptions,
+					(upRes) => {
+						// Extract rate limit headers
+						const quotaHeaders: Record<string, string> = {};
+						for (const [key, val] of Object.entries(upRes.headers)) {
+							if (key.startsWith('anthropic-ratelimit')) {
+								quotaHeaders[key] = String(val);
+							}
+						}
+						if (Object.keys(quotaHeaders).length > 0) {
+							console.log(`${ts()} [Quota]`, quotaHeaders);
+							deps.updateQuotaState(quotaHeaders);
+						}
+
+						if (upRes.statusCode === 401 && injectedToken && attempt === 0) {
+							// 401 on proxy-authored auth is an auth-state transition, not a
+							// generic failure: reload → refresh → retry once → give up loud.
+							console.error(`${ts()} [Proxy] upstream 401 on injected token — invalidating it and re-reading keychain`);
+							const buf: Buffer[] = [];
+							upRes.on('data', (c) => buf.push(c));
+							upRes.on('end', async () => {
+								const recovered = await recoverAfter401(injectedToken as string);
+								if (recovered) {
+									console.log(`${ts()} [Proxy] retrying once with reloaded credential`);
+									headers['authorization'] = `Bearer ${recovered}`;
+									injectedToken = recovered;
+									forward(1);
+									return;
+								}
+								console.error(`${ts()} [Proxy] credential recovery failed — forwarding the upstream 401 (re-auth with /login)`);
+								const h = { ...upRes.headers };
+								delete h['content-length'];
+								delete h['transfer-encoding'];
+								res.writeHead(401, h);
+								res.end(Buffer.concat(buf));
+							});
+							return;
+						}
+						if (upRes.statusCode === 401 && injectedToken && attempt > 0) {
+							console.error(`${ts()} [Proxy] reloaded credential also rejected (401) — giving up`);
+							rejectedToken = injectedToken;
+						}
+
+						res.writeHead(upRes.statusCode!, upRes.headers);
+						upRes.pipe(res);
+					},
+				);
+
+				// 'timeout' fires on socket inactivity but does NOT auto-abort — destroy the
+				// request so it surfaces through the 'error' handler below as a clean failure
+				// (and Claude Code's own retry kicks in) instead of hanging indefinitely.
+				upstream.on('timeout', () => {
+					timedOut = true;
+					console.error(`${ts()} [Proxy] Upstream idle >${deps.idleTimeoutMs}ms — aborting`);
+					upstream.destroy(new Error('upstream idle timeout'));
+				});
+
+				upstream.on('error', (err) => {
+					console.error(`${ts()} [Proxy] Upstream error:`, err.message);
+					if (!res.headersSent) {
+						res.writeHead(timedOut ? 504 : 502);
+						res.end(timedOut ? 'Gateway Timeout' : 'Bad Gateway');
+					} else {
+						// Headers already streamed — can't change status. Tear down the client
+						// connection so the agent sees a broken stream and retries rather than
+						// waiting forever on a dead upstream.
+						res.destroy(err);
+					}
+				});
+
+				// If the agent hangs up first, don't leak the in-flight upstream request.
+				res.on('close', () => {
+					if (!res.writableEnded) upstream.destroy();
+				});
+
+				upstream.write(body);
+				upstream.end();
+			};
+
+			forward(0);
+		});
+	});
 }
 
 // Back-compat sync reader (startup probe only — does not refresh).
 function getOAuthToken(): string | null {
-	return readCred()?.accessToken ?? null;
+	return readCred()?.oauth.accessToken ?? null;
 }
 
 function updateQuotaState(headers: Record<string, string>): void {
@@ -242,11 +593,12 @@ function updateQuotaState(headers: Record<string, string>): void {
 }
 
 // Only start the server when run directly. Importing this module (e.g. from the
-// offline parse test) must NOT bind the port, touch the keychain, or exit.
-// Match the exact script name, NOT a substring — the offline test file is named
-// `credential-proxy-refresh.test.ts`, which contains "credential-proxy" but must
-// NOT be treated as the entry point (else importing it tries to bind the port).
-const isMain = (process.argv[1] ?? '').endsWith('credential-proxy.ts');
+// offline tests) must NOT bind the port, touch the keychain, or exit.
+// Match the exact basename — works for BOTH the dev entry (`credential-proxy.ts`
+// run via tsx) AND the bundled artifact (`dist/credential-proxy.js`), while
+// excluding the `credential-proxy-*.test.{ts,js}` files (different basenames).
+const _entryName = (process.argv[1] ?? '').split(/[\\/]/).pop() ?? '';
+const isMain = _entryName === 'credential-proxy.ts' || _entryName === 'credential-proxy.js';
 
 if (isMain) {
 	// Verify token exists at startup
@@ -256,106 +608,8 @@ if (isMain) {
 		process.exit(1);
 	}
 	console.log(`${ts()} [Proxy] OAuth token loaded from keychain (will re-read on each request)`);
-}
 
-const upstreamUrl = new URL(UPSTREAM);
-
-const server = createServer((req, res) => {
-	const chunks: Buffer[] = [];
-	req.on('data', (c) => chunks.push(c));
-	req.on('end', async () => {
-		const body = Buffer.concat(chunks);
-
-		// Read token fresh from keychain each request, refreshing it first if it
-		// is at/near expiry (tokens are also refreshed by active interactive
-		// sessions; this self-refresh covers headless nodes where they aren't).
-		const oauthToken = await getFreshOAuthToken();
-		if (!oauthToken) {
-			res.writeHead(502);
-			res.end('No OAuth token in keychain');
-			return;
-		}
-
-		const headers: Record<string, string | number | string[] | undefined> = {
-			...(req.headers as Record<string, string>),
-			host: upstreamUrl.host,
-			'content-length': body.length,
-		};
-
-		// Strip hop-by-hop headers
-		delete headers['connection'];
-		delete headers['keep-alive'];
-		delete headers['transfer-encoding'];
-
-		// Inject OAuth token for auth requests
-		if (headers['authorization']) {
-			delete headers['authorization'];
-			headers['authorization'] = `Bearer ${oauthToken}`;
-		}
-
-		let timedOut = false;
-
-		const upstream = httpsRequest(
-			{
-				hostname: upstreamUrl.hostname,
-				port: 443,
-				path: req.url,
-				method: req.method,
-				headers,
-				timeout: UPSTREAM_IDLE_TIMEOUT_MS,
-			} as RequestOptions,
-			(upRes) => {
-				// Extract rate limit headers
-				const quotaHeaders: Record<string, string> = {};
-				for (const [key, val] of Object.entries(upRes.headers)) {
-					if (key.startsWith('anthropic-ratelimit')) {
-						quotaHeaders[key] = String(val);
-					}
-				}
-				if (Object.keys(quotaHeaders).length > 0) {
-					console.log(`${ts()} [Quota]`, quotaHeaders);
-					updateQuotaState(quotaHeaders);
-				}
-
-				res.writeHead(upRes.statusCode!, upRes.headers);
-				upRes.pipe(res);
-			},
-		);
-
-		// 'timeout' fires on socket inactivity but does NOT auto-abort — destroy the
-		// request so it surfaces through the 'error' handler below as a clean failure
-		// (and Claude Code's own retry kicks in) instead of hanging indefinitely.
-		upstream.on('timeout', () => {
-			timedOut = true;
-			console.error(`${ts()} [Proxy] Upstream idle >${UPSTREAM_IDLE_TIMEOUT_MS}ms — aborting`);
-			upstream.destroy(new Error('upstream idle timeout'));
-		});
-
-		upstream.on('error', (err) => {
-			console.error(`${ts()} [Proxy] Upstream error:`, err.message);
-			if (!res.headersSent) {
-				res.writeHead(timedOut ? 504 : 502);
-				res.end(timedOut ? 'Gateway Timeout' : 'Bad Gateway');
-			} else {
-				// Headers already streamed — can't change status. Tear down the client
-				// connection so the agent sees a broken stream and retries rather than
-				// waiting forever on a dead upstream.
-				res.destroy(err);
-			}
-		});
-
-		// If the agent hangs up first, don't leak the in-flight upstream request.
-		res.on('close', () => {
-			if (!res.writableEnded) upstream.destroy();
-		});
-
-		upstream.write(body);
-		upstream.end();
-	});
-});
-
-if (isMain) {
-	server.listen(PORT, '127.0.0.1', () => {
+	createProxyServer().listen(PORT, '127.0.0.1', () => {
 		console.log(`${ts()} [Proxy] Credential proxy → http://localhost:${PORT}`);
 		console.log(`${ts()} [Proxy] Upstream: ${UPSTREAM}`);
 		console.log(`${ts()} [Proxy] Set ANTHROPIC_BASE_URL=http://localhost:${PORT} to route through proxy`);
