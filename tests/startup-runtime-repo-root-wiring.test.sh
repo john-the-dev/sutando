@@ -46,6 +46,18 @@ else
   ok "startup-runtime.sh has no hand-rolled lexical repo root"
 fi
 
+echo "== every suite that STAGES startup-runtime.sh also stages its sibling =="
+# The source is a hard dependency: a suite that copies one without the other dies
+# on FATAL. Enumerate rather than wait for CI to find them one at a time.
+missing=""
+for f in "$REPO_UNDER_TEST"/tests/*.test.sh "$REPO_UNDER_TEST"/tests/*.test.py; do
+  [ -f "$f" ] || continue
+  grep -q 'cp .*src/startup-runtime\.sh' "$f" 2>/dev/null || continue
+  grep -q 'repo_root\.sh' "$f" 2>/dev/null || missing="$missing $(basename "$f")"
+done
+[ -z "$missing" ] && ok "no suite copies startup-runtime.sh without repo_root.sh" \
+                  || bad "these stage it alone and will hit FATAL:$missing"
+
 echo "== a missing sibling resolver fails LOUDLY, never silently-empty =="
 T="$(mktemp -d)"; mkdir -p "$T/src"; cp "$REPO_UNDER_TEST/src/startup-runtime.sh" "$T/src/"
 err="$(bash -c '. "$1"' _ "$T/src/startup-runtime.sh" 2>&1 >/dev/null)"
