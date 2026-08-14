@@ -54,15 +54,8 @@ def discover(repo_dir: Path) -> list[tuple[str, str, str]]:
                 continue
             runner = RUNNERS.get(target.suffix, "bash")
             q = shlex.quote(str(target))
-            # Skip when the script is absent AT FIRE TIME, not just at install time.
-            # The path points into the working tree, so `git checkout` of any branch
-            # predating the skill deletes it while the registration survives — and a
-            # hook whose command cannot start is an error, which BLOCKS the tool. On
-            # 2026-08-14 that took a core fully dark: this guard registers under an
-            # empty matcher, so a missing file blocked Bash, Read, Write and tool
-            # search at once, including every route that could restore the file.
-            # Absent must fail OPEN; a present guard keeps its own exit code, so a
-            # real block still blocks.
+            # The path is in the working tree, so a checkout can delete it while the
+            # registration survives; a hook that cannot start blocks the tool it gates.
             out.append((event, target.name, f"[ -f {q} ] || exit 0; exec {runner} {q}"))
     return out
 

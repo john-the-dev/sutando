@@ -233,22 +233,35 @@ for entry in "${HOOKS[@]}"; do
   CMD_TAIL="${CMD_TAIL#[\"\']}"       # drop shq's closing quote, if present
   SHAPE="^$(re_escape "$CMD_WORD") [\"']?[^ -].*$(re_escape "$MARKER")[\"']?$(re_escape "$CMD_TAIL")\$"
 
-  if ! jq -e --arg event "$EVENT" --arg marker "$MARKER" --arg cmd "$CMD" --arg shape "$SHAPE" \
+  # A guarded command changes the FIRST WORD to `[`, so SHAPE cannot match the
+  # runner-first entry an earlier installer wrote; without this the old one
+  # survives beside the new and still blocks the tool it gates.
+  # Exact string only — the narrowest form that cannot touch operator variants.
+  LEGACY_SHAPE=""
+  case "$CMD" in
+    "[ -f "*" ] || exit 0; exec "*) LEGACY_SHAPE="^$(re_escape "${CMD#*exec }")\$" ;;
+  esac
+
+  if ! jq -e --arg event "$EVENT" --arg marker "$MARKER" --arg cmd "$CMD" \
+           --arg shape "$SHAPE" --arg legacy "$LEGACY_SHAPE" \
       '(.hooks // {})[$event] // [] | map(.hooks // []) | flatten | map(.command // "")
-       | map(contains($marker) and (. != $cmd) and test($shape))
+       | map(contains($marker) and (. != $cmd)
+             and (test($shape) or ($legacy != "" and test($legacy))))
        | any' \
       "$SETTINGS" >/dev/null 2>&1; then
     continue
   fi
 
   TMP="$(mktemp "${SETTINGS}.XXXXXX")"
-  jq --arg event "$EVENT" --arg marker "$MARKER" --arg cmd "$CMD" --arg shape "$SHAPE" '
+  jq --arg event "$EVENT" --arg marker "$MARKER" --arg cmd "$CMD" \
+     --arg shape "$SHAPE" --arg legacy "$LEGACY_SHAPE" '
     if (.hooks // {})[$event] then
       .hooks[$event] |= map(
         .hooks |= map(select(
           ((.command // "") | contains($marker))
           and ((.command // "") != $cmd)
-          and ((.command // "") | test($shape))
+          and ((.command // "")
+               | test($shape) or ($legacy != "" and test($legacy)))
           | not
         ))
       )

@@ -43,11 +43,8 @@ class SkillHookDiscovery(unittest.TestCase):
         self.assertIn("skills/demo/hooks/g.py", cmd)
 
     def test_a_vanished_script_allows_the_tool_instead_of_blocking_it(self):
-        """The registration outlives the file: `git checkout` of a branch predating
-        the skill deletes it, and a hook that cannot start blocks the tool it gates.
-
-        Fires the emitted command with the script deleted and requires exit 0 — an
-        absent guard must not be able to take the agent's tools away."""
+        """The registration outlives the file, and a hook that cannot start blocks
+        the tool it gates, so an absent script must exit 0."""
         d = self._skill("demo", {"name": "demo", "hooks": [
             {"event": "PreToolUse", "command": "./hooks/g.py"}]}, hook_body="import sys; sys.exit(2)")
         cmd = discover(self.repo)[0][2]

@@ -319,6 +319,52 @@ ok "and the repo-path hook is still installed on the same event" \
    "$(echo "$CCMDS" | grep -q 'session-handoff' && echo 0 || echo 1)"
 rm -rf "$CROOT"
 
+# ---- upgrade path: a pre-existing runner-first skill hook must be MIGRATED ----
+# The outage case. An affected install already carries `python3 <path>`; if a
+# re-run only ADDS the guarded entry, the old one still fires and still blocks.
+UROOT="$(mktemp -d)"; UREPO="$UROOT/repo"
+mkdir -p "$UREPO/.claude" "$UREPO/src" "$UREPO/skills/demo/hooks"
+cp "$HERE/../src/install-claude-hooks.sh" "$UREPO/src/"
+cp "$HERE/../src/skill_hooks.py" "$UREPO/src/"
+printf '#!/bin/bash\n:\n' > "$UREPO/src/session-handoff.sh"
+printf '#!/bin/bash\n:\n' > "$UREPO/src/check-pending-tasks.sh"
+chmod +x "$UREPO/src/"*.sh
+printf '{"name":"demo","hooks":[{"event":"PreToolUse","command":"./hooks/g.py"}]}\n' \
+    > "$UREPO/skills/demo/manifest.json"
+printf 'import sys; sys.exit(2)\n' > "$UREPO/skills/demo/hooks/g.py"
+# Resolve it: skill_hooks writes the RESOLVED path, and on macOS mktemp hands
+# back /var/... for /private/var/..., so an unresolved fixture seeds a string no
+# installer ever wrote and the migration would look broken when it is not.
+GPATH="$(python3 -c "import pathlib,sys;print(pathlib.Path(sys.argv[1]).resolve())" "$UREPO/skills/demo/hooks/g.py")"
+export U_SETTINGS="$UREPO/.claude/settings.json"
+# Seed EXACTLY what a previous installer wrote, plus an operator variant that
+# invokes the same script — the negative control the sweep must not eat.
+U_OLD="python3 $GPATH" python3 - <<'PY'
+import json, os
+json.dump({"hooks": {"PreToolUse": [{"matcher": "", "hooks": [
+    {"type": "command", "command": os.environ["U_OLD"]},
+    {"type": "command", "command": "bash -x " + os.environ["U_OLD"].split(" ", 1)[1]},
+]}]}}, open(os.environ["U_SETTINGS"], "w"), indent=2)
+PY
+bash "$UREPO/src/install-claude-hooks.sh" >/dev/null 2>&1
+UCMDS="$(python3 -c "
+import json, os
+d = json.load(open(os.environ['U_SETTINGS']))
+print(chr(10).join(h['command'] for g in d['hooks'].get('PreToolUse', []) for h in g['hooks']))
+")"
+ok "old runner-first skill hook is REMOVED on re-run (not left beside the new one)" \
+   "$(echo "$UCMDS" | grep -qx "python3 $GPATH" && echo 1 || echo 0)"
+ok "guarded skill hook is registered exactly once" \
+   "$([ "$(echo "$UCMDS" | grep -c '^\[ -f .*g\.py ')" = 1 ] && echo 0 || echo 1)"
+ok "operator's own variant on the same script survives (negative control)" \
+   "$(echo "$UCMDS" | grep -q 'bash -x ' && echo 0 || echo 1)"
+# The point of the whole change: with the script gone, nothing blocks.
+rm -f "$GPATH"
+UGUARD="$(echo "$UCMDS" | grep '^\[ -f .*g\.py ' | head -1)"
+bash -c "$UGUARD" >/dev/null 2>&1
+ok "with the script deleted the guarded hook exits 0 (tool not blocked)" "$?"
+rm -rf "$UROOT"
+
 rm -rf "$ROOT"
 echo "---"
 if [ "$fail" -gt 0 ]; then
