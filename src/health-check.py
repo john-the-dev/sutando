@@ -2570,12 +2570,18 @@ def _behind_commits_changing(repo: "Path", branch: str, prefix: str,
 def _commits_behind(repo: "Path", branch: str, git_bin: str = "git") -> "int | None":
     """Commits on origin/<branch> that HEAD lacks, or None if unanswerable.
 
-    Uses the LAST-FETCHED remote ref — deliberately does not fetch. A health
-    probe must stay fast and work offline, and a network call here would make
-    the whole run hang on a flaky link. The consequence is honest and stated in
-    the warning text: if the local ref is itself stale the count UNDERSTATES the
-    drift, so this can only under-report, never cry wolf.
+    Never fetches. Without a merge-base the count is not a distance, so returns None.
     """
+    try:
+        base = subprocess.run(
+            [git_bin, "-C", str(repo), "merge-base", "HEAD", f"origin/{branch}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if base.returncode != 0:
+        # No shared history: a count here would be a number without a meaning.
+        return None
     try:
         out = subprocess.run(
             [git_bin, "-C", str(repo), "rev-list", "--count", f"HEAD..origin/{branch}"],
@@ -2717,20 +2723,114 @@ def check_live_checkout_branch(repo_dir: "Path | None" = None) -> dict:
     # disagreed invisibly, and that is true of any content difference.
     stale_skills = _behind_commits_changing(repo, expected, "skills/", git_bin)
     if stale_skills:
+        # No shared history: the tree diff is still valid, but no count and no
+        # fast-forward are, so say that rather than render "None commit(s)".
+        if behind is None:
+            distance = (f"live checkout is on {expected!r} an unknown distance behind "
+                        f"origin/{expected} (no common ancestor — shallow clone, so a commit "
+                        "count is not available)")
+            # "of them" needs a total to refer to.
+            share = f"{len(stale_skills)} commit(s) change"
+            refresh = (f"`git -C {repo} fetch --unshallow` first; `pull --ff-only` cannot "
+                       "apply without a shared history")
+        else:
+            distance = (f"live checkout is on {expected!r} and only {behind} commit(s) behind "
+                        f"origin/{expected} — under the {_behind_warn_threshold(repo)}-commit "
+                        "nag threshold")
+            # The count above is the TOTAL, so "of them" keeps the subset a subset.
+            share = f"{len(stale_skills)} of them change"
+            refresh = f"`git -C {repo} pull --ff-only`"
         return {"name": name, "status": "warn",
-                "detail": f"live checkout is on {expected!r} and only {behind} commit(s) behind "
-                          f"origin/{expected} — under the {_behind_warn_threshold(repo)}-commit "
-                          f"nag threshold — but {len(stale_skills)} of them change `skills/`, "
+                "detail": f"{distance} — but {share} `skills/`, "
                           "which the agent re-reads from this checkout on EVERY invocation. "
                           "Those merged skill fixes are not in effect here, and no "
                           "restart-staleness probe can see it: a skill has no running process "
                           f"to compare against. ({'; '.join(stale_skills[:3])}"
                           f"{'; …' if len(stale_skills) > 3 else ''}) Refresh with "
-                          f"`git -C {repo} pull --ff-only`. Measured against the last-fetched "
+                          f"{refresh}. Measured against the last-fetched "
                           "ref; this probe does not fetch, so it can only under-report."}
     return {"name": name, "status": "ok",
             "detail": f"live checkout on {expected!r}"
                       + (f", {behind} commits behind" if behind else "")}
+
+
+def check_engine_revision_drift(repo_dir: "Path | None" = None,
+                                manifest_path: "Path | None" = None) -> dict:
+    """Warn when the checked-out source has moved off the BUILT engine revision.
+
+    `dist/` is gitignored, so source advances while the artifacts stay behind.
+    """
+    name = "engine-revision-drift"
+    repo = Path(repo_dir) if repo_dir is not None else REPO_DIR
+    manifest = Path(manifest_path) if manifest_path is not None else repo.parent / "ENGINE_MANIFEST.json"
+
+    if not manifest.is_file():
+        # A plain source clone has no bundle manifest — nothing to compare.
+        return {"name": name, "status": "ok",
+                "detail": "no ENGINE_MANIFEST.json — not a bundled engine, skipping"}
+    try:
+        built = (json.loads(manifest.read_text()) or {}).get("sha")
+    except (OSError, ValueError) as e:
+        return {"name": name, "status": "ok",
+                "detail": f"unreadable ENGINE_MANIFEST.json ({str(e)[:40]}) — skipping"}
+    if not isinstance(built, str) or not built.strip():
+        return {"name": name, "status": "ok",
+                "detail": "ENGINE_MANIFEST.json has no sha — skipping"}
+    built = built.strip()
+
+    # A resolver failure must degrade like resolve_git() -> None, never to bare
+    # `git`, which can resolve the Xcode-CLT stub and raise the install dialog.
+    try:
+        from git_binary import resolve_git  # noqa: PLC0415
+        git_bin = resolve_git()
+    except Exception:
+        git_bin = None
+    if git_bin is None:
+        return {"name": name, "status": "ok", "detail": "no runnable git — skipping"}
+
+    def _git(*args):
+        return subprocess.run([git_bin, "-C", str(repo), *args],
+                              capture_output=True, text=True, timeout=10)
+
+    try:
+        head = _git("rev-parse", "HEAD")
+    except (OSError, subprocess.TimeoutExpired):
+        return {"name": name, "status": "ok", "detail": "git not runnable — skipping"}
+    if head.returncode != 0:
+        return {"name": name, "status": "ok", "detail": "not a git checkout — skipping"}
+    head_sha = head.stdout.strip()
+    # Normalise first: an abbreviated sha (or a tag) of the checked-out commit
+    # would otherwise compare unequal and print "X != X (0 commits ahead)".
+    try:
+        resolved = _git("rev-parse", f"{built}^{{commit}}")
+        if resolved.returncode == 0 and resolved.stdout.strip():
+            built = resolved.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # keep the literal; the comparison below is still correct for it
+    if head_sha == built:
+        return {"name": name, "status": "ok",
+                "detail": f"source matches built revision {built[:9]}"}
+
+    # An unanswerable count must not soften the drift, which is already established.
+    detail = f"source HEAD {head_sha[:9]} != built revision {built[:9]}"
+    try:
+        if _git("cat-file", "-e", built).returncode == 0 and \
+           _git("merge-base", "--is-ancestor", built, "HEAD").returncode == 0:
+            ahead = _git("rev-list", "--count", f"{built}..HEAD").stdout.strip()
+            # Zero ahead of an ancestor means it IS this commit under another name.
+            if ahead == "0":
+                return {"name": name, "status": "ok",
+                        "detail": f"source matches built revision {built[:9]}"}
+            if ahead:
+                detail += f" ({ahead} commits ahead)"
+        else:
+            detail += " (diverged, or the built commit is outside this shallow clone)"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return {"name": name, "status": "warn",
+            "detail": detail + " — dist/ is gitignored so it did NOT follow the source; "
+                               "the Node half still runs the older build. Rebuild and "
+                               "reactivate the engine rather than trusting the checkout."}
 
 
 def check_migrate_reader_contract() -> dict:
@@ -6721,6 +6821,18 @@ def check_claude_hook_registration(
                 "detail": "could not parse HOOKS=(...) from install-claude-hooks.sh — "
                           "cannot verify registration (reporting rather than assuming clean)"}
 
+    # Skill-declared hooks are appended to HOOKS at run time, so the static parse
+    # above cannot see them. Same discovery the installer uses — a second copy here
+    # would drift and quietly stop verifying whatever the installer registered.
+    try:
+        sys.path.insert(0, str(repo / "src"))
+        from skill_hooks import discover as _discover_skill_hooks
+        owned.extend(_discover_skill_hooks(repo))
+    except Exception as exc:
+        return {"name": name, "status": "warn",
+                "detail": f"skill-hook discovery failed ({exc}) — "
+                          f"cannot verify skill-declared hooks"}
+
     sm = re.search(r'^SETTINGS="([^"]+)"', src, re.M)
     settings = Path(sm.group(1).replace("$REPO_DIR", str(repo))) if sm else repo / ".claude" / "settings.json"
     if not settings.is_file():
@@ -7141,6 +7253,20 @@ def check_core_model_pin() -> dict:
     return _interpret_core_model_pin(pinned, socket, _core_argv_pins(socket, sessions))
 
 
+MENUBAR_LABEL = "com.sutando.menubar"
+MENUBAR_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{MENUBAR_LABEL}.plist"
+
+
+def menubar_app_state(dev_bin, app_bin, plist, is_macos: bool) -> str:
+    """installed | expected-missing | not-applicable for the optional menu-bar app.
+    The launchd plist is the only durable signal a host ASKED for the app."""
+    if dev_bin.exists() or app_bin.exists():
+        return "installed"
+    if not is_macos:
+        return "not-applicable"
+    return "expected-missing" if plist.exists() else "not-applicable"
+
+
 def run_all_checks() -> list[dict]:
     checks = []
 
@@ -7271,6 +7397,7 @@ def run_all_checks() -> list[dict]:
     checks.append(check_per_host_config_backup())
     # Live checkout on its expected branch (PR-branch drift, 2026-07-29 incident)
     checks.append(check_live_checkout_branch())
+    checks.append(check_engine_revision_drift())
     onboarding_check = check_onboarding_status()
     if onboarding_check is not None:
         checks.append(onboarding_check)
@@ -7506,7 +7633,9 @@ def run_all_checks() -> list[dict]:
     # the menu bar check to run so dashboard reports accurate status.
     dev_bin = REPO_DIR / "src" / "Sutando" / "Sutando"
     app_bin = Path("/Applications/Sutando.app/Contents/MacOS/Sutando")
-    if dev_bin.exists() or app_bin.exists():
+    _menubar = menubar_app_state(
+        dev_bin, app_bin, MENUBAR_PLIST, sys.platform == "darwin")
+    if _menubar == "installed":
         # Distinguish pgrep failures (exit code != 0 and != 1) from a real
         # no-match (exit code 1). Pre-fix the bare try/except swallowed
         # subprocess errors AND empty results into a single "no pids" path,
@@ -7562,6 +7691,12 @@ def run_all_checks() -> list[dict]:
             # actually couldn't determine state. Surface as a transient warn
             # with the cause so it's debuggable, not a routine "app is down."
             checks.append({"name": "sutando-app", "status": "warn", "detail": f"detection failed (pgrep: {pgrep_err or 'unknown error'}) — actual app state unknown"})
+    elif _menubar == "expected-missing":
+        # Only a host that ASKED for the app can be missing it; a headless
+        # install has no plist and gets no row, like check_gateway_bridge().
+        checks.append({"name": "sutando-app", "status": "warn", "detail": (
+            f"launchd job {MENUBAR_LABEL} is installed but no binary exists at "
+            f"{dev_bin} or {app_bin} — app state UNKNOWN, not ok")})
 
     # Battery and memory health checks
 
