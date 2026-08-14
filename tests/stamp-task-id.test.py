@@ -4,7 +4,7 @@ report. Exercises the real code against a temp workspace (module globals
 repointed), not mocks.
 
 Covers:
-  hook._alloc  — increments, formats NNN, resets on a new day, persists history
+  result_ready.alloc_task_id — increments, formats NNN, resets on a new day, persists history
   hook.main    — stamps a fresh unstamped result, skips already-stamped / stale
                  (mtime) / empty files; does NOT double-count skips
   report       — load_history reads the file + folds today's live counter;
@@ -55,15 +55,15 @@ def _point(mod, ws: Path):
 TODAY = datetime.date.today().strftime("%Y%m%d")
 
 # ---------------------------------------------------------------------------
-# hook._alloc
+# alloc_task_id (shared owner, re-exported by the hook)
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as t:
     ws = Path(t)
     hook = _load(REPO / "hooks" / "stamp-task-id.py", "stamp_task_id")
     _point(hook, ws)
 
-    a1 = hook._alloc()
-    a2 = hook._alloc()
+    a1 = hook.alloc_task_id(hook.RESULTS)
+    a2 = hook.alloc_task_id(hook.RESULTS)
     check("alloc formats YYYYMMDD-001", a1 == f"{TODAY}-001", a1)
     check("alloc increments to -002", a2 == f"{TODAY}-002", a2)
     counter = json.load(open(hook.COUNTER))
@@ -80,7 +80,7 @@ for label, bad in (("empty", ""), ("corrupt", "{not json")):
         _point(hook, ws)
         json.dump({TODAY: 37}, open(hook.HISTORY, "w"))
         hook.COUNTER.write_text(bad)
-        got = hook._alloc()
+        got = hook.alloc_task_id(hook.RESULTS)
         check(f"a {label} counter recovers from today's history, not 001",
               got == f"{TODAY}-038", got)
         hist = json.load(open(hook.HISTORY))
@@ -92,7 +92,7 @@ with tempfile.TemporaryDirectory() as t:
     hook = _load(REPO / "hooks" / "stamp-task-id.py", "stamp_task_id")
     _point(hook, ws)
     json.dump({"20260101": 99}, open(hook.HISTORY, "w"))
-    got = hook._alloc()
+    got = hook.alloc_task_id(hook.RESULTS)
     check("a NEW day is not inflated by an older day's history", got == f"{TODAY}-001", got)
 
 with tempfile.TemporaryDirectory() as t:
@@ -101,7 +101,7 @@ with tempfile.TemporaryDirectory() as t:
     _point(hook, ws)
     json.dump({"date": TODAY, "count": 9}, open(hook.COUNTER, "w"))
     json.dump({TODAY: 3}, open(hook.HISTORY, "w"))
-    got = hook._alloc()
+    got = hook.alloc_task_id(hook.RESULTS)
     check("a healthy counter ahead of history still wins", got == f"{TODAY}-010", got)
     check("history rises to the counter", json.load(open(hook.HISTORY)).get(TODAY) == 10)
 
@@ -112,7 +112,7 @@ with tempfile.TemporaryDirectory() as t:
     _point(hook, ws)
     json.dump({"date": "20260101", "count": 7}, open(hook.COUNTER, "w"))
     json.dump({"20260101": 7}, open(hook.HISTORY, "w"))
-    got = hook._alloc()
+    got = hook.alloc_task_id(hook.RESULTS)
     check("alloc resets counter on a new day", got == f"{TODAY}-001", got)
     hist = json.load(open(hook.HISTORY))
     check("history keeps the prior day", hist.get("20260101") == 7, str(hist))
@@ -121,11 +121,11 @@ with tempfile.TemporaryDirectory() as t:
     # malformed counter/history files → alloc still succeeds (fail-open read)
     hook.COUNTER.write_text("corrupt")
     hook.HISTORY.write_text("corrupt")
-    got = hook._alloc()
+    got = hook.alloc_task_id(hook.RESULTS)
     check("alloc recovers from a corrupt counter", got == f"{TODAY}-001", got)
     check("history rebuilt after corruption", json.load(open(hook.HISTORY)).get(TODAY) == 1)
 
-# CR #2125: concurrent _alloc must never mint a duplicate id or lose a count.
+# CR #2125: concurrent alloc_task_id must never mint a duplicate id or lose a count.
 # Each _alloc opens its own fd and takes an exclusive flock, so the RMW is
 # serialized even across threads (separate open-file-descriptions → flock
 # serializes). Without the lock, interleaved read-increment-write would collide.
@@ -139,7 +139,7 @@ with tempfile.TemporaryDirectory() as t:
 
     def _spin():
         for _ in range(10):
-            got = hookc._alloc()
+            got = hookc.alloc_task_id(hookc.RESULTS)
             with _ids_lock:
                 _ids.append(got)
 
@@ -148,9 +148,9 @@ with tempfile.TemporaryDirectory() as t:
         _th.start()
     for _th in _threads:
         _th.join()
-    check("concurrent _alloc mints no duplicate ids (locked RMW)",
+    check("concurrent alloc_task_id mints no duplicate ids (locked RMW)",
           len(set(_ids)) == len(_ids) == 100, f"{len(set(_ids))} unique of {len(_ids)}")
-    check("concurrent _alloc final counter == total allocations",
+    check("concurrent alloc_task_id final counter == total allocations",
           json.load(open(hookc.COUNTER)).get("count") == 100, str(json.load(open(hookc.COUNTER))))
 
 # ---------------------------------------------------------------------------
@@ -174,13 +174,13 @@ with tempfile.TemporaryDirectory() as t:
     except SystemExit:
         pass
 
-    check("fresh unstamped result gets an id", hook._STAMPED.match(fresh.read_text()) is not None,
+    check("fresh unstamped result gets an id", hook.re.compile(r'^\s*\[task \d{8}-\d{3}').match(fresh.read_text()) is not None,
           fresh.read_text()[:40])
     check("already-stamped file unchanged",
           stamped.read_text() == f"[task {TODAY}-005]\n\nAlready has an id.\n")
     check("empty file left alone", empty.read_text() == "   \n")
     check("stale/backlog file NOT stamped (mtime guard)",
-          hook._STAMPED.match(stale.read_text()) is None, stale.read_text()[:40])
+          hook.re.compile(r'^\s*\[task \d{8}-\d{3}').match(stale.read_text()) is None, stale.read_text()[:40])
     # only the one fresh file consumed a counter id
     counter = json.load(open(hook.COUNTER))
     check("only fresh file advanced the counter (=1)", counter.get("count") == 1, str(counter))
