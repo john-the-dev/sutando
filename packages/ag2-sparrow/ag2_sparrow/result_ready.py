@@ -37,7 +37,10 @@ import time
 from datetime import date
 from pathlib import Path
 
-__all__ = ["read_ready_result", "is_ready_body", "needs_task_stamp", "alloc_task_id"]
+__all__ = [
+    "read_ready_result", "is_ready_body", "needs_task_stamp", "alloc_task_id",
+    "stamp_result_file",
+]
 
 # Already carries an ID: [task 20260715-001] or ...-001-extend-...
 _STAMPED = re.compile(r"^\s*\[task \d{8}-\d{3}")
