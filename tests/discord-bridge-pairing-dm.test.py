@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-"""Behavioral tests for _deliver_pairing_prompt.
-
-The pairing code is an approval credential, so it must never reach a shared
-channel on ANY branch — reachable owner, fresh install, or unreachable owner.
-"""
+"""The pairing code is an approval credential, so it must never reach a shared
+channel on ANY branch — reachable owner, fresh install, or unreachable owner."""
 from __future__ import annotations
 
 import asyncio

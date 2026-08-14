@@ -2387,14 +2387,8 @@ intents.message_content = True
 if os.environ.get("DISCORD_GUILD_MEMBERS_INTENT", "").lower() in ("1", "true", "yes"):
     intents.members = True
 async def _deliver_pairing_prompt(channel, code, username, sender_id, allowed):
-    """Route a pairing code to the owner via DM, never a shared channel.
-
-    The code is the approval credential, so no branch may put it in a shared
-    channel: owner reachable -> owner DM; fresh install (no enrolled owner) ->
-    the requester's own private DM; owner unreachable -> a generic, code-free
-    notice, with the code recoverable from access.json `pending` and the
-    owner-only bridge log. Returns "dm" or "channel".
-    """
+    """The code is an approval credential, so no branch may put it in a shared
+    channel — owner DM, else the requester's own DM, else a code-free notice."""
     where = getattr(channel, "name", None) or "DM"
     prompt = (
         f"Pairing request from @{username} (id {sender_id}) in #{where}.\n"
