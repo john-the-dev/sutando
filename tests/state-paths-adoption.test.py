@@ -136,6 +136,11 @@ TS_CANONICAL = re.compile(
 # non-workspace purposes (e.g. walking the checkout for git operations).
 # Each entry is justified, not silently allowed.
 ALLOWLIST = {
+    # result_ready is the delivery boundary and must NOT resolve a workspace:
+    # it is vendored verbatim into packages/ag2-sparrow, which is deliberately
+    # workspace-resolution-free, and no vendored module may import a sibling.
+    # Its state/ path is derived from the results dir the ADAPTER already bound.
+    "src/result_ready.py",
     # The canonical resolver itself — names the strings literally and
     # IS the place where the fallback shapes legitimately live.
     "src/workspace_default.py",
