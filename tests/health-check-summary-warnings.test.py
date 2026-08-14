@@ -60,11 +60,8 @@ class SummaryTests(unittest.TestCase):
 
 
 class FailureTests(unittest.TestCase):
-    """The same defect one state over: a ✗ row and the summary said health.
-
-    Observed on a live core 2026-08-13 — voice-agent and web-client both down,
-    summary read "No failures — 8 warning(s)".
-    """
+    """A down row must never be summarised as health: a ✗ present with
+    "All systems operational" is the failure this class exists to reject."""
 
     def test_down_alone_is_not_operational(self):
         out = summarise([OK, DOWN1])
