@@ -99,11 +99,8 @@ HOOKS=(
   "Stop|src/check-pending-tasks.sh|bash $(shq "$REPO_DIR/src/check-pending-tasks.sh")"
 )
 
-# The unguarded command an earlier installer wrote, parallel to HOOKS by index.
-# Carried alongside rather than as another `|` field: HOOKS entries already rely
-# on CMD being last to hold a `|`, and a second path-bearing field cannot also be
-# last. Empty for the static entries above, which were never emitted guarded; sized
-# from HOOKS rather than written out, so adding a static entry cannot shift indices.
+# Parallel to HOOKS by index, not another `|` field: CMD must stay last to hold a
+# `|`, and a second path-bearing field cannot also be last. Sized from HOOKS.
 HOOK_PRIOR=()
 for _i in "${!HOOKS[@]}"; do HOOK_PRIOR+=(""); done
 
@@ -244,14 +241,8 @@ for i in "${!HOOKS[@]}"; do
   CMD_TAIL="${CMD_TAIL#[\"\']}"       # drop shq's closing quote, if present
   SHAPE="^$(re_escape "$CMD_WORD") [\"']?[^ -].*$(re_escape "$MARKER")[\"']?$(re_escape "$CMD_TAIL")\$"
 
-  # A guarded command changes the FIRST WORD to `[`, so SHAPE cannot match the
-  # runner-first entry an earlier installer wrote; without this the old one
-  # survives beside the new and still blocks the tool it gates.
-  # Exact string only — the narrowest form that cannot touch operator variants.
-  #
-  # Taken from the emitter, not re-derived here. `${CMD#*exec }` strips through the
-  # FIRST `exec ` in the string, which on a repo path containing `exec ` is inside
-  # the path — the shape then matches nothing and the blocking entry survives.
+  # SHAPE cannot match the runner-first entry (its first word is `[`), so match the
+  # prior command exactly, taken from the emitter — `${CMD#*exec }` splits on a path.
   LEGACY_SHAPE=""
   [ -n "${HOOK_PRIOR[$i]:-}" ] && LEGACY_SHAPE="^$(re_escape "${HOOK_PRIOR[$i]}")\$"
 

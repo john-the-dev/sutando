@@ -49,9 +49,8 @@ class SkillHookDiscovery(unittest.TestCase):
                               f" || exit 0; exec {prior}")
 
     def test_prior_command_survives_a_repo_path_containing_exec_and_pipe(self):
-        """`${CMD#*exec }` strips at the FIRST `exec ` — inside the path, not the
-        shell keyword — so the derived shape matched nothing and the blocking
-        registration survived the upgrade. Emitting it structurally is immune."""
+        """`${CMD#*exec }` splits at the first `exec ` — inside the path, not the
+        keyword — so the derived shape matched nothing. Emitting it is immune."""
         self._td.cleanup()
         self._td = tempfile.TemporaryDirectory(prefix="exec repo|x ")
         self.addCleanup(self._td.cleanup)

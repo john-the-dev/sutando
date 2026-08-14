@@ -366,11 +366,8 @@ ok "with the script deleted the guarded hook exits 0 (tool not blocked)" "$?"
 rm -rf "$UROOT"
 
 # ---- same upgrade, on a repo path containing `exec ` and `|` ----
-# The migration above passes on any ordinary path, which is why this defect
-# shipped. `${CMD#*exec }` is a SHORTEST-match strip, so it cuts at the first
-# `exec ` in the string — inside the path, not at the shell keyword — and the
-# derived shape then matches nothing, leaving the blocking entry in place. The
-# `|` additionally exercises the field framing between skill_hooks and the reader.
+# An ordinary path cannot catch this: `${CMD#*exec }` splits inside the path, and
+# the `|` exercises the field framing between skill_hooks and the reader.
 EROOT="$(mktemp -d)"; EREPO="$EROOT/exec repo|x/repo"
 mkdir -p "$EREPO/.claude" "$EREPO/src" "$EREPO/skills/demo/hooks"
 cp "$HERE/../src/install-claude-hooks.sh" "$EREPO/src/"
