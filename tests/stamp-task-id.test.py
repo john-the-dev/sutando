@@ -52,18 +52,20 @@ def _point(mod, ws: Path):
         mod.RESULTS = ws / "results"
 
 
+RR = _load(REPO / "src" / "result_ready.py", "result_ready_owner")
+
 TODAY = datetime.date.today().strftime("%Y%m%d")
 
 # ---------------------------------------------------------------------------
-# alloc_task_id (shared owner, re-exported by the hook)
+# alloc_task_id — tested against its owner, result_ready, directly
 # ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as t:
     ws = Path(t)
     hook = _load(REPO / "hooks" / "stamp-task-id.py", "stamp_task_id")
     _point(hook, ws)
 
-    a1 = hook.alloc_task_id(hook.RESULTS)
-    a2 = hook.alloc_task_id(hook.RESULTS)
+    a1 = RR.alloc_task_id(ws / "results")
+    a2 = RR.alloc_task_id(ws / "results")
     check("alloc formats YYYYMMDD-001", a1 == f"{TODAY}-001", a1)
     check("alloc increments to -002", a2 == f"{TODAY}-002", a2)
     counter = json.load(open(hook.COUNTER))
@@ -80,7 +82,7 @@ for label, bad in (("empty", ""), ("corrupt", "{not json")):
         _point(hook, ws)
         json.dump({TODAY: 37}, open(hook.HISTORY, "w"))
         hook.COUNTER.write_text(bad)
-        got = hook.alloc_task_id(hook.RESULTS)
+        got = RR.alloc_task_id(ws / "results")
         check(f"a {label} counter recovers from today's history, not 001",
               got == f"{TODAY}-038", got)
         hist = json.load(open(hook.HISTORY))
@@ -92,7 +94,7 @@ with tempfile.TemporaryDirectory() as t:
     hook = _load(REPO / "hooks" / "stamp-task-id.py", "stamp_task_id")
     _point(hook, ws)
     json.dump({"20260101": 99}, open(hook.HISTORY, "w"))
-    got = hook.alloc_task_id(hook.RESULTS)
+    got = RR.alloc_task_id(ws / "results")
     check("a NEW day is not inflated by an older day's history", got == f"{TODAY}-001", got)
 
 with tempfile.TemporaryDirectory() as t:
@@ -101,7 +103,7 @@ with tempfile.TemporaryDirectory() as t:
     _point(hook, ws)
     json.dump({"date": TODAY, "count": 9}, open(hook.COUNTER, "w"))
     json.dump({TODAY: 3}, open(hook.HISTORY, "w"))
-    got = hook.alloc_task_id(hook.RESULTS)
+    got = RR.alloc_task_id(ws / "results")
     check("a healthy counter ahead of history still wins", got == f"{TODAY}-010", got)
     check("history rises to the counter", json.load(open(hook.HISTORY)).get(TODAY) == 10)
 
@@ -112,7 +114,7 @@ with tempfile.TemporaryDirectory() as t:
     _point(hook, ws)
     json.dump({"date": "20260101", "count": 7}, open(hook.COUNTER, "w"))
     json.dump({"20260101": 7}, open(hook.HISTORY, "w"))
-    got = hook.alloc_task_id(hook.RESULTS)
+    got = RR.alloc_task_id(ws / "results")
     check("alloc resets counter on a new day", got == f"{TODAY}-001", got)
     hist = json.load(open(hook.HISTORY))
     check("history keeps the prior day", hist.get("20260101") == 7, str(hist))
@@ -121,7 +123,7 @@ with tempfile.TemporaryDirectory() as t:
     # malformed counter/history files → alloc still succeeds (fail-open read)
     hook.COUNTER.write_text("corrupt")
     hook.HISTORY.write_text("corrupt")
-    got = hook.alloc_task_id(hook.RESULTS)
+    got = RR.alloc_task_id(ws / "results")
     check("alloc recovers from a corrupt counter", got == f"{TODAY}-001", got)
     check("history rebuilt after corruption", json.load(open(hook.HISTORY)).get(TODAY) == 1)
 
@@ -139,7 +141,7 @@ with tempfile.TemporaryDirectory() as t:
 
     def _spin():
         for _ in range(10):
-            got = hookc.alloc_task_id(hookc.RESULTS)
+            got = RR.alloc_task_id(ws / "results")
             with _ids_lock:
                 _ids.append(got)
 
@@ -288,6 +290,51 @@ with tempfile.TemporaryDirectory() as t:
     check("main() --json emits parseable {day:count}", json.loads(out).get("20260103") == 4, out[:80])
     rc, out = run_main(["--days", "1"])
     check("main() --days 1 shows a single day", rc == 0 and out.count(":") >= 1, out[:80])
+
+# ---------------------------------------------------------------------------
+# hook.main vs the delivery path — the two writers must not both mint an ID for
+# one completion. The hook used to allocate under a short-lived lock and then
+# write outside it; a delivery landing in that window stamped its own ID, the
+# hook's later write clobbered it, and the ID on the wire disagreed with the one
+# left on disk. Measured on the pre-fix tree: 115/120 double-mint, 114/120
+# mismatch — so a violation here is a real regression, not a flake.
+# ---------------------------------------------------------------------------
+_TRIALS = 30
+_double = _mismatch = 0
+_idre = __import__("re").compile(r"\[task (\d{8}-\d{3})\]")
+for _i in range(_TRIALS):
+    with tempfile.TemporaryDirectory() as t:
+        ws = Path(t)
+        _rr = _load(REPO / "src" / "result_ready.py", f"rr_race{_i}")
+        _hk = _load(REPO / "hooks" / "stamp-task-id.py", f"hk_race{_i}")
+        _point(_hk, ws)
+        f = ws / "results" / "task-9.txt"
+        f.write_text("One completion.\n")
+        _wire: list[str | None] = []
+
+        def _deliver() -> None:
+            _wire.append(_rr.read_ready_result(f))
+
+        def _stamp() -> None:
+            try:
+                _hk.main()
+            except SystemExit:
+                pass
+
+        _ta, _tb = _threading.Thread(target=_stamp), _threading.Thread(target=_deliver)
+        _ta.start(); _tb.start(); _ta.join(); _tb.join()
+
+        if json.load(open(_hk.COUNTER)).get("count", 0) > 1:
+            _double += 1
+        _d = _idre.match(f.read_text().strip())
+        _w = _idre.match((_wire[0] or "").strip())
+        if _d and _w and _d.group(1) != _w.group(1):
+            _mismatch += 1
+
+check(f"concurrent hook+delivery mints ONE id per completion ({_TRIALS} trials)",
+      _double == 0, f"{_double}/{_TRIALS} trials burned two counter ids")
+check(f"id on disk == id delivered on the wire ({_TRIALS} trials)",
+      _mismatch == 0, f"{_mismatch}/{_TRIALS} trials disagreed")
 
 print()
 if _failed:

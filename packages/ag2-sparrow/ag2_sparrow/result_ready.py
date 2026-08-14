@@ -64,8 +64,8 @@ def _alloc_locked(state: Path) -> str | None:
 
     Split out so the stamp can be one transaction: reading the file, deciding it
     needs an ID, allocating, and persisting all happen inside a single lock hold
-    (see `_stamp_locked`). Allocating under its own short-lived lock and writing
-    outside it is what let two readers each mint an ID for one result.
+    (see `stamp_result_file`). Allocating under its own short-lived lock and
+    writing outside it is what let two writers each mint an ID for one result.
     """
     counter, history = state / "task-counter.json", state / "task-completions-daily.json"
     today = date.today().strftime("%Y%m%d")
@@ -106,8 +106,8 @@ def alloc_task_id(results_dir: Path) -> str | None:
 
     Same file, lock and monotonic-floor rules as the stamping hook, which imports
     this rather than keeping a second copy. Standalone callers get the lock taken
-    for them; `read_ready_result` uses `_stamp_locked` instead so the allocation
-    and the persist share one hold.
+    for them. Anything that goes on to WRITE the stamp must use
+    `stamp_result_file` instead, so the allocation and the persist share one hold.
     """
     state = Path(results_dir).parent / "state"
     lockf = None
@@ -127,14 +127,17 @@ def alloc_task_id(results_dir: Path) -> str | None:
                 pass
 
 
-def _stamp_locked(p: Path, body: str) -> str | None:
+def stamp_result_file(p: Path) -> str | None:
     """Stamp `p` as ONE transaction. Returns the stamped body, or None to fail closed.
 
     Read-decide-allocate-persist happens inside a single hold of the counter
     lock, and the file is RE-READ under that lock. Without the re-read, two
-    consumers that both read the unstamped body outside the lock each allocate:
+    writers that both read the unstamped body outside the lock each allocate:
     two counts burned for one completion, and the ID delivered on the wire
     disagrees with the one left in the archive.
+
+    Every writer of a `[task …]` stamp must go through here — the delivery path
+    and the PostToolUse hook are two such writers on the same files.
 
     Every failure returns None, which the caller turns into "not ready" rather
     than an unstamped send. That is deliberate and it is the safer direction:
@@ -204,5 +207,5 @@ def read_ready_result(path: str | Path) -> str | None:
     if needs_task_stamp(p.name, body):
         # Fail CLOSED: no ID, or an ID we could not durably persist, means this
         # result is not ready. It stays on disk and is retried on the next pass.
-        return _stamp_locked(p, body)
+        return stamp_result_file(p)
     return body

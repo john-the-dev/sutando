@@ -8,9 +8,13 @@ counter, resets each day). Relying on the agent to remember to prepend it failed
 (memory had the rule; the agent still lapsed across a busy session). This hook
 removes the reliance on memory: after any tool runs, it scans the live `results/`
 dir and, for any `task-*.txt` whose body does NOT already start with a
-`[task YYYYMMDD-NNN]` marker, it allocates the next counter ID and prepends it.
-So a reply the agent wrote without an ID still gets one before the bridge
-delivers it.
+`[task YYYYMMDD-NNN]` marker, it hands the file to the shared stamping
+transaction, which allocates the next counter ID and prepends it. So a reply the
+agent wrote without an ID still gets one before the bridge delivers it.
+
+This hook and the delivery path are two writers of the same stamp on the same
+files, so the stamp must be one locked transaction owned by `result_ready`; this
+module must never allocate an ID and write it separately.
 
 The daily counter (`state/task-counter.json`) resets every day, so on its own it
 only knows *today's* count — yesterday's total is overwritten. To make the
@@ -42,7 +46,7 @@ _FRESH_S = 45
 # never reconstruct a workspace path inline here.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from workspace_default import resolve_workspace  # noqa: E402
-from result_ready import alloc_task_id, needs_task_stamp  # noqa: E402
+from result_ready import needs_task_stamp, stamp_result_file  # noqa: E402
 
 WS = Path(resolve_workspace())
 
@@ -68,10 +72,10 @@ def main() -> None:
             if not body.strip():
                 continue  # empty/placeholder — leave it
             if not needs_task_stamp(p.name, body):
-                continue  # already stamped, or a body-start bridge marker
-            tid = alloc_task_id(RESULTS)
-            if tid:
-                p.write_text(f"[task {tid}]\n\n{body}")
+                continue  # cheap pre-filter only; the binding re-check is under the lock
+            # The delivery path stamps these same files. Allocating here and
+            # writing outside the lock let both mint an ID for one completion.
+            stamp_result_file(p)
     except Exception:
         pass
     sys.exit(0)  # fail-open: a stamping error must never block the tool
