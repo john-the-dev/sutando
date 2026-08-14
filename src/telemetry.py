@@ -243,7 +243,13 @@ _MODEL_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,39}")
 
 
 # A version-ish tail token: digits first, so a word cannot masquerade as one.
-_VERSION_TOKEN = re.compile(r"[0-9][0-9a-z.]*")
+# A version token is DIGITS, optionally dotted, with at most ONE trailing letter
+# — `4o`, `2.5`, `4.1`, `20241022`, `70b`. The previous `[0-9][0-9a-z.]*` only
+# required the FIRST character to be a digit, so every digits-led free-text tail
+# satisfied it: `claude-1janedoe`, `claude-1.jane.doe` and `gpt-7customer42` all
+# reached the wire verbatim (verified on the review head). One leading digit is
+# not a version; the whole token has to be shaped like one.
+_VERSION_TOKEN = re.compile(r"\d+(?:\.\d+)*[a-z]?")
 # Vendor tier words that appear in real model ids. Bounded on purpose — the
 # point is a finite vocabulary, so an unlisted word collapses to the family.
 _MODEL_QUALIFIERS = frozenset({

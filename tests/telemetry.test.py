@@ -453,11 +453,22 @@ def run():
         assert mod._coarse_model("gpt-customer-foo") == "gpt"
         assert mod._coarse_model("opus-internal-project-x") == "opus"
         assert mod._coarse_model("claude-" + "a" * 32) == "claude"
-        # ...while real model ids keep their version detail.
+        # A LEADING DIGIT is not a version. The first tightening only required the
+        # token to START with a digit, so digits-led free text still shipped
+        # verbatim — all three verified reaching the wire on the review head.
+        assert mod._coarse_model("claude-1janedoe") == "claude"
+        assert mod._coarse_model("claude-1.jane.doe") == "claude"
+        assert mod._coarse_model("gpt-7customer42") == "gpt"
+        # ...while real model ids keep their version detail. These are the other
+        # half of the check: a grammar that collapsed EVERYTHING would satisfy the
+        # asserts above and destroy the metric, so both directions are pinned.
         assert mod._coarse_model("claude-3-5-haiku-20241022") == "claude-3-5-haiku-20241022"
         assert mod._coarse_model("gpt-4") == "gpt-4"
         assert mod._coarse_model("gpt-5") == "gpt-5"
         assert mod._coarse_model("gemini-2.5-pro") == "gemini-2.5-pro"
+        assert mod._coarse_model("gpt-4o") == "gpt-4o"          # single trailing letter
+        assert mod._coarse_model("gpt-4.1") == "gpt-4.1"        # dotted minor
+        assert mod._coarse_model("llama-3-70b") == "llama-3-70b"  # param-count suffix
         assert mod._coarse_model("model with spaces") == "unknown"
         assert mod._coarse_model("x" * 60) == "unknown"                       # over length cap
         assert mod._coarse_model("") == "unknown"
