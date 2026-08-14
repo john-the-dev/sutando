@@ -88,9 +88,6 @@ CLEANING_UP=0
 GROUP_TERM_SENT=0
 CLAIMS_DIR="$WORKSPACE_DIR/state/task-event-handler-claims"
 FALLBACKS_DIR="$WORKSPACE_DIR/state/task-event-handler-fallbacks"
-# Durable, NOT under DISPATCH_DIR: a retry receipt that dies with the process
-# leaves an unready destination no later watcher knows to settle.
-UNSETTLED_DIR="$WORKSPACE_DIR/state/task-event-handler-unsettled"
 WATCHER_ID="$$-${RANDOM:-0}"
 
 claim_is_live() {
@@ -202,21 +199,12 @@ if [ -n "${SUTANDO_TASK_EVENT_HANDLER:-}" ] && [ -x "$SUTANDO_TASK_EVENT_HANDLER
   DISPATCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sutando-task-dispatch.XXXXXX")"
   mkdir "$DISPATCH_DIR/pending" "$DISPATCH_DIR/running" "$DISPATCH_DIR/settled" \
     "$DISPATCH_DIR/workers"
-  mkdir -p "$CLAIMS_DIR" "$FALLBACKS_DIR" "$UNSETTLED_DIR"
+  mkdir -p "$CLAIMS_DIR" "$FALLBACKS_DIR"
   shopt -s nullglob
   for claim in "$CLAIMS_DIR"/task-*.txt; do
     # Overlapping watchers preserve a live owner's claim. A dead owner's
     # record is atomically quarantined before the new sweep retries it.
     claim_is_live "$claim" || retire_stale_claim "$claim" || true
-  done
-  # A previous watcher left these unsettled. Retry the publish first: the task
-  # is already done, and re-dispatching it would repeat the handler's effects.
-  for marker in "$UNSETTLED_DIR"/*; do
-    filename="$(basename "$marker")"
-    if publish_terminal_failure "$filename" "failed"; then
-      release_task_claim "$filename" 2>/dev/null || rm -f "$CLAIMS_DIR/$filename"
-      rm -f "$marker"
-    fi
   done
   shopt -u nullglob
 fi
@@ -249,12 +237,9 @@ finish_handler_task() {
       case $? in
         0)
           echo "watch-tasks-stream: required Team handler failed for $filename (exit $rc); publishing safe terminal failure" >&2
-          # The dispatch receipt is about to be removed, so an unsettled publish
-          # needs its own artifact or later drains cannot see the task at all.
-          if ! publish_terminal_failure "$filename" "failed"; then
-            claim_settled=0
-            printf '%s\n' "$task_path" > "$UNSETTLED_DIR/$filename"
-          fi
+          # An unsettled publish leaves the claim held rather than clobbering a
+          # destination this watcher does not own; cross-restart retry is separate.
+          publish_terminal_failure "$filename" "failed" || claim_settled=0
           ;;
         1)
           printf '%s\n' "$task_path" > "$FALLBACKS_DIR/$filename"
@@ -307,16 +292,6 @@ drain_dispatch_queue() {
   fi
   DRAIN_ACTIVE=1
   shopt -s nullglob
-  # Retry publishes that could not settle: the destination was owned by someone
-  # else then, and this is the only path that revisits them before a restart.
-  for marker in "$UNSETTLED_DIR"/*; do
-    filename="$(basename "$marker")"
-    claim_is_ours "$filename" || continue
-    if publish_terminal_failure "$filename" "failed"; then
-      release_task_claim "$filename" || true
-      rm -f "$marker"
-    fi
-  done
   # Count LIVE workers, not marker files: a worker that died before emitting
   # HANDLER_DONE leaves its marker and would retire the slot permanently.
   for marker in "$DISPATCH_DIR/running/"*; do
@@ -514,12 +489,9 @@ fallback_outstanding_handlers() {
         case $? in
           0)
             echo "watch-tasks-stream: required Team handler interrupted for $filename; publishing safe terminal failure" >&2
-            # This loop owns the receipt, so the later claim sweep never sees the
-            # task: an unsettled publish must record its own durable receipt here.
-            if ! publish_terminal_failure "$filename" "was interrupted"; then
-              claim_settled=0
-              printf '%s\n' "$task_path" > "$UNSETTLED_DIR/$filename"
-            fi
+            # As above: hold the claim rather than publish over a destination this
+            # watcher does not own.
+            publish_terminal_failure "$filename" "was interrupted" || claim_settled=0
             ;;
           1)
             printf '%s\n' "$task_path" > "$FALLBACKS_DIR/$filename"
@@ -553,12 +525,9 @@ fallback_outstanding_handlers() {
     case $? in
       0)
         echo "watch-tasks-stream: required Team handler interrupted for $filename; publishing safe terminal failure" >&2
-        # Releasing here would drop the last record of a task that is neither
-        # delivered nor failed; the durable receipt is what a later watcher retries.
-        if ! publish_terminal_failure "$filename" "was interrupted"; then
-          claim_settled=0
-          printf '%s\n' "$task_path" > "$UNSETTLED_DIR/$filename"
-        fi
+        # Hold the claim rather than release: a task that is neither delivered nor
+        # failed must keep its last record. Cross-restart retry is separate work.
+        publish_terminal_failure "$filename" "was interrupted" || claim_settled=0
         ;;
       1)
         printf '%s\n' "$task_path" > "$FALLBACKS_DIR/$filename"

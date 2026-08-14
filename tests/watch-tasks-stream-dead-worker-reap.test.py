@@ -318,106 +318,7 @@ def scenario_answer_landing_during_the_reap_stays_deliverable() -> None:
         h.stop()
 
 
-def scenario_unsettled_task_is_retried_on_a_later_sweep() -> None:
-    """An unsettled publish keeps a retry artifact: once the destination clears,
-    a later drain settles it, without a watcher restart."""
-    h = Harness()
-    h.task("task-stuck.txt")
-    h.start()
-    try:
-        if not wait_for(lambda: len(names(h.dispatch() and h.dispatch() / "running")) >= 1):
-            check("retry scenario: slot filled", False)
-            return
-        res = h.ws / "results" / "task-stuck.txt"
-        res.write_text("   \n")
-        claims = h.ws / "state" / "task-event-handler-claims" / "task-stuck.txt"
-        h.kill_workers()
-        h.deliver("task-rrr.txt")
-        got = wait_for(lambda: (h.ws / "state" / "task-event-handler-unsettled" / "task-stuck.txt").is_file(),
-                       nudge=lambda n: h.deliver(f"task-nudge-stuck-{n}.txt"))
-        check("an unsettled task keeps a dispatch artifact a later drain can see", got,
-              f"unsettled={names(h.ws / 'state' / 'task-event-handler-unsettled')}")
-        check("and its claim is still held", claims.is_file())
-        # Clear the obstruction the way a provider finishing would, then prove a
-        # later sweep settles it rather than waiting for a restart.
-        res.unlink()
-        settled = wait_for(lambda: res.is_file() and FAILURE_TEXT in res.read_text(),
-                           nudge=lambda n: h.deliver(f"task-nudge-clear-{n}.txt"))
-        check("a later sweep settles it once the destination is free", settled,
-              f"body={res.read_text()[:50]!r}" if res.exists() else "still absent")
-        check("the claim is released once it settles",
-              wait_for(lambda: not claims.is_file(), timeout=8.0))
-        check("and the retry artifact is cleaned up",
-              wait_for(lambda: not (h.ws / "state" / "task-event-handler-unsettled" / "task-stuck.txt").is_file(),
-                       timeout=8.0))
-    finally:
-        h.stop()
 
-
-def scenario_unsettled_state_survives_shutdown_and_a_later_watcher_settles_it() -> None:
-    """The retry receipt must outlive the process. In the per-process tempdir it
-    died at shutdown, leaving a whitespace result no later watcher could settle."""
-    h = Harness()
-    h.task("task-durable.txt")
-    h.start()
-    try:
-        if not wait_for(lambda: len(names(h.dispatch() and h.dispatch() / "running")) >= 1):
-            check("durable scenario: slot filled", False)
-            return
-        res = h.ws / "results" / "task-durable.txt"
-        res.write_text("  \n")
-        unsettled = h.ws / "state" / "task-event-handler-unsettled" / "task-durable.txt"
-        h.kill_workers()
-        h.deliver("task-ddd.txt")
-        wait_for(lambda: unsettled.is_file(),
-                 nudge=lambda n: h.deliver(f"task-nudge-dur-{n}.txt"))
-        check("the retry receipt is written outside the dispatch tempdir", unsettled.is_file())
-        h.stop(graceful=True)
-        check("it survives shutdown", unsettled.is_file(),
-              "receipt died with the process")
-        check("and the claim is NOT released as settled",
-              (h.ws / "state" / "task-event-handler-claims" / "task-durable.txt").is_file())
-        # The provider is gone for good; a fresh watcher must settle it.
-        res.unlink()
-        h2 = Harness.attach(h.ws, h.tmp)
-        try:
-            h2.start()
-            check("a later watcher settles it with no operator action",
-                  wait_for(lambda: res.is_file() and FAILURE_TEXT in res.read_text(),
-                           nudge=lambda n: h2.deliver(f"task-nudge-dur2-{n}.txt")),
-                  f"body={res.read_text()[:50]!r}" if res.exists() else "still absent")
-            check("and the receipt is cleaned up",
-                  wait_for(lambda: not unsettled.is_file(), timeout=10.0))
-        finally:
-            h2.stop()
-    finally:
-        h.stop()
-
-
-def scenario_shutdown_while_the_receipt_is_still_running() -> None:
-    """SIGTERM before any reap: cleanup's FIRST loop owns the running receipt, so
-    the later claim sweep never sees the task and this loop must record it."""
-    h = Harness()
-    h.task("task-early.txt")
-    h.start()
-    try:
-        if not wait_for(lambda: "task-early.txt" in names(h.dispatch() and h.dispatch() / "running")):
-            check("early-shutdown scenario: receipt is in running/", False)
-            return
-        res = h.ws / "results" / "task-early.txt"
-        res.write_text("  \n")
-        # No kill_workers() and no drain: the worker is alive and the receipt has
-        # never been reaped, which is the ordering the other scenarios skip past.
-        h.stop(graceful=True)
-        unsettled = h.ws / "state" / "task-event-handler-unsettled" / "task-early.txt"
-        claim = h.ws / "state" / "task-event-handler-claims" / "task-early.txt"
-        check("a direct shutdown still records a durable retry receipt", unsettled.is_file(),
-              f"unsettled={names(h.ws / 'state' / 'task-event-handler-unsettled')}")
-        check("and does not release the claim as settled", claim.is_file())
-        check("and leaves the unready body untouched", res.read_text() == "  \n",
-              f"body={res.read_text()[:40]!r}")
-    finally:
-        h.stop()
 
 
 def main() -> int:
@@ -427,9 +328,6 @@ def main() -> int:
     scenario_whitespace_archived_result_is_not_delivered()
     scenario_unready_destination_is_left_untouched_and_unsettled()
     scenario_answer_landing_during_the_reap_stays_deliverable()
-    scenario_unsettled_task_is_retried_on_a_later_sweep()
-    scenario_unsettled_state_survives_shutdown_and_a_later_watcher_settles_it()
-    scenario_shutdown_while_the_receipt_is_still_running()
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s)")
         return 1
