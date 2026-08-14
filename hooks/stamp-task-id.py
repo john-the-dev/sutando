@@ -59,6 +59,16 @@ _BRIDGE_MARKER = re.compile(
 )
 
 
+def _history_count(day: str) -> int:
+    """Today's recorded total, or 0. The counter's recovery floor when it is
+    unreadable — history is the only other durable record of the day's count."""
+    try:
+        hist = json.load(open(HISTORY))
+        return int(hist.get(day, 0)) if isinstance(hist, dict) else 0
+    except Exception:
+        return 0
+
+
 def _record_history(day: str, count: int) -> None:
     """Upsert today's running total into the durable per-day history file.
 
@@ -71,6 +81,13 @@ def _record_history(day: str, count: int) -> None:
                 hist = {}
         except Exception:
             hist = {}
+        # Monotonic for today: a lower count means the counter was recovered from
+        # a worse source, and lowering here would erase the surviving evidence.
+        try:
+            if int(hist.get(day, 0)) > count:
+                return
+        except Exception:
+            pass
         hist[day] = count
         HISTORY.parent.mkdir(parents=True, exist_ok=True)
         tmp = HISTORY.with_suffix(".json.tmp")
@@ -95,32 +112,32 @@ def _alloc() -> str:
     COUNTER.parent.mkdir(parents=True, exist_ok=True)
     lockf = None
     try:
-        lockf = open(COUNTER, "a+")  # create-if-missing, never truncate on open
+        # Lock a sidecar, NOT the counter: the counter is replaced atomically
+        # below, and a lock held on its fd would guard an unlinked inode.
+        lockf = open(COUNTER.with_suffix(".lock"), "a+")
         fcntl.flock(lockf, fcntl.LOCK_EX)
     except Exception:
         lockf = None
     try:
         try:
-            if lockf is not None:
-                lockf.seek(0)
-                s = json.loads(lockf.read() or "{}")
-            else:
-                s = json.load(open(COUNTER))
+            s = json.loads(COUNTER.read_text() or "{}")
             if not isinstance(s, dict):
                 s = {}
         except Exception:
-            s = {"date": today, "count": 0}
+            s = {}
         if s.get("date") != today:  # daily reset — NNN is the Nth task *today*
             s = {"date": today, "count": 0}
-        s["count"] += 1
         try:
-            if lockf is not None:
-                lockf.seek(0)
-                lockf.truncate()
-                lockf.write(json.dumps(s))
-                lockf.flush()
-            else:
-                json.dump(s, open(COUNTER, "w"))
+            base = int(s.get("count", 0))
+        except Exception:
+            base = 0
+        # A truncated or corrupt counter reads as 0 and would remint 001 over a
+        # day already in progress; today's history is the surviving floor.
+        s["count"] = max(base, _history_count(today)) + 1
+        try:
+            tmp = COUNTER.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(s))
+            tmp.replace(COUNTER)  # atomic: a crash leaves the old counter, never an empty one
         except Exception:
             pass
         _record_history(today, s["count"])

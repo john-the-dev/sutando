@@ -71,6 +71,40 @@ with tempfile.TemporaryDirectory() as t:
     hist = json.load(open(hook.HISTORY))
     check("history records today's running total", hist.get(TODAY) == 2, str(hist))
 
+# Counter recovery: a truncated/corrupt counter must not remint 001 over a day
+# already in progress, nor roll today's history backwards (CR #2125, qingyun-wu).
+for label, bad in (("empty", ""), ("corrupt", "{not json")):
+    with tempfile.TemporaryDirectory() as t:
+        ws = Path(t)
+        hook = _load(REPO / "hooks" / "stamp-task-id.py", "stamp_task_id")
+        _point(hook, ws)
+        json.dump({TODAY: 37}, open(hook.HISTORY, "w"))
+        hook.COUNTER.write_text(bad)
+        got = hook._alloc()
+        check(f"a {label} counter recovers from today's history, not 001",
+              got == f"{TODAY}-038", got)
+        hist = json.load(open(hook.HISTORY))
+        check(f"a {label} counter does not roll history backwards",
+              hist.get(TODAY) == 38, str(hist))
+
+with tempfile.TemporaryDirectory() as t:
+    ws = Path(t)
+    hook = _load(REPO / "hooks" / "stamp-task-id.py", "stamp_task_id")
+    _point(hook, ws)
+    json.dump({"20260101": 99}, open(hook.HISTORY, "w"))
+    got = hook._alloc()
+    check("a NEW day is not inflated by an older day's history", got == f"{TODAY}-001", got)
+
+with tempfile.TemporaryDirectory() as t:
+    ws = Path(t)
+    hook = _load(REPO / "hooks" / "stamp-task-id.py", "stamp_task_id")
+    _point(hook, ws)
+    json.dump({"date": TODAY, "count": 9}, open(hook.COUNTER, "w"))
+    json.dump({TODAY: 3}, open(hook.HISTORY, "w"))
+    got = hook._alloc()
+    check("a healthy counter ahead of history still wins", got == f"{TODAY}-010", got)
+    check("history rises to the counter", json.load(open(hook.HISTORY)).get(TODAY) == 10)
+
 # daily reset preserves past days
 with tempfile.TemporaryDirectory() as t:
     ws = Path(t)
