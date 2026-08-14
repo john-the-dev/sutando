@@ -88,6 +88,31 @@ class TestContract(unittest.TestCase):
     def test_empty_workspace_is_false_not_a_crash(self):
         self.assertFalse(crm.write_marker("", "claude", "s"))
 
+    def test_failed_replace_leaves_no_temp_file(self):
+        # The cleanup exists so a failed publish does not litter state/ with
+        # .core-runtime.*.tmp files that no reader understands.
+        real = crm.os.replace
+
+        def boom(src, dst):
+            raise OSError("simulated replace failure")
+
+        crm.os.replace = boom
+        try:
+            self.assertFalse(crm.write_marker(self.ws, "claude", "s"))
+        finally:
+            crm.os.replace = real
+        leftovers = [p.name for p in (self.ws / "state").iterdir()
+                     if p.name.startswith(".core-runtime.")]
+        self.assertEqual(leftovers, [], f"temp file survived a failed replace: {leftovers}")
+
+    def test_marker_lands_even_when_the_log_cannot_be_written(self):
+        # Partial failure must be reported, not swallowed: the marker is what
+        # readers poll, so it still lands while the return value says not-all-ok.
+        (self.ws / "state").mkdir(parents=True)
+        (self.ws / "state" / "session-starts.log").mkdir()  # a dir blocks append
+        self.assertFalse(crm.write_marker(self.ws, "claude", "s"))
+        self.assertEqual(self._marker()["runtime"], "claude")
+
 
 class TestLauncherDelegation(unittest.TestCase):
     """Neither launcher may write these records itself."""
@@ -122,6 +147,21 @@ class TestLauncherDelegation(unittest.TestCase):
         p = subprocess.run([sys.executable, str(MOD), str(ws), "gpt", "sess"],
                            capture_output=True, text=True, timeout=30)
         self.assertEqual(p.returncode, 2)
+
+    def test_cli_without_enough_args_is_a_usage_error(self):
+        p = subprocess.run([sys.executable, str(MOD), "only-a-workspace"],
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("usage:", p.stderr)
+
+    def test_cli_reports_partial_failure_nonzero(self):
+        # A launcher ignores this exit code by design, but it must still be honest.
+        ws = Path(tempfile.mkdtemp())
+        (ws / "state").mkdir()
+        (ws / "state" / "session-starts.log").mkdir()
+        p = subprocess.run([sys.executable, str(MOD), str(ws), "claude", "sess"],
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 1)
 
 
 if __name__ == "__main__":
