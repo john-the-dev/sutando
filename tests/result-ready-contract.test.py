@@ -6,6 +6,7 @@ results directory and keeps only provider-specific delivery.
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 import tempfile
@@ -15,7 +16,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from result_ready import is_ready_body, read_ready_result  # noqa: E402
+import result_ready  # noqa: E402
+from result_ready import (  # noqa: E402
+    alloc_task_id, is_ready_body, read_ready_result, stamp_result_file,
+)
 
 # Every consumer that decides "is this result ready to deliver?".
 CONSUMERS = {
@@ -201,6 +205,123 @@ class DelegationTest(unittest.TestCase):
             pkg.read_text(), (REPO / "src" / "result_ready.py").read_text(),
             "ag2-sparrow copy drifted from src/ — run tools/sync_from_src.py",
         )
+
+
+class FailClosedBranches(unittest.TestCase):
+    """The allocate/stamp paths return None rather than raise, on every failure.
+
+    These branches are the whole safety argument: a result that cannot be given a
+    durable ID stays on disk and is retried, instead of being delivered unstamped.
+    A path that only ever runs in the happy case is not evidence of that.
+    """
+
+    def _ws(self, td):
+        ws = Path(td)
+        (ws / "results").mkdir()
+        (ws / "state").mkdir()
+        return ws
+
+    def test_a_non_integer_count_falls_back_to_the_history_floor(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._ws(td)
+            # TODAY's date, or the stale-day branch replaces the dict before the
+            # int() is ever reached and this stops exercising the fallback.
+            today = __import__("datetime").date.today().strftime("%Y%m%d")
+            (ws / "state" / "task-counter.json").write_text(
+                json.dumps({"date": today, "count": {"not": "an int"}}))
+            got = alloc_task_id(ws / "results")
+            self.assertRegex(got or "", r"^\d{8}-001$")
+
+    def test_an_unwritable_counter_yields_None_not_an_exception(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._ws(td)
+            # The atomic temp target is a DIRECTORY, so write_text raises inside
+            # the allocation. Deterministic, and independent of uid/permissions.
+            (ws / "state" / "task-counter.json.tmp").mkdir()
+            self.assertIsNone(alloc_task_id(ws / "results"))
+
+    def test_a_state_path_that_is_a_file_yields_None(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = Path(td)
+            (ws / "results").mkdir()
+            (ws / "state").write_text("not a directory")
+            self.assertIsNone(alloc_task_id(ws / "results"))
+
+    def test_an_unlock_failure_does_not_lose_the_allocated_id(self):
+        """The finally-block swallows a close/unlock error: the ID was already
+        persisted, so raising here would discard a counter value that is spent."""
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._ws(td)
+            real = result_ready.fcntl
+
+            class Shim:
+                LOCK_EX, LOCK_UN = real.LOCK_EX, real.LOCK_UN
+
+                @staticmethod
+                def flock(f, op):
+                    if op == real.LOCK_UN:
+                        raise OSError("unlock failed")
+                    return real.flock(f, op)
+
+            result_ready.fcntl = Shim
+            try:
+                got = alloc_task_id(ws / "results")
+            finally:
+                result_ready.fcntl = real
+            self.assertRegex(got or "", r"^\d{8}-001$")
+
+    def test_stamp_returns_None_when_the_file_cannot_be_re_read(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._ws(td)
+            target = ws / "results" / "task-x.txt"
+            target.mkdir()  # read_text raises IsADirectoryError under the lock
+            self.assertIsNone(stamp_result_file(target))
+
+    def test_stamp_returns_None_when_the_body_emptied_under_the_lock(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._ws(td)
+            target = ws / "results" / "task-x.txt"
+            target.write_text("   \n")
+            self.assertIsNone(stamp_result_file(target))
+
+    def test_stamp_returns_None_when_no_id_could_be_allocated(self):
+        """Fail CLOSED: no durable ID means the result is not ready, never an
+        unstamped send."""
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._ws(td)
+            target = ws / "results" / "task-x.txt"
+            target.write_text("the answer")
+            real = result_ready._alloc_locked
+            result_ready._alloc_locked = lambda state: None
+            try:
+                self.assertIsNone(stamp_result_file(target))
+            finally:
+                result_ready._alloc_locked = real
+            self.assertEqual(target.read_text(), "the answer", "must not rewrite on failure")
+
+    def test_stamp_survives_an_unlock_failure_after_persisting(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._ws(td)
+            target = ws / "results" / "task-x.txt"
+            target.write_text("the answer")
+            real = result_ready.fcntl
+
+            class Shim:
+                LOCK_EX, LOCK_UN = real.LOCK_EX, real.LOCK_UN
+
+                @staticmethod
+                def flock(f, op):
+                    if op == real.LOCK_UN:
+                        raise OSError("unlock failed")
+                    return real.flock(f, op)
+
+            result_ready.fcntl = Shim
+            try:
+                got = stamp_result_file(target)
+            finally:
+                result_ready.fcntl = real
+            self.assertTrue((got or "").endswith("the answer"), got)
+            self.assertTrue(target.read_text().startswith("[task "), target.read_text())
 
 
 if __name__ == "__main__":
