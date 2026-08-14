@@ -73,15 +73,22 @@ def _run_heal() -> tuple[Path, str]:
     # A session that exists but holds no core claude -> exactly the heal precondition.
     # DEVNULL throughout: `new-session -d` starts a server that can inherit and hold
     # a pipe, which is the same hang class the launcher call avoids below.
-    subprocess.run(["tmux", "-S", str(sock), "new-session", "-d", "-s", SESSION, "sleep 300"],
-                   env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                   stderr=subprocess.DEVNULL, timeout=30)
+    new = subprocess.run(["tmux", "-S", str(sock), "new-session", "-d", "-s", SESSION, "sleep 300"],
+                         env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                         text=True, timeout=30)
     try:
         has = subprocess.run(["tmux", "-S", str(sock), "has-session", "-t", SESSION],
                              env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, timeout=30)
         if has.returncode != 0:
-            return (ws, "SKIP: could not create the precondition tmux session")
+            # Say WHY. A skip with no reason is indistinguishable from a broken test,
+            # and a sandbox that forbids spawning a tmux server looks identical to a
+            # missing binary unless tmux's own stderr is carried out.
+            why = (new.stderr or new.stdout or "").strip().replace("\n", " ")[:200]
+            return (ws, "SKIP: could not create the precondition tmux session"
+                        + (f" — tmux said: {why}" if why else
+                           f" — tmux exited {new.returncode} with no message"
+                           " (a sandbox forbidding a new server looks like this)"))
         # Redirect to FILES, never pipes. The launcher spawns a tmux server, and a
         # surviving grandchild holding the read end keeps subprocess.run waiting for
         # EOF long after the script itself exited — the hang is in the plumbing, not
