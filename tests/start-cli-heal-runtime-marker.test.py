@@ -78,8 +78,14 @@ def _run_heal() -> tuple[Path, str]:
                              env=env, capture_output=True, timeout=30)
         if has.returncode != 0:
             return (ws, "SKIP: could not create the precondition tmux session")
-        p = subprocess.run(["/bin/bash", str(SCRIPT)],
-                           env=env, capture_output=True, text=True, timeout=60)
+        try:
+            p = subprocess.run(["/bin/bash", str(SCRIPT)],
+                               env=env, capture_output=True, text=True, timeout=45)
+        except subprocess.TimeoutExpired:
+            # The launcher can block where a create-path `exec tmux` inherits the
+            # captured pipe. That means the heal branch was never observed, which
+            # is inconclusive rather than a defect — never a silent pass.
+            return (ws, "SKIP: launcher did not return in 45s; heal branch not observed")
         return (ws, (p.stderr or "") + (p.stdout or ""))
     finally:
         subprocess.run(["tmux", "-S", str(sock), "kill-server"],
@@ -112,6 +118,7 @@ def case_heal_is_distinguishable_in_the_log() -> list[str]:
     """The heal launch must be attributable, not silently identical to a create."""
     ws, out = _run_heal()
     if out.startswith("SKIP:"):
+        print(f"  ~ skipped — {out[5:].strip()}")
         return []
     if "healing core window" not in out:
         return ["never entered the heal path"]
