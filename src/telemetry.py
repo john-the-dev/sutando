@@ -242,14 +242,31 @@ _MODEL_FAMILIES = ("claude", "gpt", "o1", "o3", "o4", "gemini", "llama", "mistra
 _MODEL_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,39}")
 
 
+# A version-ish tail token: digits first, so a word cannot masquerade as one.
+_VERSION_TOKEN = re.compile(r"[0-9][0-9a-z.]*")
+# Vendor tier words that appear in real model ids. Bounded on purpose — the
+# point is a finite vocabulary, so an unlisted word collapses to the family.
+_MODEL_QUALIFIERS = frozenset({
+    "pro", "mini", "nano", "flash", "turbo", "instant", "preview", "latest",
+    "thinking", "reasoning", "chat", "code", "vision", "lite", "max", "plus",
+})
+
+
 def _coarse_model(raw: str) -> str:
-    """Normalize to a known model family token, else ``unknown``: an
-    environment-controlled alias must never reach the wire verbatim."""
+    """Every token must be a known family or a version; an env-controlled alias
+    must not reach the wire, and a known PREFIX is not enough to trust the tail."""
     s = (raw or "").strip().lower()
     if not _MODEL_RE.fullmatch(s):
         return "unknown"
-    return s if s.split("-", 1)[0] in _MODEL_FAMILIES or any(
-        s.startswith(f + "-") or s == f for f in _MODEL_FAMILIES) else "unknown"
+    parts = s.split("-")
+    if parts[0] not in _MODEL_FAMILIES:
+        return "unknown"
+    for tok in parts[1:]:
+        if (tok in _MODEL_FAMILIES or tok in _MODEL_QUALIFIERS
+                or _VERSION_TOKEN.fullmatch(tok)):
+            continue
+        return parts[0]  # unrecognised tail: keep the family, drop the free text
+    return s
 
 
 def _core_model() -> str:

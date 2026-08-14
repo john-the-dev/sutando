@@ -394,7 +394,9 @@ def run():
     #     `model` from Claude Code's settings.json when no env var is set.
     with tempfile.TemporaryDirectory() as td:
         mod = _load(Path(td), key="phc_live", env={"ANTHROPIC_MODEL": "claude-from-env"})
-        assert mod._core_model() == "claude-from-env", "ANTHROPIC_MODEL fallback"
+        # "-from-env" is not a version, so this asserts BOTH that the env var is
+        # read and that its value is sanitized on the way out.
+        assert mod._core_model() == "claude", "ANTHROPIC_MODEL fallback, coarsened"
         passed += 1
         print("ok   core_model reads $ANTHROPIC_MODEL fallback")
     with tempfile.TemporaryDirectory() as td:
@@ -402,7 +404,7 @@ def run():
         cfg.mkdir(parents=True)
         (cfg / "settings.json").write_text(json.dumps({"model": "claude-from-settings"}))
         mod = _load(Path(td), key="phc_live", env={"CLAUDE_CONFIG_DIR": str(cfg)})
-        assert mod._core_model() == "claude-from-settings", "settings.json model"
+        assert mod._core_model() == "claude", "settings.json model, coarsened"
         passed += 1
         print("ok   core_model reads model from settings.json")
 
@@ -444,6 +446,16 @@ def run():
         assert mod._coarse_model("acme-prod") == "unknown"
         assert mod._coarse_model("customer_foo") == "unknown"
         assert mod._coarse_model("internal-claude-clone") == "unknown"
+        # A KNOWN FAMILY PREFIX must not license a free-text tail: the regex +
+        # first-token check alone shipped these verbatim to PostHog.
+        assert mod._coarse_model("claude-jane-doe-laptop") == "claude"
+        assert mod._coarse_model("claude-acme-prod") == "claude"
+        assert mod._coarse_model("gpt-customer-foo") == "gpt"
+        assert mod._coarse_model("opus-internal-project-x") == "opus"
+        assert mod._coarse_model("claude-" + "a" * 32) == "claude"
+        # ...while real model ids keep their version detail.
+        assert mod._coarse_model("claude-3-5-haiku-20241022") == "claude-3-5-haiku-20241022"
+        assert mod._coarse_model("gpt-4") == "gpt-4"
         assert mod._coarse_model("gpt-5") == "gpt-5"
         assert mod._coarse_model("gemini-2.5-pro") == "gemini-2.5-pro"
         assert mod._coarse_model("model with spaces") == "unknown"
