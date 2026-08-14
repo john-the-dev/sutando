@@ -62,13 +62,43 @@ def needs_task_stamp(name: str, body: str) -> bool:
     )
 
 
-def _alloc_locked(state: Path) -> str | None:
+def _reserved_id(state: Path, name: str) -> str | None:
+    """The ID already spent on `name` by an attempt that failed before persisting."""
+    try:
+        s = json.loads((state / "task-counter.json").read_text())
+        v = (s.get("pending") or {}).get(name)
+        return v if isinstance(v, str) and v else None
+    except Exception:
+        return None
+
+
+def _release_reservation(state: Path, name: str) -> None:
+    """Drop `name`'s reservation once its body is durably stamped."""
+    counter = state / "task-counter.json"
+    try:
+        s = json.loads(counter.read_text())
+        if not isinstance(s.get("pending"), dict) or name not in s["pending"]:
+            return
+        del s["pending"][name]
+        if not s["pending"]:
+            del s["pending"]
+        tmp = counter.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(s))
+        tmp.replace(counter)
+    except Exception:
+        pass  # a lingering reservation is reused, never double-spent
+
+
+def _alloc_locked(state: Path, reserve_for: str | None = None) -> str | None:
     """Allocate the next ID. THE CALLER MUST ALREADY HOLD the counter lock.
 
     Split out so the stamp can be one transaction: reading the file, deciding it
     needs an ID, allocating, and persisting all happen inside a single lock hold
     (see `stamp_result_file`). Allocating under its own short-lived lock and
     writing outside it is what let two writers each mint an ID for one result.
+
+    `reserve_for` records the ID against that result name in the SAME atomic
+    write that commits the count, so a later failure cannot spend a second one.
     """
     counter, history = state / "task-counter.json", state / "task-completions-daily.json"
     today = date.today().strftime("%Y%m%d")
@@ -77,7 +107,12 @@ def _alloc_locked(state: Path) -> str | None:
             s = json.loads(counter.read_text())
         except Exception:
             s = {}
+        if not isinstance(s, dict):
+            s = {}
+        pending = s.get("pending") if isinstance(s.get("pending"), dict) else {}
         if s.get("date") != today:
+            # Reservations outlive the daily reset: the ID they hold belongs to the
+            # completion that reserved it, not to the day the retry happens on.
             s = {"date": today, "count": 0}
         try:
             base = int(s.get("count", 0))
@@ -91,6 +126,11 @@ def _alloc_locked(state: Path) -> str | None:
         # A truncated counter reads 0 and would remint 001 over a day in
         # progress; today's history is the surviving floor.
         s["count"] = max(base, floor) + 1
+        allocated = f"{today}-{s['count']:03d}"
+        if reserve_for:
+            pending = {**pending, reserve_for: allocated}
+        if pending:
+            s["pending"] = pending
         tmp = counter.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(s))
         tmp.replace(counter)
@@ -99,7 +139,7 @@ def _alloc_locked(state: Path) -> str | None:
             htmp = history.with_suffix(".json.tmp")
             htmp.write_text(json.dumps(hist))
             htmp.replace(history)
-        return f"{today}-{s['count']:03d}"
+        return allocated
     except Exception:
         return None
 
@@ -125,6 +165,10 @@ def alloc_task_id(results_dir: Path) -> str | None:
         if lockf is not None:
             try:
                 fcntl.flock(lockf, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            # Separate try: a failed unlock must not skip the close and leak the fd.
+            try:
                 lockf.close()
             except Exception:
                 pass
@@ -164,7 +208,9 @@ def stamp_result_file(p: Path) -> str | None:
             return None
         if not needs_task_stamp(p.name, fresh):
             return fresh  # already stamped (or exempt) — adopt what is on disk
-        tid = _alloc_locked(state)
+        # The count commits before the body is written, so an attempt that dies in
+        # between must resume on its reserved ID rather than spend a second one.
+        tid = _reserved_id(state, p.name) or _alloc_locked(state, reserve_for=p.name)
         if not tid:
             return None
         stamped = f"[task {tid}]\n\n{fresh}"
@@ -173,6 +219,7 @@ def stamp_result_file(p: Path) -> str | None:
         tmp = p.with_name(p.name + ".stamp.tmp")
         tmp.write_text(stamped + "\n")
         tmp.replace(p)
+        _release_reservation(state, p.name)
         return stamped
     except Exception:
         return None
@@ -180,6 +227,10 @@ def stamp_result_file(p: Path) -> str | None:
         if lockf is not None:
             try:
                 fcntl.flock(lockf, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            # Separate try: a failed unlock must not skip the close and leak the fd.
+            try:
                 lockf.close()
             except Exception:
                 pass

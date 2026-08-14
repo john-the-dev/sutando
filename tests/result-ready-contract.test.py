@@ -323,6 +323,32 @@ class FailClosedBranches(unittest.TestCase):
             self.assertTrue((got or "").endswith("the answer"), got)
             self.assertTrue(target.read_text().startswith("[task "), target.read_text())
 
+    def test_a_persist_failure_then_retry_spends_exactly_one_id(self):
+        """The count commits before the body is written. An attempt that dies in
+        that window must resume on its reserved ID, not spend a second one."""
+        with tempfile.TemporaryDirectory() as td:
+            ws = self._ws(td)
+            target = ws / "results" / "task-1.txt"
+            target.write_text("the one and only completion\n")
+
+            # Force the persist to fail AFTER the count commits: the atomic temp
+            # target is a directory, so the body write raises.
+            blocker = target.with_name(target.name + ".stamp.tmp")
+            blocker.mkdir()
+            self.assertIsNone(stamp_result_file(target), "must fail closed")
+            blocker.rmdir()
+
+            second = stamp_result_file(target)
+            counter = json.loads((ws / "state" / "task-counter.json").read_text())
+            history = json.loads((ws / "state" / "task-completions-daily.json").read_text())
+            today = __import__("datetime").date.today().strftime("%Y%m%d")
+
+            self.assertEqual(counter["count"], 1, "one completion must spend one id")
+            self.assertEqual(history.get(today), 1, "history must not double-count it")
+            self.assertTrue((second or "").startswith(f"[task {today}-001]"),
+                            f"retry must resume on the reserved id, got {second!r}")
+            self.assertNotIn("pending", counter, "reservation must clear once persisted")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
