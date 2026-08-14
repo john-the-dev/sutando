@@ -104,8 +104,9 @@ for _ in $(seq 1 30); do
     sleep 0.1
 done
 
-# We're restarting (not a permanent stop) — clear the sentinel so the fresh
-# core doesn't immediately think it should shut down.
+# Restart, not a stop: the core is NOT in STOP_PATTERNS and survives this, so a
+# sentinel left set would make the surviving core read a restart as "shut down".
+# --stop-only exits above this and leaves it set, which is the clean-exit path.
 python3 "$REPO/src/shutdown.py" clear >/dev/null 2>&1 || true
 echo "Starting..."
 exec bash "$REPO/src/startup.sh"

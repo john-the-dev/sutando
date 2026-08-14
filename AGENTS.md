@@ -137,7 +137,18 @@ This applies to all work — proactive loop passes, voice tasks, user requests, 
 python3 src/shutdown.py check   # exit 0 = shutting down, 1 = not
 ```
 
-If it exits 0, an intentional stop has been signalled (`restart.sh`/an explicit stop wrote `state/shutdown.sentinel`). **Finish the current task, do NOT start a new one, write `{"status":"idle"}` to core-status, and end the loop cleanly** — this is the durable signal that lets the core exit between passes instead of being killed mid-task (which orphans the task until the result-watcher timeout, the visible "no response" delay). `startup.sh` clears the sentinel on boot, so the next session runs normally. Helpers: `src/shutdown.py` (`is_shutting_down()` / `shutdown_info()` for Python callers).
+If it exits 0, an intentional **stop** has been signalled. **Finish the current task, do NOT start a new one, write `{"status":"idle"}` to core-status, and end the loop cleanly** — instead of being killed mid-task, which orphans the task until the result-watcher timeout (the visible "no response" delay). `startup.sh` clears the sentinel on boot, so the next session runs normally. Helpers: `src/shutdown.py` (`is_shutting_down()` / `shutdown_info()` for Python callers).
+
+**Which path actually reaches you — the two are not the same, and only one is a clean-exit signal:**
+
+| path | sentinel | what the core should expect |
+|---|---|---|
+| `restart.sh --stop-only` / explicit stop | marked at `restart.sh:14` and **left set** (the script exits at `:83` before any clear) | you WILL see it on your next pass — exit cleanly |
+| plain `restart.sh` | marked at `:14`, **cleared ~3s later at `:109`** | you will almost certainly NOT see it, and that is intended |
+
+Plain restart does not stop the core at all — no core pattern appears in `STOP_PATTERNS`, so the core **survives** while the services around it restart. The clear at `:109` exists precisely so that surviving core does not read a restart as "shut down". So a per-pass check (~5 min cadence) against a ~3s window is not a missed signal; there is deliberately no signal to catch on that path.
+
+The gate that operates on **both** paths is the watcher's intake check (`watch-tasks-stream.sh:632`), which refuses to start new handler work while the sentinel is present.
 
 ## Chat-path task tracking (issue #585)
 
