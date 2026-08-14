@@ -10,6 +10,7 @@ trap 'rm -rf "$TMP"' EXIT
 STAGE="$TMP/repo-under-test"
 mkdir -p "$STAGE/src"
 cp "$REPO/src/startup-runtime.sh" "$STAGE/src/startup-runtime.sh"
+cp "$REPO/src/repo_root.sh" "$STAGE/src/"
 
 run_runtime_config() {
   local gemini_key="${1:-}"

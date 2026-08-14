@@ -14,6 +14,7 @@ stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/src"
 cp "$REPO/src/startup-runtime.sh" "$stage/src/"
+cp "$REPO/src/repo_root.sh" "$stage/src/"
 printf 'SUTANDO_DOTENV_PROBE=loaded\n' > "$stage/.env"
 
 probe() {   # $1 = cwd to run from

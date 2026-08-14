@@ -5,9 +5,19 @@
 # The normal .env load happens later in configure_startup_runtime(); use a
 # subshell here so an invocation-scoped SUTANDO_CORE_RUNTIME stored there still
 # participates without exposing every .env value earlier than before.
+# The durable repo that supplies this src/ — a symlinked bundle wrapper must not
+# answer this question. Located relative to THIS file, resolved inside the helper.
+# A missing helper must fail LOUDLY: silently continuing leaves every _repo empty,
+# so .env never loads and credentials vanish with no error — worse than the bug.
+# shellcheck source=src/repo_root.sh
+if ! . "$(dirname "${BASH_SOURCE[0]}")/repo_root.sh" 2>/dev/null; then
+  echo "FATAL: src/repo_root.sh not found next to startup-runtime.sh" >&2
+  return 1 2>/dev/null || exit 1
+fi
+
 resolve_startup_core_runtime() {
   local _repo
-  _repo="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+  _repo="$(sutando_repo_root)"
   (
     if [ -f "$_repo/.env" ]; then
       set -a
@@ -29,7 +39,7 @@ claude_auth_carry_enabled() {
 preflight_selected_core_auth() {
   local _runtime="${1:-claude}" _claude_config_dir="${2:-}"
   local _repo _config_env _config_value
-  _repo="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+  _repo="$(sutando_repo_root)"
 
   case "$_runtime" in
     claude)
@@ -89,7 +99,7 @@ preflight_selected_core_auth() {
 # Prints the path; returns 1 when the workspace cannot be resolved.
 _voice_managed_credentials_file() {
   local _repo _ws
-  _repo="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+  _repo="$(sutando_repo_root)"
   _ws="$(bash "$_repo/scripts/sutando-config.sh" workspace 2>/dev/null)" || return 1
   [ -n "$_ws" ] || return 1
   printf '%s\n' "$_ws/state/auth/managed-credentials.json"
@@ -126,7 +136,7 @@ _voice_managed_credentials_file() {
 # defect the stub tests pin.
 _voice_gate_python() {
   local _repo
-  _repo="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+  _repo="$(sutando_repo_root)"
   _usable_python() {
     # No `-x` test: `python-bin` may return a bare command name, and a name that
     # is not on PATH simply fails to execute. Running it IS the test.
@@ -220,7 +230,7 @@ configure_startup_runtime() {
   # Repo-relative, not cwd-relative: the app bundle invokes startup from its own
   # working directory, where a bare `.env` silently resolves to nothing.
   local _repo
-  _repo="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+  _repo="$(sutando_repo_root)"
   if [ -f "$_repo/.env" ]; then
     set -a
     # shellcheck disable=SC1091
