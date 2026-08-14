@@ -440,6 +440,22 @@ ensure_core_monitor() {
   fi
 }
 
+# Declare THIS core as the Claude runtime. Must run on EVERY path that launches a
+# core: the heal path exits before the create path's stamp, and it is the path
+# `sutando-ctl.sh restart-core` takes. Best-effort — never block the launch.
+stamp_runtime_claude() {
+  local _ws
+  _ws="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null)" || return 0
+  [ -n "$_ws" ] || return 0
+  mkdir -p "$_ws/state" 2>/dev/null || true
+  printf '{"runtime":"claude","session":"%s","started_at":%s}\n' \
+    "$SESSION" "$(date +%s)" > "$_ws/state/core-runtime.json" 2>/dev/null || true
+  printf '{"host":"%s","session_started_at":%s,"iso":"%s","source":"%s","runtime":"claude"}\n' \
+    "$(hostname | sed 's/\..*//')" "$(date +%s)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "${1:-start-cli}" \
+    >> "$_ws/state/session-starts.log" 2>/dev/null || true
+}
+
 # Already running — attach if interactive, else exit cleanly. A managed core is
 # live when the tmux session exists AND a `claude --name sutando-core` process
 # runs under it (tmux_core_session_running). Re-running the script is idempotent:
@@ -490,6 +506,9 @@ if tmux_session_exists; then
   # Make the healed core the active window so attach/Console show it, not the
   # quiet gateway (same reason launch-sutando.sh creates siblings with -d).
   tmux -S "$TMUX_SOCKET" select-window -t "$SESSION:${healed_idx:-0}" 2>/dev/null || true
+  # A healed window IS a Claude launch — stamp it before the exits below, and
+  # before ensure_core_monitor, which cannot write its pid file until state/ exists.
+  stamp_runtime_claude "start-cli-heal"
   ensure_core_monitor
   if [ -t 1 ]; then
     echo "Attaching to healed $SESSION (Ctrl-b d to detach)..."
@@ -520,14 +539,7 @@ fi
 # the dashboard, rollback logic) then saw a runtime that no longer matched
 # reality. It failed closed via a tmux-env cross-check, but the marker should
 # just be accurate. Best-effort, same as the log stamp — never block the launch.
-if _ws="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null)" && [ -n "$_ws" ]; then
-  mkdir -p "$_ws/state" 2>/dev/null || true
-  printf '{"runtime":"claude","session":"%s","started_at":%s}\n' \
-    "$SESSION" "$(date +%s)" > "$_ws/state/core-runtime.json" 2>/dev/null || true
-  printf '{"host":"%s","session_started_at":%s,"iso":"%s","source":"start-cli","runtime":"claude"}\n' \
-    "$(hostname | sed 's/\..*//')" "$(date +%s)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    >> "$_ws/state/session-starts.log" 2>/dev/null || true
-fi
+stamp_runtime_claude "start-cli"
 
 # Fall back to a bare `exec claude` if tmux is still missing.
 if ! command -v tmux > /dev/null 2>&1; then

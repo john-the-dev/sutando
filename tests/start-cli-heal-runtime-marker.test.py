@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""The heal path launches a Claude core and must stamp the runtime marker.
+
+start-cli.sh exits at the end of the heal branch, well before the create path's
+stamp. That branch is what `sutando-ctl.sh restart-core` takes, so without a stamp
+there the ordinary Claude restart leaves core-runtime.json reading whatever the
+previous runtime wrote.
+
+Unlike start-cli-core-runtime-marker.test.py, this exercises REAL tmux — the heal
+branch is unreachable without it. The socket is a disposable path inside the test's
+own temp dir and is asserted to differ from the live one before anything runs.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+SCRIPT = REPO / "src" / "agent" / "claude" / "cli" / "start-cli.sh"
+LIVE_SOCKET = os.environ.get("SUTANDO_TMUX_SOCKET", "/tmp/sutando-tmux.sock")
+SESSION = "sutando-core"
+
+_TOOLS = [
+    "bash", "sh", "env", "python3", "dirname", "hostname", "date", "sed",
+    "mkdir", "mktemp", "rm", "cat", "sleep", "uname", "cut", "grep", "head",
+    "tail", "chmod", "ls", "tr", "wc", "find", "stat", "touch", "cp", "mv",
+    "printf", "expr", "id", "whoami", "tmux",
+]
+
+
+def _run_heal() -> tuple[Path, str]:
+    """Pre-create a core-less tmux session, run the launcher, return (ws, stderr)."""
+    td = Path(tempfile.mkdtemp())
+    bind = td / "bin"
+    bind.mkdir()
+    ws = td / "ws"
+    sock = td / "tmux.sock"
+
+    # Refuse to run if this would touch the live socket. An isolation assert that
+    # cannot fail is not an assert, so compare resolved paths, not the strings.
+    assert str(sock) != str(LIVE_SOCKET), "socket collides with the live one"
+    assert not str(sock).startswith("/tmp/sutando-"), f"unsafe socket {sock}"
+
+    for tool in _TOOLS:
+        real = shutil.which(tool)
+        if real:
+            link = bind / tool
+            if not link.exists():
+                link.symlink_to(real)
+    if not (bind / "tmux").exists():
+        return (ws, "SKIP: tmux not available")
+
+    # claude must not actually run; the healed window just needs to spawn cleanly.
+    (bind / "claude").write_text("#!/bin/bash\nsleep 5\n")
+    (bind / "claude").chmod(0o755)
+    # pgrep finds no core claude -> core_claude_running false -> heal, not attach.
+    (bind / "pgrep").write_text("#!/bin/bash\nexit 1\n")
+    (bind / "pgrep").chmod(0o755)
+
+    env = {
+        "PATH": f"{bind}:/usr/bin:/bin",
+        "HOME": str(td),
+        "SUTANDO_TEST_MODE": "1",
+        "SUTANDO_WORKSPACE": str(ws),
+        "SUTANDO_TMUX_SOCKET": str(sock),
+    }
+
+    # A session that exists but holds no core claude -> exactly the heal precondition.
+    subprocess.run(["tmux", "-S", str(sock), "new-session", "-d", "-s", SESSION, "sleep 300"],
+                   env=env, capture_output=True, text=True, timeout=30)
+    try:
+        has = subprocess.run(["tmux", "-S", str(sock), "has-session", "-t", SESSION],
+                             env=env, capture_output=True, timeout=30)
+        if has.returncode != 0:
+            return (ws, "SKIP: could not create the precondition tmux session")
+        p = subprocess.run(["/bin/bash", str(SCRIPT)],
+                           env=env, capture_output=True, text=True, timeout=60)
+        return (ws, (p.stderr or "") + (p.stdout or ""))
+    finally:
+        subprocess.run(["tmux", "-S", str(sock), "kill-server"],
+                       env=env, capture_output=True, timeout=30)
+
+
+def case_heal_stamps_marker() -> list[str]:
+    ws, out = _run_heal()
+    if out.startswith("SKIP:"):
+        print(f"  ~ skipped — {out[5:].strip()}")
+        return []
+    if "healing core window" not in out:
+        return [f"never entered the heal path; launcher said: {out.strip()[:200]!r}"]
+    marker = ws / "state" / "core-runtime.json"
+    if not marker.exists():
+        return ["heal path launched a Claude core but wrote no core-runtime.json"]
+    try:
+        d = json.loads(marker.read_text())
+    except ValueError as e:
+        return [f"core-runtime.json is not valid JSON: {e}"]
+    fails = []
+    if d.get("runtime") != "claude":
+        fails.append(f'runtime should be "claude", got {d.get("runtime")!r}')
+    if d.get("session") != SESSION:
+        fails.append(f'session should be {SESSION!r}, got {d.get("session")!r}')
+    return fails
+
+
+def case_heal_is_distinguishable_in_the_log() -> list[str]:
+    """The heal launch must be attributable, not silently identical to a create."""
+    ws, out = _run_heal()
+    if out.startswith("SKIP:"):
+        return []
+    if "healing core window" not in out:
+        return ["never entered the heal path"]
+    log = ws / "state" / "session-starts.log"
+    if not log.exists():
+        return ["heal path wrote no session-starts.log entry"]
+    lines = [ln for ln in log.read_text().splitlines() if ln.strip()]
+    if not lines:
+        return ["session-starts.log is empty after a heal launch"]
+    last = json.loads(lines[-1])
+    fails = []
+    if last.get("runtime") != "claude":
+        fails.append(f'log runtime should be "claude", got {last.get("runtime")!r}')
+    if last.get("source") != "start-cli-heal":
+        fails.append(f'log source should be "start-cli-heal", got {last.get("source")!r}')
+    return fails
+
+
+def main() -> int:
+    cases = [
+        ("heal path stamps core-runtime.json", case_heal_stamps_marker),
+        ("heal launch is attributable in session-starts.log", case_heal_is_distinguishable_in_the_log),
+    ]
+    bad = 0
+    for name, fn in cases:
+        fails = fn()
+        if fails:
+            bad += 1
+            print(f"  ✖ {name}")
+            for f in fails:
+                print(f"      {f}")
+        else:
+            print(f"  ✔ {name}")
+    print()
+    if bad:
+        print(f"FAIL — {bad} case(s)")
+        return 1
+    print("PASS — heal-path runtime marker")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
