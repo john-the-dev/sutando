@@ -26,13 +26,18 @@ def resolve_hook_command(skill_dir: Path, command: str) -> Path | None:
     return target if root in target.parents else None
 
 
-def discover(repo_dir: Path) -> list[tuple[str, str, str]]:
-    """(event, token, command) for every declared, present, enabled skill hook.
+def discover(repo_dir: Path) -> list[tuple[str, str, str, str]]:
+    """(event, token, command, prior_command) per declared, present, enabled hook.
 
     Skips rather than raises on anything malformed: a broken manifest must not
     abort a whole install, and a hook declared but absent is not registrable.
+
+    `prior_command` is the unguarded form an earlier installer wrote. It is emitted
+    here, where `runner` and the quoted path are already in hand, because deriving
+    it by splitting the assembled command on `exec ` breaks on a repo path that
+    itself contains `exec `.
     """
-    out: list[tuple[str, str, str]] = []
+    out: list[tuple[str, str, str, str]] = []
     for manifest in sorted(Path(repo_dir).glob("skills/*/manifest.json")):
         try:
             data = json.loads(manifest.read_text())
@@ -56,11 +61,17 @@ def discover(repo_dir: Path) -> list[tuple[str, str, str]]:
             q = shlex.quote(str(target))
             # The path is in the working tree, so a checkout can delete it while the
             # registration survives; a hook that cannot start blocks the tool it gates.
-            out.append((event, target.name, f"[ -f {q} ] || exit 0; exec {runner} {q}"))
+            prior = f"{runner} {q}"
+            out.append((event, target.name, f"[ -f {q} ] || exit 0; exec {prior}", prior))
     return out
 
 
 if __name__ == "__main__":
     import sys
+    # NUL-framed: two fields carry a repo path, and a path may contain any byte
+    # except NUL — including the `|` the reader would otherwise split on.
+    out = sys.stdout.buffer
     for row in discover(Path(sys.argv[1])):
-        print("|".join(row))
+        for field in row:
+            out.write(field.encode() + b"\0")
+    out.flush()

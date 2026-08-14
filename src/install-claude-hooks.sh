@@ -99,13 +99,23 @@ HOOKS=(
   "Stop|src/check-pending-tasks.sh|bash $(shq "$REPO_DIR/src/check-pending-tasks.sh")"
 )
 
+# The unguarded command an earlier installer wrote, parallel to HOOKS by index.
+# Carried alongside rather than as another `|` field: HOOKS entries already rely
+# on CMD being last to hold a `|`, and a second path-bearing field cannot also be
+# last. Empty for the static entries above, which were never emitted guarded; sized
+# from HOOKS rather than written out, so adding a static entry cannot shift indices.
+HOOK_PRIOR=()
+for _i in "${!HOOKS[@]}"; do HOOK_PRIOR+=(""); done
+
 # Skill-declared hooks. A skill owns its hook the way it owns its `tools`;
 # src/skill_hooks.py is the single discovery the health probe also reads.
-while IFS='|' read -r _ev _tok _cmd; do
-  [ -n "${_ev:-}" ] && HOOKS+=("$_ev|$_tok|$_cmd")
-done <<EOF
-$(python3 "$REPO_DIR/src/skill_hooks.py" "$REPO_DIR" 2>/dev/null)
-EOF
+# NUL-framed (`-d ''`) because two of the four fields embed the repo path.
+while IFS= read -r -d '' _ev && IFS= read -r -d '' _tok \
+   && IFS= read -r -d '' _cmd && IFS= read -r -d '' _prior; do
+  [ -n "${_ev:-}" ] || continue
+  HOOKS+=("$_ev|$_tok|$_cmd")
+  HOOK_PRIOR+=("$_prior")
+done < <(python3 "$REPO_DIR/src/skill_hooks.py" "$REPO_DIR" 2>/dev/null)
 
 # Deprecated hooks to uninstall on re-run.  Each line: "<event>|<substring>".
 # Matching uses `.command | contains(substring)` so we don't need to track
@@ -166,7 +176,8 @@ re_escape() { printf '%s' "$1" | sed 's/[][\\^$.*+?(){}|]/\\&/g'; }
 #
 # Sweeping a *different clone's* entry is intended — that shape is
 # installer-generated, just not by this checkout.
-for entry in "${HOOKS[@]}"; do
+for i in "${!HOOKS[@]}"; do
+  entry="${HOOKS[$i]}"
   EVENT="${entry%%|*}"
   REST="${entry#*|}"
   MARKER="${REST%%|*}"
@@ -237,10 +248,12 @@ for entry in "${HOOKS[@]}"; do
   # runner-first entry an earlier installer wrote; without this the old one
   # survives beside the new and still blocks the tool it gates.
   # Exact string only — the narrowest form that cannot touch operator variants.
+  #
+  # Taken from the emitter, not re-derived here. `${CMD#*exec }` strips through the
+  # FIRST `exec ` in the string, which on a repo path containing `exec ` is inside
+  # the path — the shape then matches nothing and the blocking entry survives.
   LEGACY_SHAPE=""
-  case "$CMD" in
-    "[ -f "*" ] || exit 0; exec "*) LEGACY_SHAPE="^$(re_escape "${CMD#*exec }")\$" ;;
-  esac
+  [ -n "${HOOK_PRIOR[$i]:-}" ] && LEGACY_SHAPE="^$(re_escape "${HOOK_PRIOR[$i]}")\$"
 
   if ! jq -e --arg event "$EVENT" --arg marker "$MARKER" --arg cmd "$CMD" \
            --arg shape "$SHAPE" --arg legacy "$LEGACY_SHAPE" \

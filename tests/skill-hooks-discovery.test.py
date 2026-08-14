@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -34,13 +35,36 @@ class SkillHookDiscovery(unittest.TestCase):
             {"event": "PreToolUse", "command": "./hooks/g.py"}]})
         rows = discover(self.repo)
         self.assertEqual(len(rows), 1)
-        event, token, cmd = rows[0]
+        event, token, cmd, prior = rows[0]
         self.assertEqual(event, "PreToolUse")
         self.assertEqual(token, "g.py")
         # The runner still has to be the one the suffix selects; it just no longer
         # leads the command, because an existence guard runs first.
         self.assertIn("exec python3 ", cmd)
         self.assertIn("skills/demo/hooks/g.py", cmd)
+        # The unguarded form an earlier installer wrote, so the sweep can match and
+        # replace it without re-deriving it from `cmd`.
+        self.assertTrue(cmd.endswith(prior), f"{cmd!r} does not end with {prior!r}")
+        self.assertEqual(cmd, f"[ -f {shlex.quote(str(self.repo.resolve() / 'skills/demo/hooks/g.py'))} ]"
+                              f" || exit 0; exec {prior}")
+
+    def test_prior_command_survives_a_repo_path_containing_exec_and_pipe(self):
+        """`${CMD#*exec }` strips at the FIRST `exec ` — inside the path, not the
+        shell keyword — so the derived shape matched nothing and the blocking
+        registration survived the upgrade. Emitting it structurally is immune."""
+        self._td.cleanup()
+        self._td = tempfile.TemporaryDirectory(prefix="exec repo|x ")
+        self.addCleanup(self._td.cleanup)
+        self.repo = Path(self._td.name)
+        self._skill("demo", {"name": "demo", "hooks": [
+            {"event": "PreToolUse", "command": "./hooks/g.py"}]})
+        _event, _token, cmd, prior = discover(self.repo)[0]
+
+        self.assertEqual(prior, f"python3 {shlex.quote(str(self.repo.resolve() / 'skills/demo/hooks/g.py'))}")
+        self.assertTrue(cmd.endswith(prior))
+        # What the installer used to compute. It is wrong here, and that is the bug.
+        self.assertNotEqual(cmd.split("exec ", 1)[1], prior,
+                            "fixture must actually exercise the bad derivation")
 
     def test_a_vanished_script_allows_the_tool_instead_of_blocking_it(self):
         """The registration outlives the file, and a hook that cannot start blocks

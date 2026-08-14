@@ -6827,7 +6827,9 @@ def check_claude_hook_registration(
     try:
         sys.path.insert(0, str(repo / "src"))
         from skill_hooks import discover as _discover_skill_hooks
-        owned.extend(_discover_skill_hooks(repo))
+        # [:3] — the 4th field is the prior command, which only the installer's
+        # migration sweep uses; `owned` also holds 3-tuples parsed from the script.
+        owned.extend(r[:3] for r in _discover_skill_hooks(repo))
     except Exception as exc:
         return {"name": name, "status": "warn",
                 "detail": f"skill-hook discovery failed ({exc}) — "

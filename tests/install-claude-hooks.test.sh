@@ -365,6 +365,48 @@ bash -c "$UGUARD" >/dev/null 2>&1
 ok "with the script deleted the guarded hook exits 0 (tool not blocked)" "$?"
 rm -rf "$UROOT"
 
+# ---- same upgrade, on a repo path containing `exec ` and `|` ----
+# The migration above passes on any ordinary path, which is why this defect
+# shipped. `${CMD#*exec }` is a SHORTEST-match strip, so it cuts at the first
+# `exec ` in the string — inside the path, not at the shell keyword — and the
+# derived shape then matches nothing, leaving the blocking entry in place. The
+# `|` additionally exercises the field framing between skill_hooks and the reader.
+EROOT="$(mktemp -d)"; EREPO="$EROOT/exec repo|x/repo"
+mkdir -p "$EREPO/.claude" "$EREPO/src" "$EREPO/skills/demo/hooks"
+cp "$HERE/../src/install-claude-hooks.sh" "$EREPO/src/"
+cp "$HERE/../src/skill_hooks.py" "$EREPO/src/"
+printf '#!/bin/bash\n:\n' > "$EREPO/src/session-handoff.sh"
+printf '#!/bin/bash\n:\n' > "$EREPO/src/check-pending-tasks.sh"
+chmod +x "$EREPO/src/"*.sh
+printf '{"name":"demo","hooks":[{"event":"PreToolUse","command":"./hooks/g.py"}]}\n' \
+    > "$EREPO/skills/demo/manifest.json"
+printf 'import sys; sys.exit(2)\n' > "$EREPO/skills/demo/hooks/g.py"
+EPATH="$(python3 -c "import pathlib,sys;print(pathlib.Path(sys.argv[1]).resolve())" "$EREPO/skills/demo/hooks/g.py")"
+export E_SETTINGS="$EREPO/.claude/settings.json"
+# shq quotes the path, so the seeded legacy entry must be quoted the same way an
+# installer would have written it — otherwise the fixture is not what it claims.
+E_OLD="python3 $(python3 -c "import shlex,sys;print(shlex.quote(sys.argv[1]))" "$EPATH")"
+export E_OLD
+python3 - <<'PY'
+import json, os
+json.dump({"hooks": {"PreToolUse": [{"matcher": "", "hooks": [
+    {"type": "command", "command": os.environ["E_OLD"]},
+]}]}}, open(os.environ["E_SETTINGS"], "w"), indent=2)
+PY
+bash "$EREPO/src/install-claude-hooks.sh" >/dev/null 2>&1
+ECMDS="$(python3 -c "
+import json, os
+d = json.load(open(os.environ['E_SETTINGS']))
+print(chr(10).join(h['command'] for g in d['hooks'].get('PreToolUse', []) for h in g['hooks']))
+")"
+ok "path containing 'exec ': legacy entry is REMOVED, not left blocking" \
+   "$(echo "$ECMDS" | grep -qxF "$E_OLD" && echo 1 || echo 0)"
+# No trailing space in the pattern: this path needs quoting, so shq emits `g.py'`
+# where an ordinary path emits a bare `g.py `.
+ok "path containing 'exec ': guarded hook registered exactly once" \
+   "$([ "$(echo "$ECMDS" | grep -c "^\[ -f .*g\.py")" = 1 ] && echo 0 || echo 1)"
+rm -rf "$EROOT"
+
 rm -rf "$ROOT"
 echo "---"
 if [ "$fail" -gt 0 ]; then
