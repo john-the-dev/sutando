@@ -1,18 +1,5 @@
-/**
- * Deterministic regression for the transcript snapshot half of #1857.
- *
- * Scope is deliberate. `snapshotTranscript()` is the part whose behaviour can be
- * pinned without a DOM engine — it reads `children`, `className`, `cloneNode`
- * and `innerHTML`, all of which a few-line stub models honestly. The RESTORE
- * half genuinely needs a browser (createElement + innerHTML parsing), and a fake
- * elaborate enough to emulate that would be testing the fake; that half is
- * covered by the real-browser reload capture attached to the PR instead.
- *
- * The behaviours pinned here are the ones that changed after this PR's last
- * approval, and the ones a reviewer flagged as easy to get wrong: an oversized
- * entry must become a visible placeholder rather than vanish, and a quota
- * failure must retain the most recent half rather than lose everything.
- */
+// Only snapshotTranscript() is pinned here: restore needs real innerHTML parsing,
+// and a fake elaborate enough to emulate that would be testing the fake.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
