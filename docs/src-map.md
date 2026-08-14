@@ -10,7 +10,7 @@ loaded into every session (see CLAUDE.md's note on context budget).
 If an entry reads wrong, the file's header comment is wrong: fix the header
 and re-run `python3 scripts/gen-src-map.py`.
 
-209 modules indexed.
+210 modules indexed.
 
 ## `src/`
 
@@ -101,6 +101,7 @@ and re-run `python3 scripts/gen-src-map.py`.
 - **`remote-gateway-bridge.py`** — remote-gateway-bridge.py — sutando loader for the canonical ag2-sparrow client.
 - **`remote-relay-bridge.py`** — remote-relay-bridge.py — DEPRECATED name; renamed to remote-gateway-bridge.py.
 - **`reply_chain.py`** — Reply-context formatting (pure) — companion to ``discord-bridge.py``.
+- **`repo_root.sh`** — Resolve the DURABLE repo that supplies the running `src/` code.
 - **`restart.sh`** — Sutando restart — stops all background services, then restarts via startup.sh.
 - **`result-channel-key.ts`** — Per-channel pull path for task-result files in `results/`.
 - **`result_audit.py`** — Result-delivery audit ledger (Result Router spec §7) — the append-only sink.
