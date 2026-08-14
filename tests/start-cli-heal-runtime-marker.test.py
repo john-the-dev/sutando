@@ -71,25 +71,34 @@ def _run_heal() -> tuple[Path, str]:
     }
 
     # A session that exists but holds no core claude -> exactly the heal precondition.
+    # DEVNULL throughout: `new-session -d` starts a server that can inherit and hold
+    # a pipe, which is the same hang class the launcher call avoids below.
     subprocess.run(["tmux", "-S", str(sock), "new-session", "-d", "-s", SESSION, "sleep 300"],
-                   env=env, capture_output=True, text=True, timeout=30)
+                   env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=30)
     try:
         has = subprocess.run(["tmux", "-S", str(sock), "has-session", "-t", SESSION],
-                             env=env, capture_output=True, timeout=30)
+                             env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, timeout=30)
         if has.returncode != 0:
             return (ws, "SKIP: could not create the precondition tmux session")
-        try:
-            p = subprocess.run(["/bin/bash", str(SCRIPT)],
-                               env=env, capture_output=True, text=True, timeout=45)
-        except subprocess.TimeoutExpired:
-            # The launcher can block where a create-path `exec tmux` inherits the
-            # captured pipe. That means the heal branch was never observed, which
-            # is inconclusive rather than a defect — never a silent pass.
-            return (ws, "SKIP: launcher did not return in 45s; heal branch not observed")
-        return (ws, (p.stderr or "") + (p.stdout or ""))
+        # Redirect to FILES, never pipes. The launcher spawns a tmux server, and a
+        # surviving grandchild holding the read end keeps subprocess.run waiting for
+        # EOF long after the script itself exited — the hang is in the plumbing, not
+        # the launcher. stdin is closed so nothing can block on input either.
+        out_f = td / "launcher.out"
+        with open(out_f, "wb") as fh:
+            try:
+                subprocess.run(["/bin/bash", str(SCRIPT)], env=env, timeout=45,
+                               stdin=subprocess.DEVNULL, stdout=fh, stderr=fh)
+            except subprocess.TimeoutExpired:
+                # Inconclusive: the heal branch was never observed. Never a silent pass.
+                return (ws, "SKIP: launcher did not return in 45s; heal branch not observed")
+        return (ws, out_f.read_text(errors="replace"))
     finally:
         subprocess.run(["tmux", "-S", str(sock), "kill-server"],
-                       env=env, capture_output=True, timeout=30)
+                       env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=30)
 
 
 def case_heal_stamps_marker() -> list[str]:
