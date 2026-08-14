@@ -105,6 +105,21 @@ class TestContract(unittest.TestCase):
                      if p.name.startswith(".core-runtime.")]
         self.assertEqual(leftovers, [], f"temp file survived a failed replace: {leftovers}")
 
+    def test_cleanup_failure_does_not_mask_the_original_error(self):
+        # Both the publish AND its cleanup fail. The original OSError must still
+        # surface as a False return rather than being replaced by the unlink's.
+        real_replace, real_unlink = crm.os.replace, crm.os.unlink
+
+        def boom(*a, **k):
+            raise OSError("simulated failure")
+
+        crm.os.replace = boom
+        crm.os.unlink = boom
+        try:
+            self.assertFalse(crm.write_marker(self.ws, "claude", "s"))
+        finally:
+            crm.os.replace, crm.os.unlink = real_replace, real_unlink
+
     def test_marker_lands_even_when_the_log_cannot_be_written(self):
         # Partial failure must be reported, not swallowed: the marker is what
         # readers poll, so it still lands while the return value says not-all-ok.
@@ -133,6 +148,21 @@ class TestLauncherDelegation(unittest.TestCase):
 
     def test_codex_launcher_delegates(self):
         self._assert_delegates(CODEX_CLI, "codex")
+
+    def test_main_returns_in_process(self):
+        """Call main() directly, not only through a subprocess.
+
+        A subprocess proves the CLI is invocable but is invisible to coverage and
+        hides which branch ran; these assert the exit contract at the source.
+        """
+        ws = Path(tempfile.mkdtemp())
+        self.assertEqual(crm.main(["prog", str(ws), "codex", "sess"]), 0)
+        self.assertEqual(crm.main(["prog", "only-a-workspace"]), 2)      # usage
+        self.assertEqual(crm.main(["prog", str(ws), "gpt", "sess"]), 2)  # bad runtime
+        partial = Path(tempfile.mkdtemp())
+        (partial / "state").mkdir()
+        (partial / "state" / "session-starts.log").mkdir()
+        self.assertEqual(crm.main(["prog", str(partial), "claude", "sess"]), 1)
 
     def test_cli_entrypoint_works(self):
         ws = Path(tempfile.mkdtemp())
