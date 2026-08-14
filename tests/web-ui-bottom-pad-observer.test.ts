@@ -1,18 +1,5 @@
-/**
- * Deterministic regression for the fixed-panel clearance (#1858).
- *
- * The user-visible failure is that #bottom-panel is position:fixed and grows to
- * 50vh, so a static body padding-bottom stops reserving its space and the chat
- * transcript covers the dashboard. The fix keeps the two in sync via a
- * ResizeObserver on the panel.
- *
- * A browser-automation tab cannot witness this: it reports
- * visibilityState "hidden" and delivers no rAF or ResizeObserver callbacks, so
- * a reading taken there is decorative — the padding would look correct even if
- * the observer never fired, because nothing grew. This harness therefore
- * supplies its own observer AND proves that observer can deliver before it
- * trusts any later assertion.
- */
+// The harness supplies its own ResizeObserver and positively controls that it can
+// deliver, because a hidden automation tab fires no observer callbacks at all.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
