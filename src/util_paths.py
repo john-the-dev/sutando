@@ -29,7 +29,7 @@ from pathlib import Path
 # package-style as `src.util_paths` (repo root on sys.path — some tests), where
 # `src/` itself is not on the path and the bare sibling import would ModuleNotFound.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from sutando_config import config_get  # noqa: E402
+from sutando_config import config_get, config_get_env_first  # noqa: E402
 
 def _memory_dir_env() -> str | None:
     """Return the resolved memory-dir env value, preferring the new name.
@@ -42,7 +42,7 @@ def _memory_dir_env() -> str | None:
 
     Returns the raw env value (caller must `os.path.expanduser` if needed),
     or None when neither is set."""
-    new = config_get("SUTANDO_MEMORY_DIR")
+    new = config_get_env_first("SUTANDO_MEMORY_DIR")
     if new:
         return new
     legacy = os.environ.get("SUTANDO_PRIVATE_DIR")
@@ -272,7 +272,7 @@ def claude_home_path(*subpath: str) -> Path:
     directly to keep the read-side / write-side distinction visible.
     """
     ccd_env = os.environ.get("CLAUDE_CONFIG_DIR")
-    home_env = config_get("CLAUDE_HOME")
+    home_env = config_get_env_first("CLAUDE_HOME")
     if ccd_env:
         base = Path(os.path.expanduser(ccd_env))
     elif home_env:

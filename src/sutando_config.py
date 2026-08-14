@@ -739,6 +739,23 @@ def config_get(
     return default
 
 
+def config_get_env_first(
+    key: str,
+    default: Optional[str] = None,
+    repo_root: Optional[Path] = None,
+) -> Optional[str]:
+    """`config_get` with the precedence inverted — `os.environ` wins.
+
+    For documented escape hatches and bootstrap values only. An operator sets
+    these on the process to override a broken or stale config, so letting the
+    config file win would disable the very override they reached for.
+    """
+    val = os.environ.get(key)
+    if val is not None:
+        return val
+    return config_get(key, default, repo_root)
+
+
 def detect_env_workspace_in_dotenv(repo_root: Optional[Path] = None) -> Optional[str]:
     """Scan the repo's `.env` for `SUTANDO_WORKSPACE=` and return the value if
     found, else None. Used by the startup banner to warn users that their .env
