@@ -37,8 +37,23 @@ class SkillHookDiscovery(unittest.TestCase):
         event, token, cmd = rows[0]
         self.assertEqual(event, "PreToolUse")
         self.assertEqual(token, "g.py")
-        self.assertTrue(cmd.startswith("python3 "), cmd)
+        # The runner still has to be the one the suffix selects; it just no longer
+        # leads the command, because an existence guard runs first.
+        self.assertIn("exec python3 ", cmd)
         self.assertIn("skills/demo/hooks/g.py", cmd)
+
+    def test_a_vanished_script_allows_the_tool_instead_of_blocking_it(self):
+        """The registration outlives the file: `git checkout` of a branch predating
+        the skill deletes it, and a hook that cannot start blocks the tool it gates.
+
+        Fires the emitted command with the script deleted and requires exit 0 — an
+        absent guard must not be able to take the agent's tools away."""
+        d = self._skill("demo", {"name": "demo", "hooks": [
+            {"event": "PreToolUse", "command": "./hooks/g.py"}]}, hook_body="import sys; sys.exit(2)")
+        cmd = discover(self.repo)[0][2]
+        self.assertEqual(subprocess.run(cmd, shell=True).returncode, 2, "present guard must still block")
+        (d / "hooks" / "g.py").unlink()
+        self.assertEqual(subprocess.run(cmd, shell=True).returncode, 0, "absent guard must fail OPEN")
 
     def test_discovery_refuses_a_command_outside_the_declaring_skill(self):
         """A manifest must not be able to point core at a host executable."""
