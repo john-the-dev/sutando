@@ -104,9 +104,8 @@ HOOKS=(
 HOOK_PRIOR=()
 for _i in "${!HOOKS[@]}"; do HOOK_PRIOR+=(""); done
 
-# Skill-declared hooks. A skill owns its hook the way it owns its `tools`;
-# src/skill_hooks.py is the single discovery the health probe also reads.
-# NUL-framed (`-d ''`) because two of the four fields embed the repo path.
+# Skill-declared hooks via src/skill_hooks.py (the same discovery the health probe reads).
+# NUL-framed (-d '') because two of the four fields embed the repo path.
 while IFS= read -r -d '' _ev && IFS= read -r -d '' _tok \
    && IFS= read -r -d '' _cmd && IFS= read -r -d '' _prior; do
   [ -n "${_ev:-}" ] || continue

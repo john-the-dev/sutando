@@ -320,8 +320,7 @@ ok "and the repo-path hook is still installed on the same event" \
 rm -rf "$CROOT"
 
 # ---- upgrade path: a pre-existing runner-first skill hook must be MIGRATED ----
-# The outage case. An affected install already carries `python3 <path>`; if a
-# re-run only ADDS the guarded entry, the old one still fires and still blocks.
+# The outage case: a re-run must replace the old `python3 <path>` entry, not add beside it.
 UROOT="$(mktemp -d)"; UREPO="$UROOT/repo"
 mkdir -p "$UREPO/.claude" "$UREPO/src" "$UREPO/skills/demo/hooks"
 cp "$HERE/../src/install-claude-hooks.sh" "$UREPO/src/"
@@ -332,9 +331,8 @@ chmod +x "$UREPO/src/"*.sh
 printf '{"name":"demo","hooks":[{"event":"PreToolUse","command":"./hooks/g.py"}]}\n' \
     > "$UREPO/skills/demo/manifest.json"
 printf 'import sys; sys.exit(2)\n' > "$UREPO/skills/demo/hooks/g.py"
-# Resolve it: skill_hooks writes the RESOLVED path, and on macOS mktemp hands
-# back /var/... for /private/var/..., so an unresolved fixture seeds a string no
-# installer ever wrote and the migration would look broken when it is not.
+# Resolve the fixture path: skill_hooks writes RESOLVED paths, and macOS mktemp's
+# /var/... alias would seed a string no installer ever wrote (false migration failure).
 GPATH="$(python3 -c "import pathlib,sys;print(pathlib.Path(sys.argv[1]).resolve())" "$UREPO/skills/demo/hooks/g.py")"
 export U_SETTINGS="$UREPO/.claude/settings.json"
 # Seed EXACTLY what a previous installer wrote, plus an operator variant that
@@ -366,8 +364,7 @@ ok "with the script deleted the guarded hook exits 0 (tool not blocked)" "$?"
 rm -rf "$UROOT"
 
 # ---- same upgrade, on a repo path containing `exec ` and `|` ----
-# An ordinary path cannot catch this: `${CMD#*exec }` splits inside the path, and
-# the `|` exercises the field framing between skill_hooks and the reader.
+# `${CMD#*exec }` splits inside such a path; the `|` exercises the NUL field framing.
 EROOT="$(mktemp -d)"; EREPO="$EROOT/exec repo|x/repo"
 mkdir -p "$EREPO/.claude" "$EREPO/src" "$EREPO/skills/demo/hooks"
 cp "$HERE/../src/install-claude-hooks.sh" "$EREPO/src/"

@@ -28,13 +28,7 @@ def resolve_hook_command(skill_dir: Path, command: str) -> Path | None:
 
 def discover(repo_dir: Path) -> list[tuple[str, str, str, str]]:
     """(event, token, command, prior_command) per declared, present, enabled hook.
-
-    Skips rather than raises on anything malformed: a broken manifest must not
-    abort a whole install, and a hook declared but absent is not registrable.
-
-    `prior_command` is the unguarded form an earlier installer wrote, emitted here
-    because deriving it by splitting on `exec ` breaks on a path containing `exec `.
-    """
+    Skips malformed entries; prior_command is emitted (not derived by splitting on `exec `)."""
     out: list[tuple[str, str, str, str]] = []
     for manifest in sorted(Path(repo_dir).glob("skills/*/manifest.json")):
         try:
