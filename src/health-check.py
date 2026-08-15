@@ -3067,31 +3067,53 @@ def fix_down_bridges(checks: list) -> list:
             and c["status"] == "warn"
             and c.get("detail") == "configured but not running"
         ):
-            name = c["name"]
-            interp = _bridge_interpreter(name)
-            if interp is None:
-                # No interpreter that can import the bridge's dependency —
-                # spawning would just crash-loop (startup.sh skips it too).
-                continue
-            child_env = os.environ.copy()
-            if name == "slack-bridge":
-                # startup.sh sources channels/slack/.env so SLACK_BOT_TOKEN /
-                # SLACK_APP_TOKEN reach the child. Mirror that here; skip the
-                # restart if the env file / tokens are missing (fail-safe).
-                slack_env = _load_channel_env("slack")
-                if "SLACK_BOT_TOKEN" not in {**os.environ, **slack_env}:
-                    continue
-                child_env.update(slack_env)
-            log_path = WORKSPACE_DIR / "logs" / f"{name}.log"
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            # `with` closes the parent's handle after Popen; the child holds
-            # its own dup of the fd, so the log stays writable.
-            with open(str(log_path), "a") as log_f:
-                subprocess.Popen([interp, str(REPO_DIR / "src" / f"{name}.py")],
-                                 stdout=log_f, stderr=subprocess.STDOUT,
-                                 env=child_env, start_new_session=True)
-            restarted.append(name)
+            if _launch_bridge(c["name"]):
+                restarted.append(c["name"])
     return restarted
+
+
+def _bridge_launch_plan(name: str) -> "tuple[str, dict] | None":
+    """Resolve (interpreter, child_env) for launching a bridge, or None.
+
+    The single owner of bridge-launch policy for every health-check restart
+    path (down AND stale) — a launch that skips any part of it crash-loops
+    (issue #2904: the stale path used sys.executable, which can't import
+    slack_bolt, so "restarted (stale code)" killed a working slack-bridge).
+    Resolving the plan is side-effect-free so callers that must kill an old
+    process first can confirm a relaunch is possible BEFORE killing.
+    """
+    interp = _bridge_interpreter(name)
+    if interp is None:
+        # No interpreter that can import the bridge's dependency —
+        # spawning would just crash-loop (startup.sh skips it too).
+        return None
+    child_env = os.environ.copy()
+    if name == "slack-bridge":
+        # startup.sh sources channels/slack/.env so SLACK_BOT_TOKEN /
+        # SLACK_APP_TOKEN reach the child. Mirror that here; skip the
+        # restart if the env file / tokens are missing (fail-safe).
+        slack_env = _load_channel_env("slack")
+        if "SLACK_BOT_TOKEN" not in {**os.environ, **slack_env}:
+            return None
+        child_env.update(slack_env)
+    return interp, child_env
+
+
+def _launch_bridge(name: str, plan: "tuple[str, dict] | None" = None) -> bool:
+    """Spawn a bridge per _bridge_launch_plan; True if spawned."""
+    plan = plan or _bridge_launch_plan(name)
+    if plan is None:
+        return False
+    interp, child_env = plan
+    log_path = WORKSPACE_DIR / "logs" / f"{name}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # `with` closes the parent's handle after Popen; the child holds
+    # its own dup of the fd, so the log stays writable.
+    with open(str(log_path), "a") as log_f:
+        subprocess.Popen([interp, str(REPO_DIR / "src" / f"{name}.py")],
+                         stdout=log_f, stderr=subprocess.STDOUT,
+                         env=child_env, start_new_session=True)
+    return True
 
 
 # Interpreter candidates, in the same priority order startup.sh probes. First
@@ -9235,6 +9257,14 @@ def main():
                     if "LoginFailure" in c.get("detail", "") or "token invalid" in c.get("detail", ""):
                         print(f"  {c['name']}: token invalid — regenerate at discord.com/developers/applications (no restart)")
                     else:
+                        # Resolve the launch plan BEFORE any kill: if no
+                        # capable interpreter/env exists, killing a working
+                        # stale bridge would turn a warning into an outage
+                        # (issue #2904).
+                        plan = _bridge_launch_plan(c["name"])
+                        if plan is None:
+                            print(f"  {c['name']}: no capable interpreter/env — restart skipped (see startup.sh launch requirements)")
+                            continue
                         # If stale (process older than source code), kill old PID first
                         # so the new process doesn't conflict with a still-running zombie.
                         if c["status"] == "stale":
@@ -9256,14 +9286,10 @@ def main():
                                 import time as _t; _t.sleep(1)
                             except Exception:
                                 pass
-                        # Use sys.executable to avoid launchd's minimal PATH
-                        # resolving `python3` to /usr/bin/python3 (3.9), which
-                        # doesn't have the homebrew site-packages (discord,
-                        # dotenv, etc.) — restart would crash on import.
-                        # Log path uses logs/ (post-PR #251 refactor).
-                        subprocess.Popen([sys.executable, str(REPO_DIR / "src" / f"{c['name']}.py")],
-                                         stdout=open(str(WORKSPACE_DIR / "logs" / f"{c['name']}.log"), "a"),
-                                         stderr=subprocess.STDOUT, start_new_session=True)
+                        # Same launch policy as the down path — interpreter
+                        # probe + channel env; a bare sys.executable spawn
+                        # crash-loops on missing imports (issue #2904).
+                        _launch_bridge(c["name"], plan)
                         print(f"  {c['name']}: {'restarted (stale code)' if c['status'] == 'stale' else 'restarted'}")
                 elif c["name"] == "sutando-app":
                     # Two distinct failure modes:

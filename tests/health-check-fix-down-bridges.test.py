@@ -413,6 +413,81 @@ def case_n_load_channel_env_unreadable_file() -> list[str]:
     return fails
 
 
+def _run_main_fix_with_stale(checks: list, plan):
+    """Drive main() --fix with the given checks in `issues`; return
+    (stdout, spawn argvs, killed pids). _bridge_launch_plan is stubbed to
+    `plan` so the stale branch's pre-kill gate is exercised deterministically.
+    """
+    spawned, killed = [], []
+    real_run = hc.subprocess.run
+
+    def fake_popen(argv, **kwargs):
+        spawned.append(argv)
+        return mock.MagicMock()
+
+    def fake_run(argv, *args, **kwargs):
+        if isinstance(argv, list) and argv and argv[0] == "/usr/bin/pgrep":
+            return subprocess.CompletedProcess(argv, 0, stdout="4242\n", stderr="")
+        if isinstance(argv, list) and argv and argv[0] == "/bin/kill":
+            killed.append(argv[1])
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        return real_run(argv, *args, **kwargs)
+
+    captured = io.StringIO()
+    with tempfile.TemporaryDirectory() as td:
+        with mock.patch.object(sys, "argv", ["health-check.py", "--fix"]), \
+             mock.patch.object(hc, "WORKSPACE_DIR", Path(td)), \
+             mock.patch.object(hc, "run_all_checks", return_value=checks), \
+             mock.patch.object(hc, "fix_down_bridges", return_value=[]), \
+             mock.patch.object(hc, "_bridge_launch_plan", return_value=plan), \
+             mock.patch.object(hc.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(hc.subprocess, "Popen", side_effect=fake_popen), \
+             mock.patch("time.sleep", lambda *_: None):
+            try:
+                with redirect_stdout(captured):
+                    hc.main()
+            except SystemExit:
+                pass
+    return captured.getvalue(), spawned, killed
+
+
+def case_o_stale_restart_uses_launch_plan() -> list[str]:
+    """Stale path (issue #2904): a stale bridge is relaunched via the shared
+    launch plan (probed interpreter + channel env) — never bare sys.executable.
+    """
+    fails = []
+    checks = [check("slack-bridge", "stale", "running but code is 99 min newer than process — restart needed")]
+    plan = ("/usr/local/bin/python3-probed", dict(os.environ))
+    out, spawned, killed = _run_main_fix_with_stale(checks, plan)
+    if "slack-bridge: restarted (stale code)" not in out:
+        fails.append(f"o) missing 'restarted (stale code)' line; got: {out!r}")
+    if killed != ["4242"]:
+        fails.append(f"o) expected old pid 4242 killed, got {killed}")
+    if len(spawned) != 1 or spawned[0][0] != "/usr/local/bin/python3-probed":
+        fails.append(f"o) spawn must use the plan's interpreter, got {spawned}")
+    if any(argv[0] == sys.executable for argv in spawned):
+        fails.append("o) stale restart still used sys.executable")
+    return fails
+
+
+def case_p_stale_no_plan_skips_without_kill() -> list[str]:
+    """Stale path (issue #2904): when no capable interpreter/env exists, the
+    stale bridge is left RUNNING — no kill, no spawn — because killing a
+    working stale bridge and failing the relaunch turns a warning into an
+    outage.
+    """
+    fails = []
+    checks = [check("slack-bridge", "stale", "running but code is 99 min newer than process — restart needed")]
+    out, spawned, killed = _run_main_fix_with_stale(checks, plan=None)
+    if killed:
+        fails.append(f"p) killed a stale bridge with no relaunch plan: {killed}")
+    if spawned:
+        fails.append(f"p) spawned despite missing plan: {spawned}")
+    if "restart skipped" not in out:
+        fails.append(f"p) missing skip message; got: {out!r}")
+    return fails
+
+
 def main() -> int:
     all_fails = []
     for case in (case_a_down_bridges_restarted, case_b_other_bridge_warns_untouched,
@@ -426,7 +501,9 @@ def main() -> int:
                  case_k_bridge_interpreter_none_when_no_capable,
                  case_l_load_channel_env_parses_file,
                  case_m_load_channel_env_absent_file,
-                 case_n_load_channel_env_unreadable_file):
+                 case_n_load_channel_env_unreadable_file,
+                 case_o_stale_restart_uses_launch_plan,
+                 case_p_stale_no_plan_skips_without_kill):
         fails = case()
         status = "PASS" if not fails else "FAIL"
         print(f"  {status} {case.__name__}")
