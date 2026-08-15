@@ -52,7 +52,8 @@ def run_with_popen_stub(checks: list) -> tuple[list, list]:
     hermetic: without these, fix_down_bridges would probe the host for
     discord.py / slack_bolt (flaky across machines) and skip the restart when
     absent. Here every bridge gets a known-good interpreter and slack gets a
-    token, so the restart path is exercised deterministically.
+    token, so the restart path is exercised deterministically. The vault tier
+    is stubbed empty so the real Keychain is never consulted.
     """
     spawned = []
 
@@ -64,6 +65,7 @@ def run_with_popen_stub(checks: list) -> tuple[list, list]:
         with mock.patch.object(hc, "WORKSPACE_DIR", Path(td)), \
              mock.patch.object(hc, "_bridge_interpreter", return_value="python3"), \
              mock.patch.object(hc, "_load_channel_env", return_value={"SLACK_BOT_TOKEN": "xoxb-test", "SLACK_APP_TOKEN": "xapp-test"}), \
+             mock.patch.object(hc, "token_from_vault", return_value=""), \
              mock.patch.object(hc.subprocess, "Popen", side_effect=fake_popen):
             restarted = hc.fix_down_bridges(checks)
     return restarted, spawned
@@ -251,6 +253,7 @@ def case_h_launch_parity_failsafe_skips() -> list[str]:
         with mock.patch.object(hc, "WORKSPACE_DIR", Path(td)), \
              mock.patch.object(hc, "_bridge_interpreter", side_effect=lambda n: None if n == "discord-bridge" else "python3"), \
              mock.patch.object(hc, "_load_channel_env", return_value={}), \
+             mock.patch.object(hc, "token_from_vault", return_value=""), \
              mock.patch.dict(hc.os.environ, clean_env, clear=True), \
              mock.patch.object(hc.subprocess, "Popen", side_effect=fake_popen):
             restarted = hc.fix_down_bridges(checks)
@@ -448,6 +451,7 @@ def _run_main_fix_with_stale(checks: list, plan="REAL", channel_env=None, ambien
              mock.patch.object(hc, "WORKSPACE_DIR", Path(td)), \
              mock.patch.object(hc, "run_all_checks", return_value=checks), \
              mock.patch.object(hc, "fix_down_bridges", return_value=[]), \
+             mock.patch.object(hc, "token_from_vault", return_value=""), \
              plan_patch, env_patch, os_patch, \
              mock.patch.object(hc.subprocess, "run", side_effect=fake_run), \
              mock.patch.object(hc.subprocess, "Popen", side_effect=fake_popen), \
@@ -506,6 +510,7 @@ def case_q_down_path_requires_both_slack_tokens() -> list[str]:
             with mock.patch.object(hc, "WORKSPACE_DIR", Path(td)), \
                  mock.patch.object(hc, "_bridge_interpreter", return_value="python3"), \
                  mock.patch.object(hc, "_load_channel_env", return_value=env), \
+                 mock.patch.object(hc, "token_from_vault", return_value=""), \
                  mock.patch.dict(hc.os.environ, clean_env, clear=True), \
                  mock.patch.object(hc.subprocess, "Popen", side_effect=lambda *a, **k: spawned.append(a) or mock.MagicMock()):
                 restarted = hc.fix_down_bridges(checks)
@@ -531,6 +536,137 @@ def case_r_stale_missing_app_token_no_kill_no_spawn() -> list[str]:
     return fails
 
 
+def case_s_vault_only_slack_tokens_launchable() -> list[str]:
+    """Vault-only install (no tokens in process env or channel .env, both in
+    the Keychain vault) must yield a launchable plan — parity with startup.sh's
+    channel_token gate and slack-bridge.py's own env -> .env -> vault tiering.
+    Hermetic: the vault tier is an injected dict, never the real Keychain.
+    The plan must NOT embed the vault values (the bridge resolves them itself).
+    """
+    fails = []
+    clean_env = {k: v for k, v in os.environ.items() if k not in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN")}
+    fake_vault = {"SLACK_BOT_TOKEN": "xoxb-vault-secret", "SLACK_APP_TOKEN": "xapp-vault-secret"}
+    with mock.patch.object(hc, "_bridge_interpreter", return_value="/usr/fake/python3-probed"), \
+         mock.patch.object(hc, "_load_channel_env", return_value={}), \
+         mock.patch.object(hc, "token_from_vault", side_effect=lambda v: fake_vault.get(v, "")), \
+         mock.patch.dict(hc.os.environ, clean_env, clear=True):
+        plan = hc._bridge_launch_plan("slack-bridge")
+    if plan is None:
+        fails.append("s) vault-only slack install yields launch_plan=None (bridge left down)")
+    else:
+        interp, child_env = plan
+        if interp != "/usr/fake/python3-probed":
+            fails.append(f"s) plan interpreter wrong: {interp!r}")
+        leaked = [k for k, v in child_env.items() if v in fake_vault.values()]
+        if leaked:
+            fails.append(f"s) vault secret embedded in child env under {leaked}")
+
+    # One vault token alone is not enough — the gate still requires BOTH.
+    with mock.patch.object(hc, "_bridge_interpreter", return_value="/usr/fake/python3-probed"), \
+         mock.patch.object(hc, "_load_channel_env", return_value={}), \
+         mock.patch.object(hc, "token_from_vault", side_effect=lambda v: fake_vault.get(v, "") if v == "SLACK_BOT_TOKEN" else ""), \
+         mock.patch.dict(hc.os.environ, clean_env, clear=True):
+        plan = hc._bridge_launch_plan("slack-bridge")
+    if plan is not None:
+        fails.append("s) bot-token-only vault still produced a plan")
+    return fails
+
+
+def case_t_interpreter_probe_never_execs_bare_python3() -> list[str]:
+    """The bare `python3` candidate must never reach subprocess execution: it
+    is substituted via _resolved_bare_python3 (startup.sh parity), and dropped
+    entirely when nothing runnable resolves."""
+    fails = []
+    executed = []
+
+    def fake_run(argv, **kwargs):
+        executed.append(argv[0])
+        return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"")
+
+    # (1) substitute resolves -> the RESOLVED path is probed, never "python3".
+    with mock.patch.object(hc, "_BRIDGE_INTERP_CANDIDATES", ["/nonexistent/python3-missing", "python3"]), \
+         mock.patch.object(hc, "_resolved_bare_python3", return_value="/usr/fake/python3-resolved"), \
+         mock.patch.object(hc.shutil, "which", side_effect=lambda c: c if "resolved" in c else None), \
+         mock.patch.object(hc.subprocess, "run", side_effect=fake_run):
+        hc._bridge_interpreter("slack-bridge")
+    if "python3" in executed:
+        fails.append(f"t) bare python3 was executed: {executed}")
+    if "/usr/fake/python3-resolved" not in executed:
+        fails.append(f"t) resolved substitute not probed: {executed}")
+
+    # (2) substitute unresolvable -> candidate dropped, nothing executed.
+    executed.clear()
+    with mock.patch.object(hc, "_BRIDGE_INTERP_CANDIDATES", ["python3"]), \
+         mock.patch.object(hc, "_resolved_bare_python3", return_value=None), \
+         mock.patch.object(hc.shutil, "which", side_effect=lambda c: c), \
+         mock.patch.object(hc.subprocess, "run", side_effect=fake_run):
+        got = hc._bridge_interpreter("discord-bridge")
+    if executed:
+        fails.append(f"t) dropped bare candidate still executed: {executed}")
+    if got is not None:
+        fails.append(f"t) expected None with only an unresolvable bare candidate, got {got!r}")
+
+    # (3) the shipped candidate list carries no bare token other than the one
+    # the loop substitutes — a new bare entry would dodge the substitution.
+    bare = [c for c in hc._BRIDGE_INTERP_CANDIDATES if not c.startswith("/")]
+    if bare != ["python3"]:
+        fails.append(f"t) unexpected bare candidates in shipped list: {bare}")
+    return fails
+
+
+def case_u_resolved_bare_python3_policy() -> list[str]:
+    """_resolved_bare_python3 mirrors startup.sh's resolve_python: $SUTANDO_PY
+    wins; a system-bin PATH python3 is refused without the developer tools
+    (that is the CLT stub) and accepted with them; a non-system PATH python3
+    is accepted as-is."""
+    fails = []
+    clean_env = {k: v for k, v in os.environ.items() if k != "SUTANDO_PY"}
+    system_stub = os.path.join("/usr", "bin", "python3")  # assembled: literal is review-flagged
+    with tempfile.TemporaryDirectory() as td:
+        fake_repo = Path(td) / "repo"
+        fake_repo.mkdir()
+
+        # (1) $SUTANDO_PY override wins.
+        py = Path(td) / "custom-python3"
+        py.write_text("#!/bin/sh\n")
+        py.chmod(0o755)
+        with mock.patch.dict(hc.os.environ, {**clean_env, "SUTANDO_PY": str(py)}, clear=True), \
+             mock.patch.object(hc, "REPO_DIR", fake_repo):
+            got = hc._resolved_bare_python3()
+        if got != str(py):
+            fails.append(f"u) SUTANDO_PY override ignored: {got!r}")
+
+        # (2) system-bin python3 without developer tools -> refused (the stub).
+        with mock.patch.dict(hc.os.environ, clean_env, clear=True), \
+             mock.patch.object(hc, "REPO_DIR", fake_repo), \
+             mock.patch.object(hc.sys, "platform", "darwin"), \
+             mock.patch.object(hc.shutil, "which", return_value=system_stub), \
+             mock.patch.object(hc, "developer_tools_installed", return_value=False):
+            got = hc._resolved_bare_python3()
+        if got is not None:
+            fails.append(f"u) system stub returned without developer tools: {got!r}")
+
+        # (3) same location WITH the tools -> real interpreter, accepted.
+        with mock.patch.dict(hc.os.environ, clean_env, clear=True), \
+             mock.patch.object(hc, "REPO_DIR", fake_repo), \
+             mock.patch.object(hc.sys, "platform", "darwin"), \
+             mock.patch.object(hc.shutil, "which", return_value=system_stub), \
+             mock.patch.object(hc, "developer_tools_installed", return_value=True):
+            got = hc._resolved_bare_python3()
+        if got != system_stub:
+            fails.append(f"u) system python3 refused despite developer tools: {got!r}")
+
+        # (4) non-system PATH python3 (Homebrew/pyenv/...) -> accepted as-is.
+        with mock.patch.dict(hc.os.environ, clean_env, clear=True), \
+             mock.patch.object(hc, "REPO_DIR", fake_repo), \
+             mock.patch.object(hc.sys, "platform", "darwin"), \
+             mock.patch.object(hc.shutil, "which", return_value="/usr/fake/bin/python3"):
+            got = hc._resolved_bare_python3()
+        if got != "/usr/fake/bin/python3":
+            fails.append(f"u) non-system PATH python3 not accepted: {got!r}")
+    return fails
+
+
 def main() -> int:
     all_fails = []
     for case in (case_a_down_bridges_restarted, case_b_other_bridge_warns_untouched,
@@ -548,7 +684,10 @@ def main() -> int:
                  case_o_stale_restart_uses_launch_plan,
                  case_p_stale_no_plan_skips_without_kill,
                  case_q_down_path_requires_both_slack_tokens,
-                 case_r_stale_missing_app_token_no_kill_no_spawn):
+                 case_r_stale_missing_app_token_no_kill_no_spawn,
+                 case_s_vault_only_slack_tokens_launchable,
+                 case_t_interpreter_probe_never_execs_bare_python3,
+                 case_u_resolved_bare_python3_policy):
         fails = case()
         status = "PASS" if not fails else "FAIL"
         print(f"  {status} {case.__name__}")

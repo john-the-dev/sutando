@@ -51,6 +51,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 # bends here rather than the guard.
 from git_binary import git_argv  # noqa: E402
 from git_binary import GitUnavailable  # noqa: E402
+from git_binary import developer_tools_installed  # noqa: E402
+from channel_token import token_from_vault  # noqa: E402
 from util_paths import _host_label, claude_home_path, claude_project_slug, legacy_dotted_workspace, shared_personal_path  # noqa: E402
 from workspace_default import resolve_workspace, status_read_path  # noqa: E402
 from sutando_config import resolve_core_runtime  # noqa: E402
@@ -3081,12 +3083,14 @@ def _bridge_launch_plan(name: str) -> "tuple[str, dict] | None":
         return None
     child_env = os.environ.copy()
     if name == "slack-bridge":
-        # slack-bridge exits without BOTH tokens non-empty (empty string = missing,
-        # matching slack-bridge.py's own treatment).
+        # slack-bridge exits without BOTH tokens non-empty; the Keychain vault is
+        # a real source (same env -> .env -> vault tiering as the bridge itself).
         slack_env = _load_channel_env("slack")
         merged = {**os.environ, **slack_env}
-        if not merged.get("SLACK_BOT_TOKEN") or not merged.get("SLACK_APP_TOKEN"):
+        if not all(merged.get(v) or token_from_vault(v)
+                   for v in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN")):
             return None
+        # Vault values stay out of the plan — the bridge resolves them itself.
         child_env.update(slack_env)
     return interp, child_env
 
@@ -3128,11 +3132,21 @@ def _bridge_interpreter(name: str) -> "str | None":
     bridges with no hard import gate (telegram), return sys.executable.
     Returns None when no candidate can import the required module (caller then
     skips the restart, matching startup.sh's labeled-skip behavior).
+
+    The bare `python3` candidate is substituted via _resolved_bare_python3
+    before probing — same substitution startup.sh's probe loops apply to it —
+    because the probe EXECUTES the candidate, and on a Mac without the
+    developer tools a bare `python3` is the Xcode-CLT stub.
     """
     required = _BRIDGE_REQUIRED_IMPORT.get(name)
     if required is None:
         return sys.executable
     for cand in _BRIDGE_INTERP_CANDIDATES:
+        if cand == "python3":
+            resolved = _resolved_bare_python3()
+            if resolved is None:
+                continue
+            cand = resolved
         try:
             if shutil.which(cand) is None and not Path(cand).exists():
                 continue
@@ -3143,6 +3157,36 @@ def _bridge_interpreter(name: str) -> "str | None":
         except (subprocess.TimeoutExpired, OSError):
             continue
     return None
+
+
+def _resolved_bare_python3() -> "str | None":
+    """Safe stand-in for the bare `python3` candidate, mirroring startup.sh's
+    resolve_python (scripts/python-binary.sh).
+
+    On a Mac without the Xcode Command Line Tools, PATH `python3` is the CLT
+    stub: executing it (which a probe does) raises the modal install dialog
+    before it can fail, so neither `2>/dev/null` nor an exit-code check helps.
+    Order: $SUTANDO_PY override, then the bundled runtime interpreter, then
+    PATH python3 only when it does not live in the system bin directory (or
+    the developer tools are installed, which makes the system python3 real).
+    Returns None when nothing runnable exists — the caller drops the candidate
+    rather than degrade to the stub.
+    """
+    override = os.environ.get("SUTANDO_PY", "")
+    if override and os.access(override, os.X_OK):
+        return override
+    bundled = REPO_DIR.parent / "runtime" / "python" / "bin" / "python3"
+    if os.access(bundled, os.X_OK):
+        return str(bundled)
+    path_py = shutil.which("python3")
+    if not path_py:
+        return None
+    if sys.platform != "darwin":
+        return path_py
+    # Directory compare, not full-path (versioned siblings share the inode).
+    if os.path.realpath(os.path.dirname(path_py)) != os.path.realpath("/usr/bin"):
+        return path_py
+    return path_py if developer_tools_installed() else None
 
 
 def _load_channel_env(channel: str) -> dict:
