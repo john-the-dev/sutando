@@ -3134,9 +3134,7 @@ def _bridge_interpreter(name: str) -> "str | None":
     skips the restart, matching startup.sh's labeled-skip behavior).
 
     The bare `python3` candidate is substituted via _resolved_bare_python3
-    before probing — same substitution startup.sh's probe loops apply to it —
-    because the probe EXECUTES the candidate, and on a Mac without the
-    developer tools a bare `python3` is the Xcode-CLT stub.
+    before probing — probing executes it, and bare python3 can be the CLT stub.
     """
     required = _BRIDGE_REQUIRED_IMPORT.get(name)
     if required is None:
@@ -3160,18 +3158,8 @@ def _bridge_interpreter(name: str) -> "str | None":
 
 
 def _resolved_bare_python3() -> "str | None":
-    """Safe stand-in for the bare `python3` candidate, mirroring startup.sh's
-    resolve_python (scripts/python-binary.sh).
-
-    On a Mac without the Xcode Command Line Tools, PATH `python3` is the CLT
-    stub: executing it (which a probe does) raises the modal install dialog
-    before it can fail, so neither `2>/dev/null` nor an exit-code check helps.
-    Order: $SUTANDO_PY override, then the bundled runtime interpreter, then
-    PATH python3 only when it does not live in the system bin directory (or
-    the developer tools are installed, which makes the system python3 real).
-    Returns None when nothing runnable exists — the caller drops the candidate
-    rather than degrade to the stub.
-    """
+    """Stand-in for the bare `python3` candidate, mirroring startup.sh's
+    resolve_python: never return the Xcode-CLT stub (executing it pops a modal)."""
     override = os.environ.get("SUTANDO_PY", "")
     if override and os.access(override, os.X_OK):
         return override

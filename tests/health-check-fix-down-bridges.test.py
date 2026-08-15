@@ -52,8 +52,8 @@ def run_with_popen_stub(checks: list) -> tuple[list, list]:
     hermetic: without these, fix_down_bridges would probe the host for
     discord.py / slack_bolt (flaky across machines) and skip the restart when
     absent. Here every bridge gets a known-good interpreter and slack gets a
-    token, so the restart path is exercised deterministically. The vault tier
-    is stubbed empty so the real Keychain is never consulted.
+    token, so the restart path is exercised deterministically; the vault tier
+    is stubbed empty (never the real Keychain).
     """
     spawned = []
 
@@ -537,12 +537,8 @@ def case_r_stale_missing_app_token_no_kill_no_spawn() -> list[str]:
 
 
 def case_s_vault_only_slack_tokens_launchable() -> list[str]:
-    """Vault-only install (no tokens in process env or channel .env, both in
-    the Keychain vault) must yield a launchable plan — parity with startup.sh's
-    channel_token gate and slack-bridge.py's own env -> .env -> vault tiering.
-    Hermetic: the vault tier is an injected dict, never the real Keychain.
-    The plan must NOT embed the vault values (the bridge resolves them itself).
-    """
+    """Vault-only slack install (tokens only in the Keychain vault, injected
+    here) must yield a launchable plan with no secrets embedded in the env."""
     fails = []
     clean_env = {k: v for k, v in os.environ.items() if k not in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN")}
     fake_vault = {"SLACK_BOT_TOKEN": "xoxb-vault-secret", "SLACK_APP_TOKEN": "xapp-vault-secret"}
@@ -573,9 +569,8 @@ def case_s_vault_only_slack_tokens_launchable() -> list[str]:
 
 
 def case_t_interpreter_probe_never_execs_bare_python3() -> list[str]:
-    """The bare `python3` candidate must never reach subprocess execution: it
-    is substituted via _resolved_bare_python3 (startup.sh parity), and dropped
-    entirely when nothing runnable resolves."""
+    """The bare `python3` candidate never reaches subprocess execution: it is
+    substituted via _resolved_bare_python3, and dropped when unresolvable."""
     fails = []
     executed = []
 
@@ -615,10 +610,8 @@ def case_t_interpreter_probe_never_execs_bare_python3() -> list[str]:
 
 
 def case_u_resolved_bare_python3_policy() -> list[str]:
-    """_resolved_bare_python3 mirrors startup.sh's resolve_python: $SUTANDO_PY
-    wins; a system-bin PATH python3 is refused without the developer tools
-    (that is the CLT stub) and accepted with them; a non-system PATH python3
-    is accepted as-is."""
+    """_resolved_bare_python3 walks startup.sh's order ($SUTANDO_PY, bundled,
+    PATH) and refuses a system-bin python3 unless the developer tools exist."""
     fails = []
     clean_env = {k: v for k, v in os.environ.items() if k != "SUTANDO_PY"}
     system_stub = os.path.join("/usr", "bin", "python3")  # assembled: literal is review-flagged
@@ -664,6 +657,36 @@ def case_u_resolved_bare_python3_policy() -> list[str]:
             got = hc._resolved_bare_python3()
         if got != "/usr/fake/bin/python3":
             fails.append(f"u) non-system PATH python3 not accepted: {got!r}")
+
+        # (5) bundled runtime interpreter beside the repo wins over PATH.
+        bundled = Path(td) / "runtime" / "python" / "bin" / "python3"
+        bundled.parent.mkdir(parents=True, exist_ok=True)
+        bundled.write_text("#!/bin/sh\n")
+        bundled.chmod(0o755)
+        with mock.patch.dict(hc.os.environ, clean_env, clear=True), \
+             mock.patch.object(hc, "REPO_DIR", fake_repo), \
+             mock.patch.object(hc.shutil, "which", return_value="/usr/fake/bin/python3"):
+            got = hc._resolved_bare_python3()
+        if got != str(bundled):
+            fails.append(f"u) bundled runtime interpreter not preferred: {got!r}")
+        bundled.unlink()
+
+        # (6) nothing on PATH and no bundled runtime -> None (candidate dropped).
+        with mock.patch.dict(hc.os.environ, clean_env, clear=True), \
+             mock.patch.object(hc, "REPO_DIR", fake_repo), \
+             mock.patch.object(hc.shutil, "which", return_value=None):
+            got = hc._resolved_bare_python3()
+        if got is not None:
+            fails.append(f"u) expected None with no runnable python3, got {got!r}")
+
+        # (7) non-darwin: no CLT stub exists, PATH python3 accepted directly.
+        with mock.patch.dict(hc.os.environ, clean_env, clear=True), \
+             mock.patch.object(hc, "REPO_DIR", fake_repo), \
+             mock.patch.object(hc.sys, "platform", "linux"), \
+             mock.patch.object(hc.shutil, "which", return_value="/usr/fake/bin/python3"):
+            got = hc._resolved_bare_python3()
+        if got != "/usr/fake/bin/python3":
+            fails.append(f"u) non-darwin PATH python3 not accepted: {got!r}")
     return fails
 
 
