@@ -3073,27 +3073,18 @@ def fix_down_bridges(checks: list) -> list:
 
 
 def _bridge_launch_plan(name: str) -> "tuple[str, dict] | None":
-    """Resolve (interpreter, child_env) for launching a bridge, or None.
-
-    The single owner of bridge-launch policy for every health-check restart
-    path (down AND stale) — a launch that skips any part of it crash-loops
-    (issue #2904: the stale path used sys.executable, which can't import
-    slack_bolt, so "restarted (stale code)" killed a working slack-bridge).
-    Resolving the plan is side-effect-free so callers that must kill an old
-    process first can confirm a relaunch is possible BEFORE killing.
-    """
+    """Single owner of bridge-launch policy for every restart path (down and
+    stale); side-effect-free so stale callers can confirm a relaunch pre-kill."""
     interp = _bridge_interpreter(name)
     if interp is None:
-        # No interpreter that can import the bridge's dependency —
-        # spawning would just crash-loop (startup.sh skips it too).
+        # No interpreter can import the bridge's dependency (startup.sh skips too).
         return None
     child_env = os.environ.copy()
     if name == "slack-bridge":
-        # startup.sh sources channels/slack/.env so SLACK_BOT_TOKEN /
-        # SLACK_APP_TOKEN reach the child. Mirror that here; skip the
-        # restart if the env file / tokens are missing (fail-safe).
+        # slack-bridge exits without BOTH tokens (same contract startup.sh gates on).
         slack_env = _load_channel_env("slack")
-        if "SLACK_BOT_TOKEN" not in {**os.environ, **slack_env}:
+        merged = {**os.environ, **slack_env}
+        if "SLACK_BOT_TOKEN" not in merged or "SLACK_APP_TOKEN" not in merged:
             return None
         child_env.update(slack_env)
     return interp, child_env
@@ -9257,10 +9248,8 @@ def main():
                     if "LoginFailure" in c.get("detail", "") or "token invalid" in c.get("detail", ""):
                         print(f"  {c['name']}: token invalid — regenerate at discord.com/developers/applications (no restart)")
                     else:
-                        # Resolve the launch plan BEFORE any kill: if no
-                        # capable interpreter/env exists, killing a working
-                        # stale bridge would turn a warning into an outage
-                        # (issue #2904).
+                        # Plan BEFORE any kill: killing a working stale bridge
+                        # with no viable relaunch turns a warning into an outage.
                         plan = _bridge_launch_plan(c["name"])
                         if plan is None:
                             print(f"  {c['name']}: no capable interpreter/env — restart skipped (see startup.sh launch requirements)")
@@ -9286,9 +9275,8 @@ def main():
                                 import time as _t; _t.sleep(1)
                             except Exception:
                                 pass
-                        # Same launch policy as the down path — interpreter
-                        # probe + channel env; a bare sys.executable spawn
-                        # crash-loops on missing imports (issue #2904).
+                        # Shared launch policy — a bare sys.executable spawn
+                        # crash-loops on missing imports.
                         _launch_bridge(c["name"], plan)
                         print(f"  {c['name']}: {'restarted (stale code)' if c['status'] == 'stale' else 'restarted'}")
                 elif c["name"] == "sutando-app":

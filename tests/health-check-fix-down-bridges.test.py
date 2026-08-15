@@ -63,7 +63,7 @@ def run_with_popen_stub(checks: list) -> tuple[list, list]:
     with tempfile.TemporaryDirectory() as td:
         with mock.patch.object(hc, "WORKSPACE_DIR", Path(td)), \
              mock.patch.object(hc, "_bridge_interpreter", return_value="python3"), \
-             mock.patch.object(hc, "_load_channel_env", return_value={"SLACK_BOT_TOKEN": "xoxb-test"}), \
+             mock.patch.object(hc, "_load_channel_env", return_value={"SLACK_BOT_TOKEN": "xoxb-test", "SLACK_APP_TOKEN": "xapp-test"}), \
              mock.patch.object(hc.subprocess, "Popen", side_effect=fake_popen):
             restarted = hc.fix_down_bridges(checks)
     return restarted, spawned
@@ -246,7 +246,7 @@ def case_h_launch_parity_failsafe_skips() -> list[str]:
     ]
     # discord: no capable interpreter (None). slack: interpreter fine but env
     # has no token — and ensure the ambient env doesn't carry one either.
-    clean_env = {k: v for k, v in os.environ.items() if k != "SLACK_BOT_TOKEN"}
+    clean_env = {k: v for k, v in os.environ.items() if k not in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN")}
     with tempfile.TemporaryDirectory() as td:
         with mock.patch.object(hc, "WORKSPACE_DIR", Path(td)), \
              mock.patch.object(hc, "_bridge_interpreter", side_effect=lambda n: None if n == "discord-bridge" else "python3"), \
@@ -413,11 +413,9 @@ def case_n_load_channel_env_unreadable_file() -> list[str]:
     return fails
 
 
-def _run_main_fix_with_stale(checks: list, plan):
-    """Drive main() --fix with the given checks in `issues`; return
-    (stdout, spawn argvs, killed pids). _bridge_launch_plan is stubbed to
-    `plan` so the stale branch's pre-kill gate is exercised deterministically.
-    """
+def _run_main_fix_with_stale(checks: list, plan="REAL", channel_env=None, ambient_env=None):
+    """Drive main() --fix with `checks` in issues; return (stdout, spawns, kills).
+    plan="REAL" resolves the real plan (interpreter stubbed, channel env/ambient injectable)."""
     spawned, killed = [], []
     real_run = hc.subprocess.run
 
@@ -433,13 +431,24 @@ def _run_main_fix_with_stale(checks: list, plan):
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         return real_run(argv, *args, **kwargs)
 
+    if plan == "REAL":
+        plan_patch = mock.patch.object(hc, "_bridge_interpreter", return_value="/usr/local/bin/python3-probed")
+        env_patch = mock.patch.object(hc, "_load_channel_env", return_value=channel_env or {})
+        ambient = ambient_env if ambient_env is not None else {
+            k: v for k, v in os.environ.items() if k not in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN")}
+        os_patch = mock.patch.dict(hc.os.environ, ambient, clear=True)
+    else:
+        plan_patch = mock.patch.object(hc, "_bridge_launch_plan", return_value=plan)
+        env_patch = mock.patch.object(hc, "_load_channel_env", return_value={})
+        os_patch = mock.patch.dict(hc.os.environ, dict(os.environ), clear=True)
+
     captured = io.StringIO()
     with tempfile.TemporaryDirectory() as td:
         with mock.patch.object(sys, "argv", ["health-check.py", "--fix"]), \
              mock.patch.object(hc, "WORKSPACE_DIR", Path(td)), \
              mock.patch.object(hc, "run_all_checks", return_value=checks), \
              mock.patch.object(hc, "fix_down_bridges", return_value=[]), \
-             mock.patch.object(hc, "_bridge_launch_plan", return_value=plan), \
+             plan_patch, env_patch, os_patch, \
              mock.patch.object(hc.subprocess, "run", side_effect=fake_run), \
              mock.patch.object(hc.subprocess, "Popen", side_effect=fake_popen), \
              mock.patch("time.sleep", lambda *_: None):
@@ -452,9 +461,8 @@ def _run_main_fix_with_stale(checks: list, plan):
 
 
 def case_o_stale_restart_uses_launch_plan() -> list[str]:
-    """Stale path (issue #2904): a stale bridge is relaunched via the shared
-    launch plan (probed interpreter + channel env) — never bare sys.executable.
-    """
+    """Stale relaunch goes through the shared plan (probed interpreter +
+    channel env), never bare sys.executable."""
     fails = []
     checks = [check("slack-bridge", "stale", "running but code is 99 min newer than process — restart needed")]
     plan = ("/usr/local/bin/python3-probed", dict(os.environ))
@@ -471,11 +479,8 @@ def case_o_stale_restart_uses_launch_plan() -> list[str]:
 
 
 def case_p_stale_no_plan_skips_without_kill() -> list[str]:
-    """Stale path (issue #2904): when no capable interpreter/env exists, the
-    stale bridge is left RUNNING — no kill, no spawn — because killing a
-    working stale bridge and failing the relaunch turns a warning into an
-    outage.
-    """
+    """No viable plan leaves the stale bridge RUNNING — no kill, no spawn
+    (a kill with a failed relaunch turns a warning into an outage)."""
     fails = []
     checks = [check("slack-bridge", "stale", "running but code is 99 min newer than process — restart needed")]
     out, spawned, killed = _run_main_fix_with_stale(checks, plan=None)
@@ -485,6 +490,41 @@ def case_p_stale_no_plan_skips_without_kill() -> list[str]:
         fails.append(f"p) spawned despite missing plan: {spawned}")
     if "restart skipped" not in out:
         fails.append(f"p) missing skip message; got: {out!r}")
+    return fails
+
+
+def case_q_down_path_requires_both_slack_tokens() -> list[str]:
+    """Down path: a bot token WITHOUT an app token must skip the slack
+    restart (the bridge exits without both)."""
+    fails = []
+    spawned = []
+    checks = [check("slack-bridge", "warn", "configured but not running")]
+    clean_env = {k: v for k, v in os.environ.items() if k not in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN")}
+    with tempfile.TemporaryDirectory() as td:
+        with mock.patch.object(hc, "WORKSPACE_DIR", Path(td)), \
+             mock.patch.object(hc, "_bridge_interpreter", return_value="python3"), \
+             mock.patch.object(hc, "_load_channel_env", return_value={"SLACK_BOT_TOKEN": "xoxb-only"}), \
+             mock.patch.dict(hc.os.environ, clean_env, clear=True), \
+             mock.patch.object(hc.subprocess, "Popen", side_effect=lambda *a, **k: spawned.append(a) or mock.MagicMock()):
+            restarted = hc.fix_down_bridges(checks)
+    if restarted or spawned:
+        fails.append(f"q) bot-token-only slack was launched anyway: {restarted or spawned}")
+    return fails
+
+
+def case_r_stale_missing_app_token_no_kill_no_spawn() -> list[str]:
+    """Stale path with the REAL plan: a bot token without an app token must
+    leave the running stale bridge alone — no kill, no spawn."""
+    fails = []
+    checks = [check("slack-bridge", "stale", "running but code is 99 min newer than process — restart needed")]
+    out, spawned, killed = _run_main_fix_with_stale(
+        checks, plan="REAL", channel_env={"SLACK_BOT_TOKEN": "xoxb-only"})
+    if killed:
+        fails.append(f"r) killed the stale bridge despite missing app token: {killed}")
+    if spawned:
+        fails.append(f"r) spawned despite missing app token: {spawned}")
+    if "restart skipped" not in out:
+        fails.append(f"r) missing skip message; got: {out!r}")
     return fails
 
 
@@ -503,7 +543,9 @@ def main() -> int:
                  case_m_load_channel_env_absent_file,
                  case_n_load_channel_env_unreadable_file,
                  case_o_stale_restart_uses_launch_plan,
-                 case_p_stale_no_plan_skips_without_kill):
+                 case_p_stale_no_plan_skips_without_kill,
+                 case_q_down_path_requires_both_slack_tokens,
+                 case_r_stale_missing_app_token_no_kill_no_spawn):
         fails = case()
         status = "PASS" if not fails else "FAIL"
         print(f"  {status} {case.__name__}")
