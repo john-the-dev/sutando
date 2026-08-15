@@ -494,37 +494,40 @@ def case_p_stale_no_plan_skips_without_kill() -> list[str]:
 
 
 def case_q_down_path_requires_both_slack_tokens() -> list[str]:
-    """Down path: a bot token WITHOUT an app token must skip the slack
-    restart (the bridge exits without both)."""
+    """Down path: a missing OR present-but-empty app token must skip the
+    slack restart (the bridge treats empty strings as missing)."""
     fails = []
-    spawned = []
     checks = [check("slack-bridge", "warn", "configured but not running")]
     clean_env = {k: v for k, v in os.environ.items() if k not in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN")}
-    with tempfile.TemporaryDirectory() as td:
-        with mock.patch.object(hc, "WORKSPACE_DIR", Path(td)), \
-             mock.patch.object(hc, "_bridge_interpreter", return_value="python3"), \
-             mock.patch.object(hc, "_load_channel_env", return_value={"SLACK_BOT_TOKEN": "xoxb-only"}), \
-             mock.patch.dict(hc.os.environ, clean_env, clear=True), \
-             mock.patch.object(hc.subprocess, "Popen", side_effect=lambda *a, **k: spawned.append(a) or mock.MagicMock()):
-            restarted = hc.fix_down_bridges(checks)
-    if restarted or spawned:
-        fails.append(f"q) bot-token-only slack was launched anyway: {restarted or spawned}")
+    for label, env in (("absent", {"SLACK_BOT_TOKEN": "xoxb-only"}),
+                       ("empty", {"SLACK_BOT_TOKEN": "xoxb-ok", "SLACK_APP_TOKEN": ""})):
+        spawned = []
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch.object(hc, "WORKSPACE_DIR", Path(td)), \
+                 mock.patch.object(hc, "_bridge_interpreter", return_value="python3"), \
+                 mock.patch.object(hc, "_load_channel_env", return_value=env), \
+                 mock.patch.dict(hc.os.environ, clean_env, clear=True), \
+                 mock.patch.object(hc.subprocess, "Popen", side_effect=lambda *a, **k: spawned.append(a) or mock.MagicMock()):
+                restarted = hc.fix_down_bridges(checks)
+        if restarted or spawned:
+            fails.append(f"q) {label}-app-token slack was launched anyway: {restarted or spawned}")
     return fails
 
 
 def case_r_stale_missing_app_token_no_kill_no_spawn() -> list[str]:
-    """Stale path with the REAL plan: a bot token without an app token must
-    leave the running stale bridge alone — no kill, no spawn."""
+    """Stale path with the REAL plan: a missing OR present-but-empty app token
+    must leave the running stale bridge alone — no kill, no spawn."""
     fails = []
     checks = [check("slack-bridge", "stale", "running but code is 99 min newer than process — restart needed")]
-    out, spawned, killed = _run_main_fix_with_stale(
-        checks, plan="REAL", channel_env={"SLACK_BOT_TOKEN": "xoxb-only"})
-    if killed:
-        fails.append(f"r) killed the stale bridge despite missing app token: {killed}")
-    if spawned:
-        fails.append(f"r) spawned despite missing app token: {spawned}")
-    if "restart skipped" not in out:
-        fails.append(f"r) missing skip message; got: {out!r}")
+    for label, env in (("absent", {"SLACK_BOT_TOKEN": "xoxb-only"}),
+                       ("empty", {"SLACK_BOT_TOKEN": "xoxb-ok", "SLACK_APP_TOKEN": ""})):
+        out, spawned, killed = _run_main_fix_with_stale(checks, plan="REAL", channel_env=env)
+        if killed:
+            fails.append(f"r) {label}: killed the stale bridge: {killed}")
+        if spawned:
+            fails.append(f"r) {label}: spawned anyway: {spawned}")
+        if "restart skipped" not in out:
+            fails.append(f"r) {label}: missing skip message; got: {out!r}")
     return fails
 
 

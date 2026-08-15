@@ -3081,10 +3081,11 @@ def _bridge_launch_plan(name: str) -> "tuple[str, dict] | None":
         return None
     child_env = os.environ.copy()
     if name == "slack-bridge":
-        # slack-bridge exits without BOTH tokens (same contract startup.sh gates on).
+        # slack-bridge exits without BOTH tokens non-empty (empty string = missing,
+        # matching slack-bridge.py's own treatment).
         slack_env = _load_channel_env("slack")
         merged = {**os.environ, **slack_env}
-        if "SLACK_BOT_TOKEN" not in merged or "SLACK_APP_TOKEN" not in merged:
+        if not merged.get("SLACK_BOT_TOKEN") or not merged.get("SLACK_APP_TOKEN"):
             return None
         child_env.update(slack_env)
     return interp, child_env
