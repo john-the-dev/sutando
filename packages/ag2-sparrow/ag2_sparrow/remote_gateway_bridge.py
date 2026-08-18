@@ -731,6 +731,12 @@ def _pending_review_records() -> list[tuple[Path, dict]]:
 
 def _decision_text(task: dict) -> str:
     text = str(task.get("task") or "").strip()
+    # Button replies can follow the broker's quoted context envelope; only text
+    # after its exact closing marker is the decision.
+    text = re.sub(
+        r"^\[AG2 Space reply context;[^\]]*\].*?"
+        r"\[End AG2 Space reply context\]\s*",
+        "", text, count=1, flags=re.DOTALL)
     text = re.sub(r"^\[AG2Space\s+[^\]]+\]\s*", "", text, count=1)
     return text.strip()
 
