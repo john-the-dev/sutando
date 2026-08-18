@@ -19,8 +19,10 @@ Run: python3 tests/team-result-guard.test.py
 Exit code: 0 on pass, 1 on fail.
 """
 
+import json
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -115,6 +117,53 @@ def behavioral() -> list:
             fails.append(f"tier {tier!r} must be guarded (only exact 'owner' is exempt)")
     if not guard.is_guarded_tier("Owner "):
         pass  # case/space-insensitive owner is intentionally exempt
+
+    context = {
+        "source": "ag2space",
+        "channel_id": "!room:ag2.space",
+        "reply_to_event": "$thread-root",
+        "source_message_id": "$message-one",
+        "user_id": "@requester:ag2.space",
+    }
+    with tempfile.TemporaryDirectory() as td:
+        state = Path(td) / "state"
+        raw = "private result one"
+        leak = guard.classify_result_for_tier(raw, "team", REPO, secret_filter=_leaky)
+        first = guard.materialize_withheld_verdict(
+            leak, raw, state, "task-one", context, "@agent-one:ag2.space", now=1000)
+        saved = list((state / guard.WITHHELD_RESULT_DIR).glob("wr_*.json"))
+        if first.kind != guard.VERDICT_SUPPRESS or first.body != "[no-send]" or len(saved) != 1:
+            fails.append("withheld result must persist for DM review and stay out of the room")
+        else:
+            payload = json.loads(saved[0].read_text(encoding="utf-8"))
+            if payload.get("withheld_body") != raw or payload.get("agent_id") != "@agent-one:ag2.space":
+                fails.append("review artifact must identify the agent and contain the withheld body")
+            if payload.get("status") != "pending_dm" or not payload.get("review_id", "").startswith("wr_"):
+                fails.append("review artifact must carry a stable id and pending-DM state")
+            if saved[0].stat().st_mode & 0o777 != 0o600:
+                fails.append("withheld review artifact must be mode 0600")
+
+        retry = guard.materialize_withheld_verdict(
+            leak, raw, state, "task-one", context, "@agent-one:ag2.space", now=1001)
+        if retry != first or len(list((state / guard.WITHHELD_RESULT_DIR).glob("wr_*.json"))) != 1:
+            fails.append("a delivery retry must reuse its private-review artifact")
+
+        second = guard.materialize_withheld_verdict(
+            leak, "private result two", state, "task-two", context,
+            "@agent-one:ag2.space", now=1002)
+        if second.kind != guard.VERDICT_SUPPRESS or second.body != "[no-send]":
+            fails.append("every withheld result must be quiet in the shared room")
+        if len(list((state / guard.WITHHELD_RESULT_DIR).glob("wr_*.json"))) != 2:
+            fails.append("each withheld result must persist its own review artifact")
+
+    with tempfile.TemporaryDirectory() as td:
+        blocked_state = Path(td) / "not-a-directory"
+        blocked_state.write_text("x", encoding="utf-8")
+        leak = guard.classify_result_for_tier("private body", "team", REPO, secret_filter=_leaky)
+        unsaved = guard.materialize_withheld_verdict(
+            leak, "private body", blocked_state, "task-fail", context, now=1000)
+        if unsaved.body != guard.TEAM_LEAK_RESULT_UNSAVED or "private body" in unsaved.body:
+            fails.append("persistence failure must be honest and still withhold the body")
     return fails
 
 
