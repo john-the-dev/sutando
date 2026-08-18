@@ -782,7 +782,41 @@ def _publish_review(path: Path, record: dict) -> bool:
     if not isinstance(answer, dict) or not answer.get("ok"):
         return False
     record.update({"status": "published", "published_at": time.time(),
-                   "published_event_id": str(answer.get("event_id") or "")})
+                   "published_event_id": str(answer.get("event_id") or ""),
+                   "card_resolution_pending": True})
+    _atomic_private_json(path, record)
+    return True
+
+
+def _resolved_review_body(record: dict) -> str:
+    rid = str(record.get("review_id") or "")
+    decision = str(record.get("decision") or "")
+    status = str(record.get("status") or "")
+    if decision == "sensitive":
+        outcome = "Kept private — the owner confirmed it contains sensitive information."
+    elif status == "published":
+        outcome = "Published to the original room — the owner marked it as a false positive."
+    elif status == "publish_failed":
+        outcome = "False positive recorded, but publication failed and requires attention."
+    else:
+        outcome = "False positive recorded; publication to the original room is pending."
+    return f"**Private result review `{rid}` resolved**\n\n✓ {outcome}"
+
+
+def _resolve_review_card(path: Path, record: dict) -> bool:
+    room = str(record.get("dm_room_id") or "")
+    event_id = str(record.get("dm_event_id") or "")
+    if not room.startswith("!") or not event_id.startswith("$"):
+        return False
+    answer = _req("POST", "/v1/room", {
+        "op": "edit", "room_id": room, "event_id": event_id,
+        "body": _resolved_review_body(record),
+    }, timeout=20)
+    if not isinstance(answer, dict) or not (answer.get("ok") or answer.get("event_id")):
+        return False
+    record.update({"card_resolution_pending": False,
+                   "card_resolved_at": time.time(),
+                   "card_resolution_event_id": str(answer.get("event_id") or "")})
     _atomic_private_json(path, record)
     return True
 
@@ -793,19 +827,24 @@ def _handle_review_decision(task: dict) -> bool:
         return False
     path, record, answer = matched
     if record.get("status") in ("kept_private", "published"):
+        if record.get("card_resolution_pending"):
+            _resolve_review_card(path, record)
         return True  # delivery retry of the same owner decision
     if answer == "yes":
         record.update({"status": "kept_private", "resolved_at": time.time(),
-                       "decision": "sensitive"})
+                       "decision": "sensitive", "card_resolution_pending": True})
         _atomic_private_json(path, record)
+        _resolve_review_card(path, record)
         return True
     # Persist release before the network call; pending retries use a stable
     # dedupe key so they cannot duplicate the disclosure.
     record.update({"status": "publish_pending", "resolved_at": time.time(),
-                   "decision": "false_positive"})
+                   "decision": "false_positive", "card_resolution_pending": True})
     _atomic_private_json(path, record)
     try:
-        _publish_review(path, record)
+        _resolve_review_card(path, record)
+        if _publish_review(path, record):
+            _resolve_review_card(path, record)
     except Exception as exc:  # noqa: BLE001 — durable pending state retries
         _log(f"withheld review {record.get('review_id')} publish deferred: {exc}")
     return True
@@ -820,6 +859,17 @@ def _retry_pending_publications() -> None:
                 _log(f"withheld review {record.get('review_id')} publish still pending")
         except Exception as exc:  # noqa: BLE001 — next poll retries
             _log(f"withheld review {record.get('review_id')} publish retry failed: {exc}")
+
+
+def _retry_review_card_resolutions() -> None:
+    for path, record in _pending_review_records():
+        if not record.get("card_resolution_pending"):
+            continue
+        try:
+            if not _resolve_review_card(path, record):
+                _log(f"withheld review {record.get('review_id')} card edit still pending")
+        except Exception as exc:  # noqa: BLE001 — next poll retries
+            _log(f"withheld review {record.get('review_id')} card edit retry failed: {exc}")
 
 
 def _control_result_path(task_id: str) -> Path:
@@ -3394,6 +3444,7 @@ def main() -> None:
                 return
             _post_heartbeat(inflight)
             _retry_pending_publications()
+            _retry_review_card_resolutions()
             _retry_review_control_results()
             try:
                 resp = _req("GET", f"/v1/tasks?wait={POLL_WAIT}", timeout=POLL_WAIT + 10)

@@ -52,6 +52,8 @@ with tempfile.TemporaryDirectory() as td:
             event_id = f"$review-{len(review_events) + 1}"
             review_events.append(event_id)
             return {"ok": True, "event_id": event_id}
+        if path == "/v1/room" and payload.get("op") == "edit":
+            return {"ok": True, "event_id": "$resolved-edit"}
         if path == "/v1/results":
             return {"ok": True}
         raise AssertionError((method, path, payload, timeout))
@@ -107,6 +109,14 @@ with tempfile.TemporaryDirectory() as td:
     published = json.loads(path.read_text())
     check(published["status"] == "published" and published["decision"] == "false_positive",
           "No means false positive and publishes")
+    check(published["card_resolution_pending"] is False
+          and published["card_resolution_event_id"] == "$resolved-edit",
+          "the accepted decision durably replaces the actionable card")
+    edits = [p for _m, u, p in calls if u == "/v1/room" and p.get("op") == "edit"]
+    check(edits[-1]["event_id"] == record["dm_event_id"]
+          and "Published to the original room" in edits[-1]["body"]
+          and "extra_content" not in edits[-1],
+          "the resolved edit removes the buttons and records the final outcome")
     room_post = next(p for m, u, p in calls
                      if u == "/v1/room" and p.get("room_id") == "!shared:ag2.space")
     check(room_post["body"] == "sensitive candidate"
@@ -134,6 +144,9 @@ with tempfile.TemporaryDirectory() as td:
     check(bridge._handle_review_decision(yes_task), "a bound owner Yes must be consumed")
     check(json.loads(yes_path.read_text())["status"] == "kept_private",
           "Yes confirms sensitive and keeps the body private")
+    check("Kept private" in [p for _m, u, p in calls
+                             if u == "/v1/room" and p.get("op") == "edit"][-1]["body"],
+          "Yes also replaces the buttons with a durable private outcome")
     after_public = len([p for _m, u, p in calls
                         if u == "/v1/room" and p.get("room_id") == "!shared:ag2.space"])
     check(after_public == before_public, "Yes must not publish anything")
