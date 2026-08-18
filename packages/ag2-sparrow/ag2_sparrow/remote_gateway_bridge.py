@@ -603,9 +603,8 @@ def _gateway_owner() -> str:
     agents = answer.get("agents") if isinstance(answer, dict) else None
     if not isinstance(agents, list):
         return ""
-    exact = next((row for row in agents
-                  if isinstance(row, dict) and row.get("id") == identity), None)
-    row = exact or next((row for row in agents if isinstance(row, dict)), None)
+    row = next((row for row in agents
+                if isinstance(row, dict) and row.get("id") == identity), None)
     owner = str((row or {}).get("owner") or "")
     hint = str((row or {}).get("owner_dm_room") or "")
     _GATEWAY_OWNER_DM_HINT = hint if hint.startswith("!") else ""
@@ -717,7 +716,7 @@ def _pending_review_records() -> list[tuple[Path, dict]]:
     out = []
     directory = _STATE / "withheld-team-results"
     try:
-        paths = sorted(directory.glob("wr_*.json"))[:512]
+        paths = sorted(directory.glob("wr_*.json"))
     except OSError:
         return out
     for path in paths:

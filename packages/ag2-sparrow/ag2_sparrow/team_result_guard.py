@@ -243,7 +243,11 @@ def materialize_withheld_verdict(verdict: TeamResultVerdict, body: str,
         "context": bounded,
         "withheld_body": body,
     }
-    if not _write_artifact(artifact, payload):
+    try:
+        saved = _write_artifact(artifact, payload)
+    except Exception:  # noqa: BLE001 — storage failure must remain fail-closed
+        saved = False
+    if not saved:
         return TeamResultVerdict(VERDICT_LEAK, TEAM_LEAK_RESULT_UNSAVED, verdict.reason)
     return TeamResultVerdict(
         VERDICT_SUPPRESS, "[no-send]", f"{verdict.reason}; pending private owner review")

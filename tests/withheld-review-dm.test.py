@@ -93,6 +93,12 @@ with tempfile.TemporaryDirectory() as td:
     check(not any(p and p.get("op") == "create" for _m, _u, p in calls),
           "the registered canonical owner DM is reused instead of creating another")
 
+    bridge._GATEWAY_OWNER_DM_HINT = "!stale:ag2.space"
+    bridge._reenroll_identity = lambda: "@missing:ag2.space"
+    check(bridge._gateway_owner() == "" and bridge._GATEWAY_OWNER_DM_HINT == "",
+          "a missing exact agent identity must not select another agent's owner DM")
+    bridge._reenroll_identity = lambda: "@agent:ag2.space"
+
     no_task = {
         "id": "decision-no",
         "task": (
@@ -154,6 +160,19 @@ with tempfile.TemporaryDirectory() as td:
     bridge._tier_for = lambda *_args: "team"
     check(not bridge._handle_review_decision({**yes_task, "id": "team-forgery"}),
           "a collaborator cannot release a pending review")
+
+    starvation = root / "starvation" / "withheld-team-results"
+    starvation.mkdir(parents=True)
+    for index in range(512):
+        (starvation / f"wr_{index:016x}.json").write_text(json.dumps({
+            "review_id": f"wr_{index:016x}", "status": "published"}))
+    target_id = "wr_ffffffffffffffff"
+    (starvation / f"{target_id}.json").write_text(json.dumps({
+        "review_id": target_id, "status": "awaiting_owner"}))
+    bridge._STATE = root / "starvation"
+    check(any(record.get("review_id") == target_id
+              for _path, record in bridge._pending_review_records()),
+          "resolved history must not hide a newer live review")
 
     bridge._STATE = old["state"]
     bridge._WITHHELD_DM_CACHE = old["dm_cache"]

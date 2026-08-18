@@ -164,6 +164,21 @@ def behavioral() -> list:
             leak, "private body", blocked_state, "task-fail", context, now=1000)
         if unsaved.body != guard.TEAM_LEAK_RESULT_UNSAVED or "private body" in unsaved.body:
             fails.append("persistence failure must be honest and still withhold the body")
+
+    with tempfile.TemporaryDirectory() as td:
+        state = Path(td) / "state"
+        leak = guard.classify_result_for_tier(
+            "private body", "team", REPO, secret_filter=_leaky)
+        original_mkstemp = guard.tempfile.mkstemp
+        try:
+            guard.tempfile.mkstemp = lambda **_kwargs: (_ for _ in ()).throw(
+                OSError("disk full"))
+            unsaved = guard.materialize_withheld_verdict(
+                leak, "private body", state, "task-io-fail", context, now=1000)
+        finally:
+            guard.tempfile.mkstemp = original_mkstemp
+        if unsaved.body != guard.TEAM_LEAK_RESULT_UNSAVED:
+            fails.append("artifact write exceptions must return the fail-closed verdict")
     return fails
 
 
