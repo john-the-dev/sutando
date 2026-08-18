@@ -125,6 +125,35 @@ def behavioral() -> list:
         "source_message_id": "$message-one",
         "user_id": "@requester:ag2.space",
     }
+    if guard._bounded_context(None) != {}:
+        fails.append("non-dict review context must normalize to empty")
+    clean = guard.classify_result_for_tier(
+        "public body", "owner", REPO, secret_filter=_clean)
+    if guard.materialize_withheld_verdict(
+            clean, "public body", Path("unused"), "task-clean") != clean:
+        fails.append("non-leak verdicts must not create review artifacts")
+
+    with tempfile.TemporaryDirectory() as td:
+        directory = Path(td)
+        original_link = guard.os.link
+        try:
+            def raced_link(_temporary, destination):
+                Path(destination).write_text("race winner", encoding="utf-8")
+                raise FileExistsError
+
+            guard.os.link = raced_link
+            if not guard._write_artifact(directory / "raced.json", {"value": 1}):
+                fails.append("a concurrent artifact winner must count as persisted")
+
+            def consuming_link(temporary, destination):
+                Path(temporary).replace(destination)
+
+            guard.os.link = consuming_link
+            if not guard._write_artifact(directory / "consumed.json", {"value": 2}):
+                fails.append("cleanup must tolerate an already-consumed temporary file")
+        finally:
+            guard.os.link = original_link
+
     with tempfile.TemporaryDirectory() as td:
         state = Path(td) / "state"
         raw = "private result one"
