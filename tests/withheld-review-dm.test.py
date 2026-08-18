@@ -70,23 +70,36 @@ with tempfile.TemporaryDirectory() as td:
     check(verdict.body == "[no-send]", "shared-room delivery must be suppressed")
     check(bridge._route_withheld_review(path), "review DM should route")
     record = json.loads(path.read_text())
-    check(record["status"] == "awaiting_owner" and record["dm_event_id"] == "$review-1",
+    check(record["status"] == "awaiting_owner" and record["dm_event_id"] == "$review-2",
           "review must bind to the delivered DM event")
-    dm = next(p for m, u, p in calls if u == "/v1/room" and p.get("room_id") == "!owner-dm:ag2.space")
-    check(dm["mentions"] == ["@owner:ag2.space"] and "sensitive candidate" in dm["body"],
-          "only the owner DM receives the candidate body")
-    check(dm["dedupe_key"].startswith("withheld-review:wr_"),
+    dm_posts = [p for m, u, p in calls
+                if u == "/v1/room" and p.get("room_id") == "!owner-dm:ag2.space"]
+    candidate_dm, decision_dm = dm_posts
+    check("sensitive candidate" in candidate_dm["body"]
+          and candidate_dm["mentions"] == [],
+          "the candidate is visible in the owner DM outside the action card")
+    check(decision_dm["mentions"] == ["@owner:ag2.space"],
+          "the decision card mentions only the registered owner")
+    buttons = decision_dm["extra_content"]["space.ag2.a2ui"]
+    check(buttons["type"] == "buttons"
+          and buttons["options"] == [
+              {"label": "Yes — keep private", "action": f"Yes {record['review_id']}"},
+              {"label": "No — publish to room", "action": f"No {record['review_id']}"},
+          ], "the review card exposes safe, explicit Yes/No actions")
+    check(decision_dm["dedupe_key"].startswith("withheld-review:wr_"),
           "review DM retries use a stable key")
     check(not any(p and p.get("op") == "create" for _m, _u, p in calls),
           "the registered canonical owner DM is reused instead of creating another")
 
     no_task = {
-        "id": "decision-no", "task": "[AG2Space @owner:ag2.space] No",
+        "id": "decision-no",
+        "task": f"[AG2Space @owner:ag2.space] No {record['review_id']}",
         "source": "ag2space", "channel_id": "!owner-dm:ag2.space",
         "user_id": "@owner:ag2.space", "access_tier": "owner",
-        "reply_to_event": "$review-1",
+        "reply_to_event": "",
     }
-    check(bridge._handle_review_decision(no_task), "a bound owner No must be consumed")
+    check(bridge._handle_review_decision(no_task),
+          "an owner No button action with an explicit review id must be consumed")
     published = json.loads(path.read_text())
     check(published["status"] == "published" and published["decision"] == "false_positive",
           "No means false positive and publishes")

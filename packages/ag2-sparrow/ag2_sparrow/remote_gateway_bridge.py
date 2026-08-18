@@ -652,13 +652,28 @@ def _review_messages(record: dict) -> list[str]:
     chunk_chars = 12000
     chunks = [body[i:i + chunk_chars] for i in range(0, len(body), chunk_chars)] or [""]
     if len(chunks) == 1:
-        return [header + "---\n" + chunks[0] + "\n---\n\n" + decision]
+        # The buttons renderer replaces its fallback body; keep the candidate
+        # in a preceding event so it remains visible for review.
+        return [header + "---\n" + chunks[0] + "\n---", decision]
     messages = [header + f"Candidate result follows in {len(chunks)} parts."]
     messages.extend(
         f"**`{rid}` — part {index}/{len(chunks)}**\n\n{chunk}"
         for index, chunk in enumerate(chunks, 1))
     messages.append(f"**`{rid}` — review decision**\n\n{decision}")
     return messages
+
+
+def _review_buttons(review_id: str) -> dict:
+    """A2UI button macros for the existing owner-decision grammar."""
+    return {
+        "version": "0.9",
+        "type": "buttons",
+        "prompt": "Does this result contain sensitive information?",
+        "options": [
+            {"label": "Yes — keep private", "action": f"Yes {review_id}"},
+            {"label": "No — publish to room", "action": f"No {review_id}"},
+        ],
+    }
 
 
 def _route_withheld_review(path: Path) -> bool:
@@ -674,11 +689,17 @@ def _route_withheld_review(path: Path) -> bool:
     answer = None
     messages = _review_messages(record)
     for index, message in enumerate(messages, 1):
-        answer = _req("POST", "/v1/room", {
+        payload = {
             "op": "message", "room_id": room, "body": message,
             "mentions": [owner] if index == len(messages) else [],
             "dedupe_key": f"withheld-review:{record['review_id']}:{index}",
-        }, timeout=20)
+        }
+        if index == len(messages):
+            # Same additive content mechanism as the existing room-invite card.
+            # Non-AG2 clients ignore it and retain the typed Yes/No fallback.
+            payload["extra_content"] = {
+                "space.ag2.a2ui": _review_buttons(str(record["review_id"]))}
+        answer = _req("POST", "/v1/room", payload, timeout=20)
         if not isinstance(answer, dict) or not answer.get("ok"):
             raise RuntimeError(f"private review DM part {index}/{len(messages)} was not accepted")
     record.update({"status": "awaiting_owner", "owner": owner, "dm_room_id": room,
