@@ -728,6 +728,21 @@ def _pending_review_records() -> list[tuple[Path, dict]]:
     return out
 
 
+def _archive_resolved_review(path: Path, record: dict) -> bool:
+    if record.get("status") not in ("kept_private", "published"):
+        return False
+    if record.get("card_resolution_pending"):
+        return False
+    archive = path.parent / "archive"
+    try:
+        archive.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(archive, 0o700)
+        path.replace(archive / path.name)
+    except OSError:
+        return False
+    return True
+
+
 def _decision_text(task: dict) -> str:
     text = str(task.get("task") or "").strip()
     # Button replies can follow the broker's quoted context envelope; only text
@@ -817,15 +832,20 @@ def _resolve_review_card(path: Path, record: dict) -> bool:
                    "card_resolved_at": time.time(),
                    "card_resolution_event_id": str(answer.get("event_id") or "")})
     _atomic_private_json(path, record)
+    _archive_resolved_review(path, record)
     return True
 
 
 def _handle_review_decision(task: dict) -> bool:
+    task_id = str(task.get("id") or "")
+    if task_id and _control_result_path(task_id).is_file():
+        return True
     matched = _match_review_decision(task)
     if matched is None:
         return False
     path, record, answer = matched
     if record.get("status") in ("kept_private", "published"):
+        _queue_review_control_result(task)
         if record.get("card_resolution_pending"):
             _resolve_review_card(path, record)
         return True  # delivery retry of the same owner decision
@@ -833,6 +853,7 @@ def _handle_review_decision(task: dict) -> bool:
         record.update({"status": "kept_private", "resolved_at": time.time(),
                        "decision": "sensitive", "card_resolution_pending": True})
         _atomic_private_json(path, record)
+        _queue_review_control_result(task)
         _resolve_review_card(path, record)
         return True
     # Persist release before the network call; pending retries use a stable
@@ -840,6 +861,7 @@ def _handle_review_decision(task: dict) -> bool:
     record.update({"status": "publish_pending", "resolved_at": time.time(),
                    "decision": "false_positive", "card_resolution_pending": True})
     _atomic_private_json(path, record)
+    _queue_review_control_result(task)
     try:
         _resolve_review_card(path, record)
         if _publish_review(path, record):
@@ -863,6 +885,7 @@ def _retry_pending_publications() -> None:
 def _retry_review_card_resolutions() -> None:
     for path, record in _pending_review_records():
         if not record.get("card_resolution_pending"):
+            _archive_resolved_review(path, record)
             continue
         try:
             if not _resolve_review_card(path, record):

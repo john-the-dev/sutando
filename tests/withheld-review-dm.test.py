@@ -112,7 +112,10 @@ with tempfile.TemporaryDirectory() as td:
     }
     check(bridge._handle_review_decision(no_task),
           "an owner No button action with an explicit review id must be consumed")
-    published = json.loads(path.read_text())
+    published_path = path.parent / "archive" / path.name
+    check(not path.exists() and published_path.is_file(),
+          "a fully resolved published review moves out of the hot pending scan")
+    published = json.loads(published_path.read_text())
     check(published["status"] == "published" and published["decision"] == "false_positive",
           "No means false positive and publishes")
     check(published["card_resolution_pending"] is False
@@ -128,10 +131,32 @@ with tempfile.TemporaryDirectory() as td:
     check(room_post["body"] == "sensitive candidate"
           and room_post["dedupe_key"].startswith("withheld-publish:wr_"),
           "publication restores the exact body with idempotency")
-    bridge._queue_review_control_result(no_task)
     control_path = bridge._control_result_path("decision-no")
-    check(control_path.is_file(), "the consumed decision queues a durable lease-closing result")
+    check(control_path.is_file(),
+          "the decision queues its lease-closing result before the review is archived")
+    first_public_count = len([p for _m, u, p in calls
+                              if u == "/v1/room" and p.get("room_id") == "!shared:ag2.space"])
+    check(bridge._handle_review_decision(no_task),
+          "a redelivered decision is consumed from its durable control tombstone")
+    check(len([p for _m, u, p in calls
+               if u == "/v1/room" and p.get("room_id") == "!shared:ag2.space"])
+          == first_public_count,
+          "redelivery before result acceptance must not publish twice")
+    control_failures = [0]
+
+    def fail_first_control(method, path, payload=None, timeout=35):
+        if path == "/v1/results" and control_failures[0] == 0:
+            control_failures[0] += 1
+            raise OSError("relay unavailable")
+        return fake_req(method, path, payload, timeout)
+
+    bridge._req = fail_first_control
     bridge._retry_review_control_results()
+    check(control_path.is_file(), "a failed result POST retains the decision tombstone")
+    check(bridge._handle_review_decision(no_task),
+          "the same decision stays consumed while its result POST is pending")
+    bridge._retry_review_control_results()
+    bridge._req = fake_req
     control_posts = [p for _m, u, p in calls if u == "/v1/results"]
     check(not control_path.exists() and control_posts[-1] == {
         "id": "decision-no", "body": "[no-send]"},
@@ -148,7 +173,10 @@ with tempfile.TemporaryDirectory() as td:
     before_public = len([p for _m, u, p in calls
                          if u == "/v1/room" and p.get("room_id") == "!shared:ag2.space"])
     check(bridge._handle_review_decision(yes_task), "a bound owner Yes must be consumed")
-    check(json.loads(yes_path.read_text())["status"] == "kept_private",
+    archived_yes_path = yes_path.parent / "archive" / yes_path.name
+    check(not yes_path.exists() and archived_yes_path.is_file(),
+          "a fully resolved private review moves out of the hot pending scan")
+    check(json.loads(archived_yes_path.read_text())["status"] == "kept_private",
           "Yes confirms sensitive and keeps the body private")
     check("Kept private" in [p for _m, u, p in calls
                              if u == "/v1/room" and p.get("op") == "edit"][-1]["body"],
@@ -173,6 +201,17 @@ with tempfile.TemporaryDirectory() as td:
     check(any(record.get("review_id") == target_id
               for _path, record in bridge._pending_review_records()),
           "resolved history must not hide a newer live review")
+    bridge._retry_review_card_resolutions()
+    check(len(list(starvation.glob("wr_*.json"))) == 1
+          and len(list((starvation / "archive").glob("wr_*.json"))) == 512,
+          "resolved audit records must leave the hot scan without being deleted")
+    original_read = bridge._read_private_json
+    hot_reads = []
+    bridge._read_private_json = lambda p: (hot_reads.append(p), original_read(p))[1]
+    pending_after_archive = bridge._pending_review_records()
+    bridge._read_private_json = original_read
+    check(len(hot_reads) == 1 and pending_after_archive[0][1].get("review_id") == target_id,
+          "archived history must add no reads to the hot pending scan")
 
     bridge._STATE = old["state"]
     bridge._WITHHELD_DM_CACHE = old["dm_cache"]
