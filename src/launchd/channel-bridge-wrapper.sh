@@ -15,7 +15,9 @@ ENV_FILE="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path "channels/$C
 case "$CHANNEL" in
   slack) TOKEN="${SLACK_BOT_TOKEN:-}"; MODULE=slack_bolt ;;
   discord) TOKEN="${DISCORD_BOT_TOKEN:-}"; MODULE=discord ;;
-  telegram) TOKEN="${TELEGRAM_BOT_TOKEN:-}"; MODULE='' ;;
+  # telegram has no third-party dep; urllib.request is stdlib, so this stays an
+  # interpreter probe rather than a network one.
+  telegram) TOKEN="${TELEGRAM_BOT_TOKEN:-}"; MODULE=urllib.request ;;
 esac
 if [ -z "$TOKEN" ]; then
   # KeepAlive=true is intentionally unconditional: the conditional
@@ -35,11 +37,7 @@ fi
 # arch-, or user-specific candidate list baked into this committed file.
 PYTHON="${SUTANDO_CHANNEL_BRIDGE_PYTHON:-}"
 if [ -z "$PYTHON" ] && command -v python3 >/dev/null 2>&1; then
-  if [ -n "$MODULE" ]; then
-    python3 -c "import $MODULE" >/dev/null 2>&1 && PYTHON=python3
-  else
-    python3 -c 'import urllib.request as u; u.urlopen("https://api.telegram.org", timeout=8)' >/dev/null 2>&1 && PYTHON=python3
-  fi
+  python3 -c "import $MODULE" >/dev/null 2>&1 && PYTHON=python3
 fi
 if [ -z "$PYTHON" ]; then
   echo "[$CHANNEL-bridge-wrapper] no usable Python interpreter" >&2
