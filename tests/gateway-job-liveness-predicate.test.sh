@@ -1,25 +1,28 @@
 #!/usr/bin/env bash
-# Pins the gateway supervision predicate in src/startup.sh.
+# Pins the gateway supervision predicate in src/startup-runtime.sh
+# (start_gateway_lanes(); relocated there from startup.sh by #3147).
 #
 # The predicate must answer "is launchd's OWN job running?" — not "does any
 # process with a matching argv exist?". Those disagree whenever a bare or
 # named-instance bridge is alive while the job is dead, and the disagreement is
-# silent: startup.sh reports the bridge supervised and skips kickstart recovery.
+# silent: the launcher reports the bridge supervised and skips kickstart recovery.
 #
-# The function under test is extracted verbatim from startup.sh (not reimplemented),
+# The function under test is extracted verbatim from startup-runtime.sh (not reimplemented),
 # so a change to the production text changes what this asserts.
 
 set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STARTUP="$REPO/src/startup.sh"
+STARTUP="$REPO/src/startup-runtime.sh"
 fails=0
 ok()   { echo "  ok   — $1"; }
 bad()  { echo "  FAIL — $1"; fails=$((fails + 1)); }
 
 # --- extract the production function verbatim -------------------------------
-fn="$(awk '/^  _gw_job_pid\(\) \{/,/^  \}/' "$STARTUP")"
+# Indented one level deeper than before: the predicate now lives INSIDE
+# start_gateway_lanes(), not at top level of startup.sh.
+fn="$(awk '/^    _gw_job_pid\(\) \{/,/^    \}/' "$STARTUP")"
 if [ -z "$fn" ]; then
-  echo "FAIL — _gw_job_pid() not found in src/startup.sh (renamed or removed?)"
+  echo "FAIL — _gw_job_pid() not found in src/startup-runtime.sh (renamed or removed?)"
   exit 1
 fi
 

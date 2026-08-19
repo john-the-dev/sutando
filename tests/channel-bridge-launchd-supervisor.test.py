@@ -14,7 +14,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 WRAPPER = REPO / "src" / "launchd" / "channel-bridge-wrapper.sh"
 PLIST = REPO / "src" / "launchd" / "com.sutando.channel-bridge.plist"
+# Gateway supervision lives in start_gateway_lanes() (startup-runtime.sh) since
+# #3147; channel-bridge supervision is still in startup.sh. Read both.
 STARTUP = REPO / "src" / "startup.sh"
+RUNTIME = REPO / "src" / "startup-runtime.sh"
 
 
 def check(condition: bool, message: str) -> None:
@@ -29,7 +32,7 @@ def test_contract() -> None:
     check(plist["KeepAlive"] is True, "launchd unconditionally restarts dead bridges")
     check(plist["ThrottleInterval"] == 10, "crash loops are throttled")
 
-    startup = STARTUP.read_text()
+    startup = STARTUP.read_text() + RUNTIME.read_text()
     installer = (REPO / "src" / "install-channel-bridge-launchd.sh").read_text()
     check('launchctl kickstart "$SERVICE"' in installer,
           "installer explicitly starts newly bootstrapped jobs")
