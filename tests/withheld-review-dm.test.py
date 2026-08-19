@@ -163,6 +163,30 @@ with tempfile.TemporaryDirectory() as td:
         "the owner decision is consumed without becoming an ordinary agent task")
 
     guard.materialize_withheld_verdict(
+        leak, "missing origin candidate", bridge._STATE, "task-no-origin", {},
+        "@agent:ag2.space", now=1000.5)
+    failed_path = guard.withheld_review_path(bridge._STATE, "task-no-origin")
+    bridge._route_withheld_review(failed_path)
+    failed_record = json.loads(failed_path.read_text())
+    failed_task = {
+        **no_task, "id": "decision-no-origin",
+        "task": f"No {failed_record['review_id']}",
+    }
+    check(bridge._handle_review_decision(failed_task),
+          "an owner decision with missing origin context must still be consumed")
+    failed_pending = json.loads(failed_path.read_text())
+    check(failed_pending["status"] == "publish_failed"
+          and failed_pending["card_resolution_pending"] is True,
+          "permanent publication failure must schedule the final owner card state")
+    bridge._retry_review_card_resolutions()
+    failed_archive = failed_path.parent / "archive" / failed_path.name
+    check(not failed_path.exists() and failed_archive.is_file(),
+          "permanent publication failure must leave the hot pending scan")
+    check("publication failed" in [p for _m, u, p in calls
+                                    if u == "/v1/room" and p.get("op") == "edit"][-1]["body"],
+          "the resolved owner card must report permanent publication failure")
+
+    guard.materialize_withheld_verdict(
         leak, "actually sensitive", bridge._STATE, "task-two", context,
         "@agent:ag2.space", now=1001)
     yes_path = guard.withheld_review_path(bridge._STATE, "task-two")
@@ -184,6 +208,37 @@ with tempfile.TemporaryDirectory() as td:
     after_public = len([p for _m, u, p in calls
                         if u == "/v1/room" and p.get("room_id") == "!shared:ag2.space"])
     check(after_public == before_public, "Yes must not publish anything")
+
+    guard.materialize_withheld_verdict(
+        leak, "card retry candidate", bridge._STATE, "task-card-retry", context,
+        "@agent:ag2.space", now=1002)
+    retry_path = guard.withheld_review_path(bridge._STATE, "task-card-retry")
+    bridge._route_withheld_review(retry_path)
+    retry_record = json.loads(retry_path.read_text())
+    retry_task = {
+        **no_task, "id": "decision-card-retry",
+        "task": f"Yes {retry_record['review_id']}",
+    }
+    edit_failures = [0]
+
+    def fail_first_edit(method, path, payload=None, timeout=35):
+        if path == "/v1/room" and payload.get("op") == "edit" and edit_failures[0] == 0:
+            edit_failures[0] += 1
+            raise TimeoutError("card edit unavailable")
+        return fake_req(method, path, payload, timeout)
+
+    bridge._req = fail_first_edit
+    check(bridge._handle_review_decision(retry_task),
+          "a transient Yes card-edit failure must not escape the decision handler")
+    retry_pending = json.loads(retry_path.read_text())
+    check(retry_pending["status"] == "kept_private"
+          and retry_pending["card_resolution_pending"] is True,
+          "a failed Yes card edit must remain durable for retry")
+    bridge._req = fake_req
+    bridge._retry_review_card_resolutions()
+    check(not retry_path.exists()
+          and (retry_path.parent / "archive" / retry_path.name).is_file(),
+          "the retry loop must resolve and archive the kept-private review")
 
     bridge._tier_for = lambda *_args: "team"
     check(not bridge._handle_review_decision({**yes_task, "id": "team-forgery"}),

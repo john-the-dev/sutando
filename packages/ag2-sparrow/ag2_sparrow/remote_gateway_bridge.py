@@ -729,7 +729,7 @@ def _pending_review_records() -> list[tuple[Path, dict]]:
 
 
 def _archive_resolved_review(path: Path, record: dict) -> bool:
-    if record.get("status") not in ("kept_private", "published"):
+    if record.get("status") not in ("kept_private", "published", "publish_failed"):
         return False
     if record.get("card_resolution_pending"):
         return False
@@ -786,7 +786,8 @@ def _publish_review(path: Path, record: dict) -> bool:
     room = str(context.get("channel_id") or "")
     body = str(record.get("withheld_body") or "")
     if not room.startswith("!") or not body:
-        record.update({"status": "publish_failed", "publish_error": "invalid origin/body"})
+        record.update({"status": "publish_failed", "publish_error": "invalid origin/body",
+                       "card_resolution_pending": True})
         _atomic_private_json(path, record)
         return False
     answer = _req("POST", "/v1/room", {
@@ -854,7 +855,10 @@ def _handle_review_decision(task: dict) -> bool:
                        "decision": "sensitive", "card_resolution_pending": True})
         _atomic_private_json(path, record)
         _queue_review_control_result(task)
-        _resolve_review_card(path, record)
+        try:
+            _resolve_review_card(path, record)
+        except Exception as exc:  # noqa: BLE001 — durable pending state retries
+            _log(f"withheld review {record.get('review_id')} card edit deferred: {exc}")
         return True
     # Persist release before the network call; pending retries use a stable
     # dedupe key so they cannot duplicate the disclosure.
