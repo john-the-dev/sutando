@@ -100,9 +100,8 @@ with tempfile.TemporaryDirectory() as td:
 
     if parsed is not None:
         check("output is a valid, parseable plist", valid)
-        # The hostile values survive intact (XML-escaped on disk, decoded on load).
-        # Substring-match against the DECODED strings — not repr(), which would
-        # re-escape the backslash and false-fail.
+        # Match the DECODED strings, never repr(): repr re-escapes the backslash
+        # and false-fails on a value that survived intact.
         joined = " ".join(_strings(parsed))
         check("hostile REPO path substituted intact", hostile_repo in joined, joined[:200])
         check("hostile WORKSPACE path substituted intact", hostile_ws in joined)
