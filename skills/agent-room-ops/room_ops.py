@@ -38,6 +38,7 @@ import react as _react     # noqa: E402
 import join as _join       # noqa: E402
 import resolve as _resolve # noqa: E402
 import mention as _mention # noqa: E402
+import say as _say         # noqa: E402
 import rooms as _rooms     # noqa: E402
 import events as _events   # noqa: E402
 
@@ -168,6 +169,22 @@ def _main(argv):
     p.add_argument("room_id")
     p.add_argument("--agent", dest="agent_mxid", default=os.environ.get("AGENT_MXID"))
 
+    p = sub.add_parser("say", help="post a plain message into a room (mentions no one)")
+    p.add_argument("room_id")
+    p.add_argument("message")
+    p.add_argument("--agent", dest="agent_mxid", default=os.environ.get("AGENT_MXID"))
+
+    p = sub.add_parser("grant", help="make a room authoritative — its access policy "
+                                     "GRANTS access, overriding agents' local allowFrom (#429)")
+    p.add_argument("room_id")
+    p.add_argument("--tier", dest="tiers", action="append", metavar="@user:hs=owner|guest",
+                   help="grant a specific member a tier (repeatable)")
+    p.add_argument("--default-tier", dest="default_tier", choices=("owner", "guest"),
+                   help="tier for members not named by --tier")
+    p.add_argument("--revoke", action="store_true",
+                   help="disable the grant (authoritative=false); leaves other policy fields intact")
+    p.add_argument("--agent", dest="agent_mxid", default=os.environ.get("AGENT_MXID"))
+
     a = ap.parse_args(argv)
     if a.cmd == "read":
         res = _read.read_room(a.room_id, a.agent_mxid, a.limit, before=a.before)
@@ -207,6 +224,17 @@ def _main(argv):
         res = _resolve.resolve_user(a.handle)
     elif a.cmd == "mention":
         res = _mention.mention(a.handle, a.message, a.room_id, a.agent_mxid)
+    elif a.cmd == "say":
+        res = _say.say(a.message, a.room_id, a.agent_mxid)
+    elif a.cmd == "grant":
+        import grant as _grant
+        try:
+            tiers = _grant.parse_tier_pairs(a.tiers)
+        except ValueError as e:
+            res = {"ok": False, "reason": str(e)}
+        else:
+            res = _grant.grant_room(a.room_id, tiers=tiers, default_tier=a.default_tier,
+                                    revoke=a.revoke, agent_mxid=a.agent_mxid)
     else:  # react / unreact
         key = a.key or _react.ACK[a.ack]
         fn = _react.react if a.cmd == "react" else _react.unreact

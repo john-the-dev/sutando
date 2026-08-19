@@ -1,10 +1,17 @@
 #!/bin/bash
 # Sutando startup — starts available services + the selected core CLI.
-# Usage: bash src/startup.sh
+# Usage: bash src/startup.sh [--with-app]   ./start.sh is the front door; --with-app builds + launches the menu-bar app (no launchd job).
 
 set -e
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+
+# --with-app is opt-in and parsed here so an unknown flag cannot silently do
+# nothing: every other argument is still ignored exactly as before.
+WITH_APP=0
+for _arg in "$@"; do
+    case "$_arg" in --with-app) WITH_APP=1 ;; esac
+done
 
 # Resolve python3 ONCE, refusing Apple's Xcode-CLT stub. On a Mac without the
 # developer tools `/usr/bin/python3` exists but raises a modal install dialog
@@ -30,6 +37,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # suppress. An actionable message beats that dialog.
 . "$REPO/scripts/python-binary.sh"
 PY="$(resolve_python "$REPO")"
+
 if [ -z "$PY" ]; then
   {
     echo "✗ no runnable python3 (no \$SUTANDO_PY, no bundled runtime, no developer tools)"
@@ -45,6 +53,14 @@ if [ -z "$PY" ]; then
   } >&2
   exit 1
 fi
+
+# Must run after the PY-validity abort but before ANY workspace-derived write:
+# a write below on a broken link materializes an unhealable real dir.
+_wl_out="$("$PY" "$REPO/src/workspace_layout.py" --ensure)" || {
+  echo "✗ workspace wiring broken and not auto-healable — refusing to start services onto a stranded workspace. Diagnose: $PY $REPO/src/workspace_layout.py --check" >&2
+  exit 1
+}
+case "$_wl_out" in *'"action": "healed-'*) echo "🔧 workspace wiring healed: $_wl_out" >&2 ;; esac
 cd "$REPO"
 
 # Belt-and-suspenders startup log → always recoverable from /tmp (Lucy's Bug #5
@@ -643,24 +659,7 @@ if [ -x "$REPO/src/agent/claude/cli/sutando-shell-setup.sh" ]; then
   bash "$REPO/src/agent/claude/cli/sutando-shell-setup.sh" --auto || true
 fi
 
-# Reap any stale watch-tasks-stream watcher from a prior session. The
-# in-session Stop hook (.claude/settings.json) handles clean shutdown, but
-# a hard crash (SIGKILL, panic, force-quit, power loss) skips it and leaves
-# an orphan fswatch process + stale PID file. On a fresh startup we kill
-# the orphan (if the PID still names a live `watch-tasks-stream` process)
-# and remove the PID file so the new session's watcher writes a fresh one.
-# Skipping kills when the PID has been recycled by an unrelated process is
-# important — `kill $PID` without the cmdline check would target whatever
-# new program happens to hold the recycled PID.
-WATCHER_PID_FILE="$WORKSPACE/state/watch-tasks-stream.pid"
-if [ -f "$WATCHER_PID_FILE" ]; then
-  STALE_PID="$(cat "$WATCHER_PID_FILE" 2>/dev/null || true)"
-  if [ -n "$STALE_PID" ] && ps -p "$STALE_PID" -o args= 2>/dev/null | grep -q "watch-tasks-stream"; then
-    kill "$STALE_PID" 2>/dev/null || true
-    echo "  ✓ reaped stale watch-tasks-stream watcher (pid $STALE_PID)"
-  fi
-  rm -f "$WATCHER_PID_FILE"
-fi
+reap_stale_task_watcher "$WORKSPACE/state/watch-tasks-stream.pid"
 
 # Post-M0: repo-root tasks/results/data are NOT created. Pre-M0 this block
 # ran `mkdir -p tasks results data` as back-compat for unmigrated scripts —
@@ -721,16 +720,10 @@ fi
 _PROXY_LABEL="com.sutando.credential-proxy"
 _PROXY_INSTALLER="$REPO/src/install-credential-proxy-launchd.sh"
 if [ -f "$_PROXY_INSTALLER" ] && [ -f "$REPO/src/launchd/$_PROXY_LABEL.plist" ]; then
-  # Upgrade path (Codex re-review F1): an already-loaded job may carry a plist
-  # generated BEFORE SUTANDO_NODE existed (or with a different runtime) — a
-  # KeepAlive restart would then lose the pinned runtime. Compare the loaded
-  # plist's managed runtime to the current one and reinstall on drift (the
-  # installer bootout_if_loaded+bootstraps, so re-running over a live job is
-  # safe).
-  _PROXY_PLIST_DEST="$HOME/Library/LaunchAgents/$_PROXY_LABEL.plist"
-  _PROXY_PLIST_NODE="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:SUTANDO_NODE" "$_PROXY_PLIST_DEST" 2>/dev/null || true)"
-  if launchctl print "gui/$(id -u)/$_PROXY_LABEL" > /dev/null 2>&1 && [ "$_PROXY_PLIST_NODE" = "${SUTANDO_NODE:-}" ]; then
-    echo "  ✓ credential proxy (launchd-supervised, already loaded, runtime current)"
+  # An already-loaded job may carry a plist generated before the current pins existed;
+  # the installer owns that comparison because it owns what the plist renders.
+  if bash "$_PROXY_INSTALLER" is-current > /dev/null 2>&1; then
+    echo "  ✓ credential proxy (launchd-supervised, already loaded, config current)"
   else
     echo "  Installing launchd-supervised credential proxy (fresh or runtime drift)..."
     if bash "$_PROXY_INSTALLER" install > /dev/null 2>&1; then
@@ -751,7 +744,10 @@ if ! lsof -i :7846 > /dev/null 2>&1; then
   if [ "$BUNDLED_MODE" = "1" ]; then
     _PROXY_SCRIPT="$REPO/dist/credential-proxy.js"
   else
-    _PROXY_SCRIPT="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path skills/quota-tracker/scripts/credential-proxy.ts)"
+    # Run the proxy from THIS checkout so it resolves the same workspace as the
+    # core/dashboard; fall back to the claude-home copy if the skill is absent.
+    _PROXY_SCRIPT="$REPO/skills/quota-tracker/scripts/credential-proxy.ts"
+    [ -f "$_PROXY_SCRIPT" ] || _PROXY_SCRIPT="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path skills/quota-tracker/scripts/credential-proxy.ts)"
   fi
   run_node_service credential-proxy "$_PROXY_SCRIPT" > /tmp/credential-proxy.log 2>&1 &
   sleep 1
@@ -833,11 +829,14 @@ else
   # don't fight over port 9900 (issue #1888 bug 2 — duplicate listeners when
   # launchd respawns while startup.sh's direct process still holds the port).
   #
-  # reap_wedged_listener runs BEFORE the launchd ownership check intentionally:
+  # The wedge reap runs BEFORE the launchd ownership check intentionally:
   # KeepAlive only triggers on process exit, not on hang. A hung process can hold
   # the port indefinitely — reaping it first frees the port so the subsequent
   # kickstart (or launchd's own respawn on exit) gets a clean bind.
-  reap_wedged_listener 9900 voice-agent
+  # NOT the generic reap_wedged_listener: voice-agent's kill path goes through
+  # the guarded voice-lock.py takeover (startup-runtime.sh, amendment T4) —
+  # identity mismatch means nothing is signaled.
+  reap_wedged_voice_agent 9900
   if launchctl print "gui/$(id -u)/com.sutando.voice-agent" > /dev/null 2>&1; then
     if ! lsof -i :9900 > /dev/null 2>&1; then
       launchctl kickstart "gui/$(id -u)/com.sutando.voice-agent" > /dev/null 2>&1 || true
@@ -1116,7 +1115,21 @@ if _RELAY_ENV="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path channel
     # leaving the success line outside it still reported a launch that never
     # happened — per named instance, on a configured remote-control surface.
     if [ -n "$PY" ]; then
+      # REMOTE_TASK_CHANNEL_DIR isolates this instance's channel config
+      # (.env fallback + access.json). Without it the named instance defaults
+      # to channels/ag2space/ and inherits PROD's credentials and tier map —
+      # the exact failure #2701 exists to prevent (review P1, bassil).
+      # Convention: instance "dev" → channels/dev-ag2space/; anything else →
+      # channels/<inst>-ag2space/ unless the operator overrides via
+      # REMOTE_TASK_CHANNEL_DIR_<INST>.
+      _gw_chdir_var="REMOTE_TASK_CHANNEL_DIR_${_gw_var#AG2_REMOTE_TOKEN_}"
+      _gw_chdir="${!_gw_chdir_var:-${_gw_inst}-ag2space}"
+      _gw_token_file_var="REMOTE_TASK_TOKEN_FILE_${_gw_var#AG2_REMOTE_TOKEN_}"
+      _gw_token_file="${!_gw_token_file_var:-$(bash "$REPO/scripts/sutando-config.sh" claude-home-path channels "$_gw_chdir" .env)}"
+      [ -f "$_gw_token_file" ] || _gw_token_file=""
       SUTANDO_SUPERVISED=1 GATEWAY_INSTANCE="$_gw_inst" REMOTE_TASK_TOKEN="${!_gw_var}" \
+        REMOTE_TASK_URL= REMOTE_TASK_TOKEN_FILE="$_gw_token_file" \
+        REMOTE_TASK_CHANNEL_DIR="$_gw_chdir" \
         REMOTE_PROACTIVE_ROOM= \
         "$PY" "$REPO/src/remote-gateway-bridge.py" >> "$LOGS_DIR/remote-gateway-bridge.$_gw_inst.log" 2>&1 &
       echo "  ✓ gateway bridge ($_gw_inst — self-defers if already running)"
@@ -1316,6 +1329,7 @@ for port_name in $VERIFY_PORTS; do
 done
 echo ""
 
+
 # Delegate to the runtime dispatcher — canonical sutando-core launch command.
 # Sutando.app and health recovery use this same Claude-or-Codex selection.
 #
@@ -1331,6 +1345,20 @@ echo ""
 # must stay detached. Restoring /dev/tty there makes the runtime launcher try
 # to attach to sutando-core from inside tmux, which blocks startup forever and
 # leaves the old core running without completing recovery.
+# --with-app runs BEFORE the exec below (which replaces this process) and is
+# guarded: its installer must never take the core down (`set -e` is on).
+if [ "$WITH_APP" -eq 1 ]; then
+    # --launch, not --supervise: a login-persistent launchd job is a separate
+    # decision the user makes explicitly.
+    echo "→ menu-bar app (--with-app): building + launching" >&2
+    if bash "$REPO/scripts/install-menu-bar-app.sh" --launch; then
+        echo "  ✓ menu-bar app launched" >&2
+        echo "    auto-start at login is opt-in: bash scripts/install-menu-bar-app.sh --supervise" >&2
+    else
+        echo "  ✗ menu-bar app setup failed (exit $?) — the core is unaffected and still starting." >&2
+    fi
+fi
+
 if [ -t 0 ] && [ -z "${TMUX:-}" ]; then
     exec >/dev/tty 2>&1
 fi

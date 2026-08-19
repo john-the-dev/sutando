@@ -63,6 +63,35 @@ def _load_or_create_capture_token() -> str | None:
 
 
 CAPTURE_TOKEN = _load_or_create_capture_token()
+
+
+_PREFLIGHT = "unset"
+
+
+def screen_capture_permitted():
+    """True/False from CGPreflightScreenCaptureAccess, or None when unknowable.
+
+    Preflight only — never CGRequestScreenCaptureAccess, which raises a system
+    prompt and would make a capture request user-visible.
+    """
+    global _PREFLIGHT
+    if _PREFLIGHT == "unset":
+        try:
+            import ctypes
+            import ctypes.util
+            _cg = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreGraphics"))
+            _fn = _cg.CGPreflightScreenCaptureAccess
+            _fn.restype = ctypes.c_bool
+            _fn.argtypes = []
+            _PREFLIGHT = _fn
+        except Exception:
+            _PREFLIGHT = None
+    if _PREFLIGHT is None:
+        return None
+    try:
+        return bool(_PREFLIGHT())
+    except Exception:
+        return None
 # Web-client endpoint for agent-state reporting. When a /capture happens we
 # flash state=seeing on the menu-bar avatar for ~1.5s — makes screen-capture
 # visible to the user without them needing to watch the web UI.
@@ -132,6 +161,35 @@ def _notify_capture_blocking():
         pass  # Best-effort; notification absence is never critical.
 
 
+# A frame that could not be recompressed may still pass if it is already
+# small; past this it is an error — D7.4 makes the downscale budget
+# MANDATORY, and silently sending a native-res original re-creates FE-1.
+DOWNSCALE_FAIL_MAX_BYTES = 400 * 1024
+
+
+def _downscale_frame(path: str, maxdim: int | None, quality: int | None) -> bool:
+    """P7 D7.4: resize/recompress a captured frame IN THIS PROCESS via sips.
+
+    Runs before the path is returned to the caller, so the voice event loop
+    only ever touches the already-shrunk file. Returns False when the frame
+    could not be brought under budget (sips failed AND the original exceeds
+    DOWNSCALE_FAIL_MAX_BYTES) — the caller must error, not pass it through."""
+    cmd = ["sips"]
+    if maxdim:
+        cmd += ["--resampleHeightWidthMax", str(maxdim)]
+    if quality:
+        cmd += ["-s", "format", "jpeg", "-s", "formatOptions", str(quality)]
+    cmd.append(path)
+    try:
+        subprocess.run(cmd, timeout=10, capture_output=True, check=True)
+        return True
+    except Exception:
+        try:
+            return os.path.getsize(path) <= DOWNSCALE_FAIL_MAX_BYTES
+        except Exception:
+            return False
+
+
 def _notify_capture():
     """Debounced fire-and-forget macOS notification."""
     global _last_notify_ts
@@ -147,12 +205,36 @@ def _notify_capture():
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): pass
 
+    _permission_verdict: "str | None" = None
+
     def _send_json(self, status: int, payload: dict) -> None:
         """Emit the shared JSON response contract for capture routes."""
+        # Stamped here, not at the five 200-sites, so no success path can drift
+        # out of carrying it. Errors keep their own shape.
+        if 200 <= status < 300 and self._permission_verdict and "permission" not in payload:
+            payload = {**payload, "permission": self._permission_verdict}
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(payload).encode())
+
+    def _require_screen_permission(self) -> bool:
+        """Fail closed ONLY on an explicit denial. `screencapture` exits 0 under
+        TCC denial and writes a desktop-only frame, so success and denial are
+        otherwise byte-identical to every caller."""
+        verdict = screen_capture_permitted()
+        # `None` = unknowable (non-macOS, probe failed). Fail open, but say so:
+        # otherwise a verified grant and an unknowable one are byte-identical.
+        self._permission_verdict = {True: "granted", False: "denied"}.get(verdict, "unknown")
+        if verdict is False:
+            self._send_json(503, {
+                "status": "denied",
+                "error": "screen recording permission not granted",
+                "remedy": "System Settings > Privacy & Security > Screen & System Audio "
+                          "Recording: remove this app's row, re-add it, then quit and reopen it",
+            })
+            return False
+        return True
 
     def _require_capture_token(self) -> bool:
         """Fail closed unless the request carries the startup capture token."""
@@ -164,191 +246,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/capture") and not self.path.startswith("/capture-video"):
-            # Reject if no valid token — a browser page on loopback cannot set a
-            # custom header on a no-cors fetch, so this is a same-origin CSRF guard.
-            if not self._require_capture_token():
-                return
-            # Parse display number from query: /capture?display=2 or /capture?all=true
-            from urllib.parse import urlparse, parse_qs
-            query = parse_qs(urlparse(self.path).query)
-            # silent=true suppresses the menu-bar flash + notification. Used by
-            # the vision streaming ticker, which fires once per second and would
-            # otherwise spam the indicator and notification center.
-            silent = query.get("silent", ["false"])[0] == "true"
-            if not silent:
-                # Flash agent-state=seeing on the menu-bar avatar for ~1.5s.
-                # Non-blocking fire-and-forget; capture succeeds regardless.
-                _signal_seeing()
-                # macOS notification "Sutando captured screen" — opt-out via
-                # SUTANDO_CAPTURE_NOTIFY=0. Debounced at 5s to avoid spam
-                # during burst captures.
-                _notify_capture()
-            os.makedirs(DIR, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-            display_raw = query.get("display", [None])[0]
-            # Coerce to int to short-circuit taint flow into the subprocess
-            # argument list. Display index constrained to 1..9 (macOS never has
-            # more than a handful of displays).
-            display = int(display_raw) if display_raw and display_raw.isdigit() and 1 <= int(display_raw) <= 9 else None
-            capture_all = query.get("all", ["false"])[0] == "true"
-            # format=jpeg → screencapture -t jpg, smaller files for streaming.
-            fmt = query.get("format", ["png"])[0]
-            if fmt not in ("png", "jpg", "jpeg"):
-                fmt = "png"
-            ext = "jpg" if fmt in ("jpg", "jpeg") else "png"
-            type_flag = "jpg" if ext == "jpg" else "png"
-            try:
-                if capture_all:
-                    # Capture all displays separately
-                    paths = []
-                    for d in range(1, 5):  # up to 4 displays
-                        p = f"{DIR}/screen-{ts}-d{d}.{ext}"
-                        result = subprocess.run(["screencapture", "-x", "-t", type_flag, f"-D{d}", p], timeout=5, capture_output=True)
-                        if result.returncode == 0 and os.path.exists(p) and os.path.getsize(p) > 0:
-                            paths.append(p)
-                        else:
-                            try: os.unlink(p)
-                            except Exception: pass
-                            break  # no more displays
-                    path = paths[0] if paths else f"{DIR}/screen-{ts}.{ext}"
-                else:
-                    suffix = f"-d{display}" if display else ""
-                    path = f"{DIR}/screen-{ts}{suffix}.{ext}"
-                    paths = [path]
-                    cmd = ["screencapture", "-x", "-t", type_flag]
-                    if display:
-                        cmd.append(f"-D{display}")
-                    cmd.append(path)
-                    subprocess.run(cmd, timeout=5, check=True)
-                resp = {"status": "ok", "path": paths[0] if paths else path}
-                if len(paths) > 1:
-                    resp["all_paths"] = paths
-                    resp["displays"] = len(paths)
-                self._send_json(200, resp)
-            except Exception as e:
-                self._send_json(500, {"status": "error", "error": str(e)})
+            self._handle_capture()
         elif self.path.startswith("/capture-video"):
-            # Record a short screen video and return the .mov path. Backs the
-            # ⌃R "Drop Video Clip" hotkey — a few-second video repro is far easier
-            # to act on than a single still. Recording runs through THIS server
-            # (not Sutando.app directly) because this process holds the Screen
-            # Recording TCC grant, same reason /capture does.
-            #
-            # Token gate FIRST — before any side effect (no flash, no recording)
-            # so an unauthorized request can't even signal. See CAPTURE_TOKEN.
-            if not self._require_capture_token():
-                return
-            from urllib.parse import urlparse, parse_qs
-            query = parse_qs(urlparse(self.path).query)
-            action = query.get("action", [""])[0]
-            global _active_recording
-
-            # ⌃R toggle — STOP: SIGINT the running recording so screencapture
-            # finalizes the .mov, then return its path. Idempotent if idle.
-            if action == "stop":
-                with _recording_lock:
-                    rec = _active_recording
-                    _active_recording = None
-                if not rec:
-                    self._send_json(200, {"status": "idle"})
-                    return
-                try:
-                    if rec.get("watchdog"):
-                        rec["watchdog"].cancel()
-                    rec["proc"].send_signal(signal.SIGINT)  # -v finalizes on SIGINT
-                    rec["proc"].wait(timeout=30)
-                    path = rec["path"]
-                    # Only publish OFF if no NEW recording started during this
-                    # finalization (SIGINT+wait released the lock). Otherwise the
-                    # stale stop would stomp the new recording's ON state, leaving
-                    # the app's isRecordingVideo=false while it records. (CR: qingyun-wu)
-                    with _recording_lock:
-                        if _active_recording is None:
-                            _post_recording_state(False)
-                    if not (os.path.exists(path) and os.path.getsize(path) > 0):
-                        raise RuntimeError("recording produced no file")
-                    if query.get("silent", ["false"])[0] != "true":
-                        _signal_seeing()
-                        _notify_capture()
-                    self._send_json(200, {"status": "ok", "path": path})
-                except Exception as e:
-                    self._send_json(500, {"status": "error", "error": str(e)})
-                return
-
-            # ⌃R toggle — START: spawn an open-ended `screencapture -v` (no -V) and
-            # return immediately; the second ⌃R (action=stop) ends it.
-            if action == "start":
-                os.makedirs(DIR, exist_ok=True)
-                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-                display_raw = query.get("display", [None])[0]
-                display = int(display_raw) if display_raw and display_raw.isdigit() and 1 <= int(display_raw) <= 9 else None
-                suffix = f"-d{display}" if display else ""
-                path = f"{DIR}/clip-{ts}{suffix}.mov"
-                with _recording_lock:
-                    if _active_recording:
-                        self._send_json(200, {"status": "already_recording", "path": _active_recording["path"]})
-                        return
-                    if query.get("silent", ["false"])[0] != "true":
-                        _signal_seeing()
-                        _notify_capture()
-                    # Audio: -g records the *default input device*, so the clip's
-                    # sound source follows System Settings > Sound > Input:
-                    #   mic (MacBook Pro Microphone) → narration / room audio
-                    #   BlackHole 2ch (with output routed there) → system/app audio
-                    # ?audio=off disables sound; ?device=<id> pins a specific input via -G<id>.
-                    audio = query.get("audio", ["on"])[0]
-                    device = query.get("device", [None])[0]
-                    cmd = ["screencapture", "-v", "-x"]  # no -V → records until SIGINT
-                    if audio != "off":
-                        cmd.append(f"-G{device}" if device else "-g")
-                    if display:
-                        cmd.append(f"-D{display}")
-                    cmd.append(path)
-                    try:
-                        proc = subprocess.Popen(cmd)
-                    except Exception as e:
-                        self._send_json(500, {"status": "error", "error": str(e)})
-                        return
-
-                    def _auto_stop(p=proc):
-                        global _active_recording
-                        # Publish OFF only if this watchdog still OWNS the active
-                        # recording, atomically under the lock — a stale watchdog
-                        # (its proc already replaced by a newer recording) must not
-                        # stomp the newer recording's ON state. (CR: qingyun-wu)
-                        with _recording_lock:
-                            if _active_recording and _active_recording.get("proc") is p:
-                                _active_recording = None
-                                _post_recording_state(False)
-                        try:
-                            p.send_signal(signal.SIGINT)
-                            p.wait(timeout=30)
-                        except Exception:
-                            pass
-
-                    # ?max=<seconds> raises the safety cap for known-long sessions
-                    # (meeting-link auto-record needs meeting-length clips; the
-                    # 600s default ate a 41-min meeting on 2026-07-22). Bounded
-                    # at 4h so a typo can't disable the watchdog entirely.
-                    max_raw = query.get("max", [None])[0]
-                    cap = MAX_RECORDING_SECONDS
-                    if max_raw and max_raw.isdigit() and int(max_raw) > 0:
-                        cap = min(int(max_raw), 4 * 3600)
-                    wd = threading.Timer(cap, _auto_stop)
-                    wd.daemon = True
-                    # Register the active recording BEFORE arming the watchdog: a
-                    # tiny cap could fire _auto_stop almost immediately, and it must
-                    # see _active_recording already set (both run under
-                    # _recording_lock, so the callback blocks until this returns).
-                    _active_recording = {"proc": proc, "path": path, "watchdog": wd}
-                    wd.start()
-                    _post_recording_state(True)  # under the lock: a concurrent stop can't interleave a stale ON (CR: qingyun-wu)
-                self._send_json(200, {"status": "recording", "path": path})
-                return
-
-            # Toggle-only: /capture-video needs action=start|stop. (The old
-            # fixed-duration -V path was removed — ⌃R is a start/stop toggle now.)
-            self._send_json(400, {"status": "error", "error": "action must be start or stop"})
+            self._handle_capture_video()
         elif self.path == "/ping":
             self.send_response(200)
             self.end_headers()
@@ -356,6 +256,197 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
+
+    def _handle_capture(self) -> None:
+        # Reject if no valid token — a browser page on loopback cannot set a
+        # custom header on a no-cors fetch, so this is a same-origin CSRF guard.
+        if not self._require_capture_token():
+            return
+        if not self._require_screen_permission():
+            return
+        # Parse display number from query: /capture?display=2 or /capture?all=true
+        from urllib.parse import urlparse, parse_qs
+        query = parse_qs(urlparse(self.path).query)
+        # silent=true suppresses the menu-bar flash and notification, for
+        # callers that capture on a timer.
+        silent = query.get("silent", ["false"])[0] == "true"
+        if not silent:
+            # Flash agent-state=seeing on the menu-bar avatar for ~1.5s.
+            # Non-blocking fire-and-forget; capture succeeds regardless.
+            _signal_seeing()
+            # Opt out with SUTANDO_CAPTURE_NOTIFY=0. Debounced at 5s so a
+            # burst of captures raises one notification.
+            _notify_capture()
+        os.makedirs(DIR, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        display_raw = query.get("display", [None])[0]
+        # Coerce to int so the value cannot taint the subprocess argument
+        # list; display index is constrained to 1..9.
+        display = int(display_raw) if display_raw and display_raw.isdigit() and 1 <= int(display_raw) <= 9 else None
+        capture_all = query.get("all", ["false"])[0] == "true"
+        # format=jpeg → screencapture -t jpg, smaller files for streaming.
+        fmt = query.get("format", ["png"])[0]
+        if fmt not in ("png", "jpg", "jpeg"):
+            fmt = "png"
+        ext = "jpg" if fmt in ("jpg", "jpeg") else "png"
+        type_flag = "jpg" if ext == "jpg" else "png"
+        # P7 D7.4: optional downscale/recompress executed HERE, in the capture
+        # server's process (sips subprocess) — vision compression must never
+        # compete with the voice event loop. maxdim bounds the longest edge;
+        # quality is JPEG percent (jpg only). Bounded to sane ranges.
+        maxdim_raw = query.get("maxdim", [None])[0]
+        maxdim = int(maxdim_raw) if maxdim_raw and maxdim_raw.isdigit() and 320 <= int(maxdim_raw) <= 3840 else None
+        quality_raw = query.get("quality", [None])[0]
+        quality = int(quality_raw) if quality_raw and quality_raw.isdigit() and 10 <= int(quality_raw) <= 100 else None
+        try:
+            if capture_all:
+                # Capture all displays separately
+                paths = []
+                for d in range(1, 5):  # up to 4 displays
+                    p = f"{DIR}/screen-{ts}-d{d}.{ext}"
+                    result = subprocess.run(["screencapture", "-x", "-t", type_flag, f"-D{d}", p], timeout=5, capture_output=True)
+                    if result.returncode == 0 and os.path.exists(p) and os.path.getsize(p) > 0:
+                        paths.append(p)
+                    else:
+                        try: os.unlink(p)
+                        except Exception: pass
+                        break  # no more displays
+                path = paths[0] if paths else f"{DIR}/screen-{ts}.{ext}"
+            else:
+                suffix = f"-d{display}" if display else ""
+                path = f"{DIR}/screen-{ts}{suffix}.{ext}"
+                paths = [path]
+                cmd = ["screencapture", "-x", "-t", type_flag]
+                if display:
+                    cmd.append(f"-D{display}")
+                cmd.append(path)
+                subprocess.run(cmd, timeout=5, check=True)
+            if maxdim or (quality and ext == "jpg"):
+                for p in paths:
+                    if not _downscale_frame(p, maxdim, quality if ext == "jpg" else None):
+                        for cleanup in paths:
+                            try: os.unlink(cleanup)
+                            except Exception: pass
+                        self._send_json(500, {"status": "error", "error": "downscale failed and frame exceeds budget"})
+                        return
+            resp = {"status": "ok", "path": paths[0] if paths else path}
+            if len(paths) > 1:
+                resp["all_paths"] = paths
+                resp["displays"] = len(paths)
+            self._send_json(200, resp)
+        except Exception as e:
+            self._send_json(500, {"status": "error", "error": str(e)})
+
+    def _handle_capture_video(self) -> None:
+        # Records a screen video and returns the .mov path. Runs here because
+        # this process holds the Screen Recording TCC grant.
+        #
+        # Token gate runs before any side effect, so an unauthorized request
+        # produces no flash and no recording.
+        if not self._require_capture_token():
+            return
+        if not self._require_screen_permission():
+            return
+        from urllib.parse import urlparse, parse_qs
+        query = parse_qs(urlparse(self.path).query)
+        action = query.get("action", [""])[0]
+        global _active_recording
+
+        # ⌃R toggle — STOP: SIGINT the running recording so screencapture
+        # finalizes the .mov, then return its path. Idempotent if idle.
+        if action == "stop":
+            with _recording_lock:
+                rec = _active_recording
+                _active_recording = None
+            if not rec:
+                self._send_json(200, {"status": "idle"})
+                return
+            try:
+                if rec.get("watchdog"):
+                    rec["watchdog"].cancel()
+                rec["proc"].send_signal(signal.SIGINT)  # -v finalizes on SIGINT
+                rec["proc"].wait(timeout=30)
+                path = rec["path"]
+                # Publish OFF only if no newer recording started while the lock
+                # was released, so the stale stop cannot clear its ON state.
+                with _recording_lock:
+                    if _active_recording is None:
+                        _post_recording_state(False)
+                if not (os.path.exists(path) and os.path.getsize(path) > 0):
+                    raise RuntimeError("recording produced no file")
+                if query.get("silent", ["false"])[0] != "true":
+                    _signal_seeing()
+                    _notify_capture()
+                self._send_json(200, {"status": "ok", "path": path})
+            except Exception as e:
+                self._send_json(500, {"status": "error", "error": str(e)})
+            return
+
+        # ⌃R toggle — START: spawn an open-ended `screencapture -v` (no -V) and
+        # return immediately; the second ⌃R (action=stop) ends it.
+        if action == "start":
+            os.makedirs(DIR, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            display_raw = query.get("display", [None])[0]
+            display = int(display_raw) if display_raw and display_raw.isdigit() and 1 <= int(display_raw) <= 9 else None
+            suffix = f"-d{display}" if display else ""
+            path = f"{DIR}/clip-{ts}{suffix}.mov"
+            with _recording_lock:
+                if _active_recording:
+                    self._send_json(200, {"status": "already_recording", "path": _active_recording["path"]})
+                    return
+                if query.get("silent", ["false"])[0] != "true":
+                    _signal_seeing()
+                    _notify_capture()
+                # -g records the default input device, so the clip follows the
+                # system input; ?audio=off mutes, ?device=<id> pins one via -G.
+                audio = query.get("audio", ["on"])[0]
+                device = query.get("device", [None])[0]
+                cmd = ["screencapture", "-v", "-x"]  # no -V → records until SIGINT
+                if audio != "off":
+                    cmd.append(f"-G{device}" if device else "-g")
+                if display:
+                    cmd.append(f"-D{display}")
+                cmd.append(path)
+                try:
+                    proc = subprocess.Popen(cmd)
+                except Exception as e:
+                    self._send_json(500, {"status": "error", "error": str(e)})
+                    return
+
+                def _auto_stop(p=proc):
+                    global _active_recording
+                    # Publish OFF only while this watchdog still owns the active
+                    # recording, so a stale one cannot clear a newer ON state.
+                    with _recording_lock:
+                        if _active_recording and _active_recording.get("proc") is p:
+                            _active_recording = None
+                            _post_recording_state(False)
+                    try:
+                        p.send_signal(signal.SIGINT)
+                        p.wait(timeout=30)
+                    except Exception:
+                        pass
+
+                # ?max=<seconds> raises the cap for known-long sessions, bounded
+                # at 4h so a typo cannot disable the watchdog.
+                max_raw = query.get("max", [None])[0]
+                cap = MAX_RECORDING_SECONDS
+                if max_raw and max_raw.isdigit() and int(max_raw) > 0:
+                    cap = min(int(max_raw), 4 * 3600)
+                wd = threading.Timer(cap, _auto_stop)
+                wd.daemon = True
+                # Register before arming the watchdog: a small cap can fire
+                # _auto_stop at once, and it must see _active_recording set.
+                _active_recording = {"proc": proc, "path": path, "watchdog": wd}
+                wd.start()
+                _post_recording_state(True)  # under the lock: a concurrent stop can't interleave a stale ON (CR: qingyun-wu)
+            self._send_json(200, {"status": "recording", "path": path})
+            return
+
+        # Toggle-only: /capture-video needs action=start|stop. (The old
+        # fixed-duration -V path was removed — ⌃R is a start/stop toggle now.)
+        self._send_json(400, {"status": "error", "error": "action must be start or stop"})
 
 if __name__ == "__main__":
     server = http.server.HTTPServer(("127.0.0.1", PORT), Handler)
