@@ -339,6 +339,16 @@
       "status": "active",
       "canonical_for": "verbatim parking for relocated CLAUDE.md detail: marker-migration history, vault python bootstrap, liveness payload schema",
       "last_verified": "2026-08-17"
+    },
+    "docs/graceful-shutdown.md": {
+      "title": "Graceful shutdown — sentinel paths",
+      "audience": [
+        "contributors",
+        "maintainers"
+      ],
+      "status": "canonical",
+      "canonical_for": "which restart path leaves the shutdown sentinel set, and why plain restart clears it",
+      "last_verified": "2026-08-19"
     }
   }
 }
