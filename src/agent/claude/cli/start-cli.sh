@@ -703,15 +703,16 @@ if ! command -v tmux > /dev/null 2>&1 && command -v brew > /dev/null 2>&1; then
   brew install tmux 2>&1 | tail -3
 fi
 
-# Consecutive session-start entries bound each session's lifetime, which is what
-# session-recap needs to pick the right transcript.
-stamp_runtime_claude "start-cli"
+# Published per launch path, not here: the detached path can verify the session
+# came up, so a failed launch must not replace a truthful marker.
 
 # Fall back to a bare `exec claude` if tmux is still missing.
 if ! command -v tmux > /dev/null 2>&1; then
   echo "  ⚠ tmux not found — running without tmux wrapper"
   echo "    (Sutando.app's watcher-auto-restart won't work; brew install tmux to enable)"
   [ -n "${SUTANDO_CLAUDE_WORKING_DIR:-}" ] && cd "$SUTANDO_CLAUDE_WORKING_DIR"
+  # exec replaces this process: there is no post-launch point to publish from.
+  stamp_runtime_claude "start-cli"
   exec claude --name "$SESSION" --remote-control "Sutando" --chrome --dangerously-skip-permissions --add-dir "$HOME" \
     ${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"} \
     -- "/startup"
@@ -742,6 +743,8 @@ apply_tmux_defaults
 # working dir must go through `--restart` (kill-then-create), not a bare rerun.
 if [ -t 1 ]; then
   ensure_core_monitor   # backgrounded child survives the exec below
+  # Same exec limitation as the no-tmux path above.
+  stamp_runtime_claude "start-cli"
   exec tmux -S "$TMUX_SOCKET" new-session -A -s "$SESSION" ${CORE_ENV_ARGS[@]+"${CORE_ENV_ARGS[@]}"} ${CWD_ARGS[@]+"${CWD_ARGS[@]}"} \
     claude --name "$SESSION" --remote-control "Sutando" --chrome --dangerously-skip-permissions --add-dir "$HOME" \
     ${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"} \
@@ -767,6 +770,7 @@ else
     exit 1
   fi
   [ -n "$RESTART_REQUESTED" ] && log_restart_attempt "success: core live"
+  stamp_runtime_claude "start-cli"   # verified live; a failed launch exited above
   ensure_core_monitor   # canonical session now exists — start the supervisor monitor
   if [ "$VISIBLE" = 1 ]; then
     open_visible_terminal

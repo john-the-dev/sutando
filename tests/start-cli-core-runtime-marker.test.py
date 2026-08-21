@@ -116,10 +116,48 @@ def case_session_starts_runtime_field() -> list[str]:
     return fails
 
 
+def case_detached_publish_is_behind_the_liveness_gate() -> list[str]:
+    """Ordering, not presence: a publish before the gate can replace a truthful
+    marker with a runtime that never came up."""
+    src = SCRIPT.read_text(encoding="utf-8")
+    fails: list[str] = []
+    try:
+        gate = src.index("did not come up within")
+        detached = src.index("new-session -d")
+        pub = src.index("stamp_runtime_claude", gate)
+    except ValueError as exc:
+        return [f"could not locate the detached launch/gate/publish trio: {exc}"]
+    if not (detached < gate < pub):
+        fails.append(
+            "the detached path must publish AFTER its liveness gate "
+            f"(launch={detached}, gate={gate}, publish={pub})")
+    return fails
+
+
+def case_exec_paths_publish_adjacent_to_exec() -> list[str]:
+    """`exec` replaces the process, so no post-launch point exists on those paths.
+
+    Pre-exec publication there is a structural limit, not a chosen behaviour —
+    pinned so it cannot silently spread to a path that CAN verify.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    fails: list[str] = []
+    for anchor in ("exec claude --name", 'exec tmux -S "$TMUX_SOCKET" new-session -A'):
+        i = src.find(anchor)
+        if i < 0:
+            fails.append(f"launch anchor vanished: {anchor!r}")
+            continue
+        if "stamp_runtime_claude" not in src[max(0, i - 260):i]:
+            fails.append(f"no publish adjacent to {anchor!r}")
+    return fails
+
+
 def main() -> int:
     cases = [
         ("core-runtime-marker", case_core_runtime_marker),
         ("session-starts-runtime-field", case_session_starts_runtime_field),
+        ("detached publish is behind the liveness gate", case_detached_publish_is_behind_the_liveness_gate),
+        ("exec paths publish adjacent to exec", case_exec_paths_publish_adjacent_to_exec),
     ]
     all_failures = []
     for label, fn in cases:
