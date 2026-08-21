@@ -101,7 +101,14 @@ STATE_TMP="$(mktemp "${STATE_FILE}.tmp.XXXXXX" 2>/dev/null)" || STATE_TMP="${STA
 # An interrupted hook must not leave its stage behind. Opt-out, not blanket rm:
 # the publish-failure path below keeps the stage on purpose.
 _handoff_keep_stage=0
-trap '[ "$_handoff_keep_stage" = 1 ] || rm -f "$STATE_TMP" 2>/dev/null' EXIT INT TERM
+_handoff_drop_stage() {
+  [ "$_handoff_keep_stage" = 1 ] || rm -f "$STATE_TMP" 2>/dev/null
+}
+# A signal trap REPLACES the default action, so cleaning up and returning would
+# let a cancelled hook run on; restore the default and re-raise to die correctly.
+trap '_handoff_drop_stage' EXIT
+trap '_handoff_drop_stage; trap - INT;  kill -INT  $$' INT
+trap '_handoff_drop_stage; trap - TERM; kill -TERM $$' TERM
 # Written last inside the capture block; the publish gate tests for it.
 CAPTURE_END_MARKER="<!-- session-handoff: capture complete -->"
 # A prior run killed before its rename leaves a stage behind; it is not state.

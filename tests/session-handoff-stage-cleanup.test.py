@@ -18,25 +18,33 @@ BASH = shutil.which("bash") or "/bin/bash"
 
 def _trap_snippet() -> str:
     src = SCRIPT.read_text(encoding="utf-8")
-    m = re.search(r"(_handoff_keep_stage=0\ntrap .*?EXIT INT TERM)", src, re.DOTALL)
+    m = re.search(r"(_handoff_keep_stage=0\n.*?kill -TERM \$\$' TERM)", src, re.DOTALL)
     assert m, "stage-cleanup trap not found in session-handoff.sh"
     return m.group(1)
 
 
 class StageCleanup(unittest.TestCase):
-    def test_an_interrupted_run_leaves_no_stage(self):
+    def test_a_cancelled_run_dies_and_leaves_no_stage(self):
+        """Cleanup is not enough: a trap replaces the default action, so a handler
+        that returns lets the cancelled hook run on through the rest of capture."""
         with tempfile.TemporaryDirectory() as tmp:
+            after = Path(tmp) / "downstream-ran"
             harness = (
                 f'STATE_FILE="{tmp}/session-state.md"\n'
                 'STATE_TMP="$(mktemp "${STATE_FILE}.tmp.XXXXXX")"\n'
                 'echo staged > "$STATE_TMP"\n'
                 + _trap_snippet() + "\n"
                 'kill -TERM $$\n'
+                f'touch "{after}"\n'          # must never run
                 'sleep 5\n'
             )
-            subprocess.run([BASH, "-c", harness], capture_output=True, timeout=30)
-            leaked = list(Path(tmp).glob("session-state.md.tmp.*"))
-            self.assertEqual(leaked, [], f"interrupted run leaked {leaked}")
+            r = subprocess.run([BASH, "-c", harness], capture_output=True, timeout=30)
+            self.assertEqual(r.returncode, -15,
+                             f"cancelled hook must die on SIGTERM, got rc={r.returncode}")
+            self.assertFalse(after.exists(),
+                             "work downstream of the signal ran — the trap swallowed it")
+            self.assertEqual(list(Path(tmp).glob("session-state.md.tmp.*")), [],
+                             "cancelled run leaked its stage")
 
     def test_the_publish_failure_path_keeps_the_stage(self):
         """The stage is the only copy of a completed capture — a blanket rm loses it."""
