@@ -1,19 +1,5 @@
-/**
- * Behavioural test for past-the-ceiling chat recovery.
- *
- * The review of this PR found that the "keep the entry so a reload can recover"
- * design was structurally dead: CHAT_PENDING_TTL_MS equalled CHAT_POLL_MAX_MS,
- * so any entry that survived to the ceiling was already outside the GC window,
- * and a resumed poll re-entered with begin = original send time, so its first
- * tick exceeded the ceiling and returned without ever calling /result.
- *
- * The existing suite asserts only that certain strings appear in the source, so
- * it could not see either bug. This test EXECUTES the shipped browser code: the
- * chat-pending region is extracted from the HTML template in src/web-client.ts
- * and evaluated against stub globals, with a fake clock so the ceiling can
- * actually be crossed. localStorage is shared between the two evaluations,
- * which is what makes the second one a genuine page reload.
- */
+// Executes the shipped chat-pending code against stub globals with a fake clock;
+// localStorage persists across both evaluations, which is what makes one a reload.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,8 +15,7 @@ const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const source = readFileSync(join(repoRoot, 'src', 'web-client.ts'), 'utf8');
 
 // Start at the storage-key declaration, not the timing constants: the pending
-// helpers swallow errors, so a key left out of the region fails as a silent
-// no-op rather than a ReferenceError.
+// helpers swallow errors, so a missing key is a silent no-op, not a ReferenceError.
 const START = 'const PERSIST_KEY_CHAT_PENDING';
 const END = '// ─── Text input ─';
 const from = source.indexOf(START);
