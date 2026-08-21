@@ -25,10 +25,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Ensure the sibling `sutando_config` module resolves whether this file is
-# imported as a top-level module (src/ on sys.path — the common case) OR
-# package-style as `src.util_paths` (repo root on sys.path — some tests), where
-# `src/` itself is not on the path and the bare sibling import would ModuleNotFound.
+# The sibling import must resolve both top-level (src/ on sys.path) and
+# package-style (`src.util_paths`), where src/ itself is not on the path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sutando_config import config_get, config_get_env_first  # noqa: E402
 

@@ -95,19 +95,8 @@ def _default_memory_dir() -> str:
     slug = claude_project_slug(repo)
     return str(Path(claude_home_path()) / "projects" / slug / "memory")
 
-# SUTANDO_MEMORY_DIR stays authoritative here (read via os.environ, NOT
-# config_get) — same as everywhere else that resolves core memory
-# (src/voice-agent.ts, src/voice-context.ts, and CLAUDE.md/AGENTS.md all honor
-# the env var). An earlier version of this fix made ONLY this check ignore the
-# override, on the theory that it was purely a stale pre-#1454 workaround (see
-# _default_memory_dir()'s docstring) — but that broke the invariant that this
-# check reports on the SAME directory the rest of the runtime actually
-# reads/writes, which is a worse failure mode than the one being fixed (a health
-# check silently diverging from ground truth). This is a deliberate exception to
-# the #1724 config_get migration: routing it through config_get's
-# config-stanza-first precedence would reintroduce exactly that divergence. If
-# SUTANDO_MEMORY_DIR is a genuine leftover from that era, the memory-dir-override
-# check below flags the divergence instead of silently redirecting.
+# SUTANDO_MEMORY_DIR is read via os.environ, not config_get: this check must
+# report on the same directory the runtime reads, so it opts out of #1724.
 MEMORY_DIR = Path(os.environ.get("SUTANDO_MEMORY_DIR", _default_memory_dir()))
 
 # How much of MEMORY.md a session actually loads. These are the RUNTIME's
@@ -9642,9 +9631,11 @@ def notify_gateway_for_failures(
 # start-cli.sh has its own from-inside-core guard — two independent guarantees
 # the recovery never runs from within the session it would kill.
 
-RECOVER_WEDGE_SEC = int(config_get("SUTANDO_RECOVER_WEDGE_SEC", "600"))        # task stuck this long = wedged
-RECOVER_CONFIRM_SEC = int(config_get("SUTANDO_RECOVER_CONFIRM_SEC", "120"))    # wedge must persist across passes
-RECOVER_COOLDOWN_SEC = int(config_get("SUTANDO_RECOVER_COOLDOWN_SEC", "1800")) # min gap between restarts
+# wedge = a task stuck this long; it must persist across passes before a
+# restart, and cooldown is the minimum gap between restarts.
+RECOVER_WEDGE_SEC = int(config_get("SUTANDO_RECOVER_WEDGE_SEC", "600"))
+RECOVER_CONFIRM_SEC = int(config_get("SUTANDO_RECOVER_CONFIRM_SEC", "120"))
+RECOVER_COOLDOWN_SEC = int(config_get("SUTANDO_RECOVER_COOLDOWN_SEC", "1800"))
 RECOVER_MAX_PER_HOUR = int(config_get("SUTANDO_RECOVER_MAX_PER_HOUR", "3"))
 
 
