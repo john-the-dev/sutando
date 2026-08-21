@@ -131,9 +131,7 @@ This applies to all work — proactive loop passes, voice tasks, user requests, 
 
 ## Graceful shutdown (issue: #2165)
 
-**At the top of every proactive-loop pass, before starting new work:** `python3 src/shutdown.py check` (exit 0 = shutting down). If it exits 0, an intentional **stop** was signalled — finish the current task, do NOT start a new one, write `{"status":"idle"}` to core-status, and end the loop cleanly rather than being killed mid-task. `startup.sh` clears the sentinel on boot.
-
-Only `--stop-only`/explicit stop leaves the sentinel set for you to see; plain `restart.sh` clears it ~3s later **by design**, because the core survives a plain restart and must not read it as a shutdown. Both paths are gated by the watcher's intake check. Full paths table + rationale: [`docs/graceful-shutdown.md`](docs/graceful-shutdown.md).
+**Top of every proactive-loop pass, before new work:** `python3 src/shutdown.py check` (exit 0 = an intentional stop was signalled). Finish the current task, start no new one, write `{"status":"idle"}` to core-status, and end the loop cleanly instead of being killed mid-task. Which paths set it, which clear it, and why: [`docs/graceful-shutdown.md`](docs/graceful-shutdown.md).
 
 ## Chat-path task tracking (issue #585)
 
