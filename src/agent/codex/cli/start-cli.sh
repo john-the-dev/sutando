@@ -275,6 +275,22 @@ if session_exists "$SESSION"; then
   exit 0
 fi
 
+# Past the attach/reuse exit above, so this is a genuine Codex core boot: clear a
+# sentinel left by `restart.sh --stop-only` or the intake gate holds every task.
+if [ -r "$REPO/scripts/python-binary.sh" ]; then
+  # shellcheck source=scripts/python-binary.sh
+  . "$REPO/scripts/python-binary.sh"
+  _sd_py="$(resolve_python "$REPO")"
+else
+  _sd_py=""
+fi
+if [ -n "$_sd_py" ]; then
+  "$_sd_py" "$REPO/src/shutdown.py" clear >/dev/null \
+    || echo "start-cli.sh: shutdown.py clear failed — the intake gate may hold tasks" >&2
+else
+  echo "start-cli.sh: no runnable interpreter — shutdown sentinel NOT cleared" >&2
+fi
+
 if ! tmux_available; then
   echo "  ⚠ tmux not found — Codex will run, but file-bridge task wakeups are unavailable" >&2
   exec codex "${CODEX_ARGS[@]}"

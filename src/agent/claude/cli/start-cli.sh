@@ -61,14 +61,16 @@ SESSION="${SUTANDO_TMUX_SESSION:-sutando-core}"
 # server's environment, not necessarily this shell's.
 export SUTANDO_CORE_SESSION=1
 
-# A real core boot is not a shutdown: clear any sentinel left by
-# `restart.sh --stop-only`, or the watcher gate holds every task all session.
-if [ -n "$PY" ]; then
-  "$PY" "$REPO/src/shutdown.py" clear >/dev/null \
-    || echo "start-cli.sh: shutdown.py clear failed — the intake gate may hold tasks" >&2
-else
-  echo "start-cli.sh: no runnable interpreter — shutdown sentinel NOT cleared" >&2
-fi
+# Called ONLY from paths that create or heal a core. Attaching to a live one
+# must not clear: that would cancel a `--stop-only` still waiting to be observed.
+clear_shutdown_sentinel() {
+  if [ -n "$PY" ]; then
+    "$PY" "$REPO/src/shutdown.py" clear >/dev/null \
+      || echo "start-cli.sh: shutdown.py clear failed — the intake gate may hold tasks" >&2
+  else
+    echo "start-cli.sh: no runnable interpreter — shutdown sentinel NOT cleared" >&2
+  fi
+}
 export SUTANDO_CORE_RUNTIME=claude
 CORE_ENV_ARGS=(-e SUTANDO_CORE_SESSION=1 -e SUTANDO_CORE_RUNTIME=claude)
 [ -n "${SUTANDO_TMUX_SOCKET:-}" ] && CORE_ENV_ARGS+=(-e "SUTANDO_TMUX_SOCKET=$SUTANDO_TMUX_SOCKET")
@@ -696,6 +698,7 @@ if tmux_session_exists; then
   # quiet gateway (same reason launch-sutando.sh creates siblings with -d).
   tmux -S "$TMUX_SOCKET" select-window -t "$SESSION:${healed_idx:-0}" 2>/dev/null || true
   ensure_core_monitor
+  clear_shutdown_sentinel   # healed window is a fresh core
   if [ -t 1 ]; then
     echo "Attaching to healed $SESSION (Ctrl-b d to detach)..."
     exec tmux -S "$TMUX_SOCKET" attach -t "$SESSION"
@@ -703,6 +706,9 @@ if tmux_session_exists; then
   echo "Healed core window in $SESSION (session + sibling windows preserved)."
   exit 0
 fi
+
+# Past every attach/adopt/heal exit above, so this is a genuine fresh boot.
+clear_shutdown_sentinel
 
 # Auto-install tmux via Homebrew if missing. Sutando.app's
 # watcher-auto-restart depends on a tmux-wrapped CLI pane.

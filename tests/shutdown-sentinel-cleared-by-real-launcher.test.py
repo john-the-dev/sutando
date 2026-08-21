@@ -55,4 +55,31 @@ if failures:
     sys.exit(1)
 print("OK: both production launchers clear the sentinel, via a resolved interpreter, "
       "without discarding failure")
+
+def test_clear_is_past_every_reuse_exit_in_the_claude_launcher():
+    """Attaching to a live core must NOT clear: that cancels a --stop-only that is
+    still waiting to be observed. Ordering, not presence."""
+    src = (REPO / "src" / "agent" / "claude" / "cli" / "start-cli.sh").read_text(encoding="utf-8")
+    reuse = src.index("already running.")            # the attach/no-op exit
+    # invocations only — the definition legitimately precedes every call site
+    calls = [m.start() for m in re.finditer(r"^\s*clear_shutdown_sentinel\s*(?:#.*)?$", src, re.M)]
+    assert calls, "no clear_shutdown_sentinel call site"
+    early = [c for c in calls if c < reuse]
+    assert not early, f"clear runs before the reuse exit at {len(early)} site(s) — attach would cancel --stop-only"
+
+
+def test_codex_launcher_clears_too():
+    """The dispatcher can select codex; a core boot there must clear the sentinel."""
+    src = (REPO / "src" / "agent" / "codex" / "cli" / "start-cli.sh").read_text(encoding="utf-8")
+    # Match the INVOCATION, not the substring: the failure message on the next
+    # line also contains "shutdown.py clear" and would satisfy a bare `in`.
+    m = re.search(r'"\$\w+"\s+"\$REPO/src/shutdown\.py"\s+clear\b', src)
+    assert m, "codex launcher never INVOKES shutdown.py clear"
+    reuse = src.index("already running (codex).")
+    call = m.start()
+    assert call > reuse, "codex clear runs before its reuse exit"
+
+
+test_clear_is_past_every_reuse_exit_in_the_claude_launcher()
+test_codex_launcher_clears_too()
 print("Results: all assertions passed")
