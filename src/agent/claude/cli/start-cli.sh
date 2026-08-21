@@ -60,6 +60,15 @@ SESSION="${SUTANDO_TMUX_SESSION:-sutando-core}"
 # branches via `new-session -e` (below) since tmux runs the command under the
 # server's environment, not necessarily this shell's.
 export SUTANDO_CORE_SESSION=1
+
+# A real core boot is not a shutdown: clear any sentinel left by
+# `restart.sh --stop-only`, or the watcher gate holds every task all session.
+if [ -n "$PY" ]; then
+  "$PY" "$REPO/src/shutdown.py" clear >/dev/null \
+    || echo "start-cli.sh: shutdown.py clear failed — the intake gate may hold tasks" >&2
+else
+  echo "start-cli.sh: no runnable python3 — shutdown sentinel NOT cleared" >&2
+fi
 export SUTANDO_CORE_RUNTIME=claude
 CORE_ENV_ARGS=(-e SUTANDO_CORE_SESSION=1 -e SUTANDO_CORE_RUNTIME=claude)
 [ -n "${SUTANDO_TMUX_SOCKET:-}" ] && CORE_ENV_ARGS+=(-e "SUTANDO_TMUX_SOCKET=$SUTANDO_TMUX_SOCKET")

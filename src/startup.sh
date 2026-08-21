@@ -491,10 +491,10 @@ bash "$REPO/scripts/install-session-start-hook.sh" 2>&1 || true
 # rules. Idempotent — safe to run on every start.
 bash "$REPO/scripts/install-personal-claude-hook.sh" 2>&1 || true
 
-# Boot means we're starting up, not shutting down — clear any leftover
-# graceful-shutdown sentinel (e.g. from `restart.sh --stop-only` followed by a
-# manual start) so the fresh core loop doesn't immediately short-circuit.
-python3 "$REPO/src/shutdown.py" clear >/dev/null 2>&1 || true
+# Boot is not a shutdown: clear any sentinel left by `restart.sh --stop-only`
+# so the fresh core loop does not immediately short-circuit.
+"$PY" "$REPO/src/shutdown.py" clear >/dev/null \
+    || echo "startup.sh: shutdown.py clear failed — the boot gate may still hold tasks" >&2
 
 # Auto-bootstrap: create-if-missing files and dirs that the agent + skills
 # expect to exist (logs, state, tasks, results, notes, contextual-chips.json,
