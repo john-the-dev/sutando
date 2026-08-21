@@ -64,7 +64,7 @@ from util_paths import channel_access_path, claude_home_path, write_private_text
 
 from workspace_default import resolve_workspace  # noqa: E402
 from presenter_mode import presenter_mode_active  # noqa: E402
-from sutando_config import config_get  # noqa: E402
+from sutando_config import config_get, config_get_env_first  # noqa: E402
 from task_archive import find_task_file  # noqa: E402
 from single_instance import acquire as _single_instance_acquire  # noqa: E402
 import progress_stream  # noqa: E402  (opt-in owner progress streaming, SUTANDO_PROGRESS_STREAM=1)
@@ -1031,7 +1031,7 @@ def main():  # pragma: no cover
                         # file out of the `*.txt` glob every peer bridge polls.
                         # `_resolve_proactive_owner_id` orders allowFrom explicitly; a
                         # bare `next(iter(set))` picked a hash-slot, not the first user.
-                        env_override = (config_get("SUTANDO_DM_OWNER_ID", "") or "").strip()
+                        env_override = (config_get_env_first("SUTANDO_DM_OWNER_ID", "") or "").strip()
                         try:
                             access_data = json.loads(ACCESS_FILE.read_text())
                         except Exception:
