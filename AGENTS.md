@@ -129,9 +129,9 @@ echo '{"status":"idle","ts":<epoch>}' > "$CORE_STATUS"                          
 
 This applies to all work — proactive loop passes, voice tasks, user requests, code changes.
 
-## Graceful shutdown (issue: #2165)
+## Graceful shutdown (#2165)
 
-**Top of every proactive-loop pass, before new work:** `python3 src/shutdown.py check` (exit 0 = an intentional stop was signalled). Finish the current task, start no new one, write `{"status":"idle"}` to core-status, and end the loop cleanly instead of being killed mid-task. Which paths set it, which clear it, and why: [`docs/graceful-shutdown.md`](docs/graceful-shutdown.md).
+**Top of every proactive-loop pass:** `python3 src/shutdown.py check` — exit 0 means an intentional stop. Finish the current task, start no new one, write `{"status":"idle"}`, end the loop cleanly. Paths and rationale: [`docs/graceful-shutdown.md`](docs/graceful-shutdown.md).
 
 ## Chat-path task tracking (issue #585)
 
