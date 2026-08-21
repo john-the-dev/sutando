@@ -174,11 +174,8 @@ ALLOWLIST = {
     # token composes the tasks dir FROM that injected value, mirroring
     # task_archive.py's caller-supplies-the-path rationale.
     "src/agent_endpoint.py",
-    # core_runtime_marker.py never resolves the workspace itself — both launchers
-    # resolve it (sutando-config.sh workspace) and pass it in, exactly the
-    # caller-supplies-the-path shape as task_archive.py and agent_endpoint.py.
-    # Importing the resolver here would be the wrong fix: it would make the shared
-    # writer pick its own destination instead of taking the one it is given.
+    # The writer never resolves the workspace — both launchers pass it in; a
+    # resolver import here would let it pick its own destination instead.
     "src/core_runtime_marker.py",
 }
 

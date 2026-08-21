@@ -30,13 +30,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "src" / "agent" / "claude" / "cli" / "start-cli.sh"
 
-# Coreutils the launcher + sutando-config workspace resolver need before the
-# marker block. We build a curated bin dir with ONLY these (plus stub
-# claude/pgrep) so tmux is guaranteed absent on every platform — that forces
-# the no-tmux fallback and means the run never touches the real tmux socket.
-# python3 excluding /usr/bin (where tmux also lives on Linux) is exactly why we
-# can't reuse start-cli-model-pin's `{bind}:/bin` PATH: this test needs python3
-# (workspace resolution) but must still exclude tmux.
+# A curated bin dir (coreutils + stub claude/pgrep, no tmux) forces the no-tmux
+# fallback, so the run never touches the real socket; /usr/bin would re-add tmux.
 _TOOLS = [
     "bash", "sh", "env", "python3", "dirname", "hostname", "date", "sed",
     "mkdir", "mktemp", "rm", "cat", "sleep", "uname", "cut", "grep", "head",
