@@ -238,8 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         capture("core_started", {"interval_s": args.interval})
     except Exception:  # pragma: no cover — telemetry must never break the core
         pass
-    # Daemon thread so a quota read never delays the beat loop. Best-effort:
-    # no-op if telemetry is off or the quota-tracker is absent.
+    # Daemon thread: a quota read must never delay the beat loop.
     try:  # pragma: no cover — fire-and-forget glue
         import threading
         threading.Thread(target=_emit_token_usage, daemon=True).start()
