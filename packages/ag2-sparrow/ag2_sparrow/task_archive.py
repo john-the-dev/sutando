@@ -14,8 +14,25 @@ Usage:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
+
+# The suffixes a task file can carry. `find_task_file` maps id -> path; this
+# maps path -> id, which several readers were deriving with `.stem` instead.
+_ID_PLAIN = re.compile(r"^(task-[^.]+)\.txt(?:\.\d+|\.archive-failed.*)?$")
+_ID_CLAIMED = re.compile(r"^(task-[^.]+)\.claimed-core-\d+\.txt$")
+
+
+def task_id_from_filename(name: str) -> str | None:
+    r"""The canonical task id for any name a task file carries, or None.
+
+    `Path.stem` and a greedy `^task-(.+)\.txt$` both return the compound name
+    for a CLAIMED file, so the caller then looks for a result under an id that
+    nothing ever writes.
+    """
+    match = _ID_PLAIN.match(name) or _ID_CLAIMED.match(name)
+    return match.group(1) if match else None
 
 def find_task_file(tasks_dir: Path, task_id: str) -> Path | None:
     """Return the actual task file path for task_id, or None if absent.
