@@ -43,12 +43,59 @@ __all__ = [
 ]
 
 # Already carries an ID: [task 20260715-001] or ...-001-extend-...
+# The exact prefix stamp_result_file writes, so the probe measures the real edit.
+_STAMP_PROBE = "[task 00000000-000]\n\n"
+
 _STAMPED = re.compile(r"^\s*\[task \d{8}-\d{3}")
 # Bridge control markers only fire as the FIRST non-empty line. Prepending an
 # ID would push them off line 1 and silently break skip/redirect routing.
-_BRIDGE_MARKER = re.compile(
-    r"^\s*\[(?:no-send\]|deduped:|REPLIED\]|channel:|dm-only\])", re.IGNORECASE
-)
+def _load_parse_markers():
+    """The canonical marker parser, however this module was imported.
+
+    `result_markers.py` is a sibling in BOTH trees (src/ and the vendored
+    package), so the by-path fallback is correct by construction.
+    """
+    try:  # package import
+        from .result_markers import parse_markers
+        return parse_markers
+    except ImportError:
+        pass
+    try:  # flat src/ on sys.path
+        from result_markers import parse_markers
+        return parse_markers
+    except ImportError:  # loaded by file path, e.g. from a test
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_result_ready_markers", Path(__file__).resolve().parent / "result_markers.py")
+        if spec is None or spec.loader is None:
+            raise
+        import sys as _sys
+        mod = importlib.util.module_from_spec(spec)
+        _sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod.parse_markers
+
+
+def _stamp_exempt(body: str) -> bool:
+    """True when `body` must not acquire a `[task …]` stamp.
+
+    Asks `result_markers` rather than matching marker shapes here: a private
+    regex drifts the moment a new position-dependent marker is added.
+    """
+    parse_markers = _load_parse_markers()
+
+    def _seen(text: str) -> set:
+        return {(a.kind, a.value) for a in parse_markers(text).actions}
+
+    try:
+        if _seen(body) != _seen(_STAMP_PROBE + body):
+            return True
+        # dm-only reads anywhere, so a stamp cannot displace it — but two suites
+        # pin these bodies as unstamped, so keep that contract rather than widen.
+        return any(a.kind == "dm-only" for a in parse_markers(body).actions)
+    except Exception:
+        # Unparseable body: refuse to stamp rather than risk displacing a marker.
+        return True
 
 
 def needs_task_stamp(name: str, body: str) -> bool:
@@ -58,7 +105,7 @@ def needs_task_stamp(name: str, body: str) -> bool:
         and name.endswith(".txt")
         and bool(body.strip())
         and not _STAMPED.match(body)
-        and not _BRIDGE_MARKER.match(body)
+        and not _stamp_exempt(body)
     )
 
 
