@@ -44,6 +44,7 @@ def fake_osascript(script: str, timeout: int = 20) -> str:
 
 
 xb._osascript = fake_osascript                          # type: ignore[assignment]
+
 xb._chrome_running = lambda: True                       # type: ignore[assignment]
 xb.time.sleep = lambda *_a, **_k: None                  # type: ignore[assignment]
 
