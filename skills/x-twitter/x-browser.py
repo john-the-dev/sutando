@@ -70,6 +70,64 @@ def _chrome_running() -> bool:
         return False
 
 
+_TARGET: dict | None = None  # {"win": id, "tab": id} — the ONE page every phase addresses
+
+
+def _target_script(body: str) -> str:
+    """AppleScript that binds theWin/theTab/tabIdx to the RECORDED ids.
+
+    Addressing by id is what makes focus changes unable to retarget: a scan for
+    the first matching URL picks a different page when windows reorder.
+    """
+    w, t = _TARGET["win"], _TARGET["tab"]
+    return f'''
+tell application "Google Chrome"
+  set theWin to missing value
+  set theTab to missing value
+  set tabIdx to 0
+  repeat with w in windows
+    if (id of w) is {w} then
+      set theWin to w
+      set i to 0
+      repeat with t in tabs of w
+        set i to i + 1
+        if (id of t) is {t} then
+          set theTab to t
+          set tabIdx to i
+          exit repeat
+        end if
+      end repeat
+      exit repeat
+    end if
+  end repeat
+  if theTab is missing value then return "__TARGET_GONE__"
+{body}
+end tell
+'''
+
+
+def _record_target() -> None:
+    """Resolve the first x.com tab ONCE and remember its window+tab ids."""
+    global _TARGET
+    res = _osascript('''
+tell application "Google Chrome"
+  repeat with w in windows
+    repeat with t in tabs of w
+      set u to URL of t
+      if u contains "x.com" or u contains "twitter.com" then
+        return ((id of w) as text) & "," & ((id of t) as text)
+      end if
+    end repeat
+  end repeat
+  return "__NO_X_TAB__"
+end tell
+''')
+    if res == "__NO_X_TAB__":
+        raise BrowserError("no x.com tab is open in Chrome")
+    win, _, tab = res.partition(",")
+    _TARGET = {"win": int(win.strip()), "tab": int(tab.strip())}
+
+
 def run_js(js: str, timeout: int = 20) -> str:
     """Run a JS snippet in the first x.com/twitter.com tab; return its value.
 
@@ -78,24 +136,14 @@ def run_js(js: str, timeout: int = 20) -> str:
     return value.
     """
     b64 = base64.b64encode(js.encode("utf-8")).decode("ascii")
-    script = f'''
-tell application "Google Chrome"
-  set theTab to missing value
-  repeat with w in windows
-    repeat with t in tabs of w
-      set u to URL of t
-      if u contains "x.com" or u contains "twitter.com" then
-        set theTab to t
-        exit repeat
-      end if
-    end repeat
-    if theTab is not missing value then exit repeat
-  end repeat
-  if theTab is missing value then return "__NO_X_TAB__"
-  return execute theTab javascript "eval(atob('{b64}'))"
-end tell
-'''
+    if _TARGET is None:
+        _record_target()
+    script = _target_script(
+        f'  return execute theTab javascript "eval(atob(\'{b64}\'))"')
     res = _osascript(script, timeout=timeout)
+    if res == "__TARGET_GONE__":
+        raise BrowserError("the x.com tab this operation started on is gone — "
+                           "refusing to retarget another tab")
     if res == "__NO_X_TAB__":
         raise BrowserError("no x.com tab is open in Chrome")
     if res.startswith("__JSERR__"):
@@ -107,17 +155,21 @@ def ensure_tab(url: str, settle: float = 4.0, max_wait: float = 15.0) -> None:
     """Point an x.com tab at `url` (reuse one if present, else open a new tab),
     then wait for document.readyState == 'complete' plus a short settle for the
     React SPA to render."""
+    global _TARGET
+    _TARGET = None  # a new operation: never inherit the previous page's identity
     if not _chrome_running():
         raise BrowserError("Google Chrome is not running")
     b64 = base64.b64encode(url.encode("utf-8")).decode("ascii")
     script = f'''
 tell application "Google Chrome"
   if (count of windows) is 0 then make new window
+  set theWin to missing value
   set theTab to missing value
   repeat with w in windows
     repeat with t in tabs of w
       set u to URL of t
       if u contains "x.com" or u contains "twitter.com" then
+        set theWin to w
         set theTab to t
         exit repeat
       end if
@@ -126,13 +178,20 @@ tell application "Google Chrome"
   end repeat
   set target to (do shell script "python3 -c \\"import base64,sys;sys.stdout.write(base64.b64decode('{b64}').decode())\\"")
   if theTab is missing value then
-    set theTab to make new tab at end of tabs of front window with properties {{URL:target}}
+    set theWin to front window
+    set theTab to make new tab at end of tabs of theWin with properties {{URL:target}}
   else
     set URL of theTab to target
   end if
+  return ((id of theWin) as text) & "," & ((id of theTab) as text)
 end tell
 '''
-    _osascript(script)
+    ids = _osascript(script)
+    win, _, tab = ids.partition(",")
+    try:
+        _TARGET = {"win": int(win.strip()), "tab": int(tab.strip())}
+    except ValueError:
+        raise BrowserError(f"could not identify the x.com tab (got {ids!r})")
     # Poll for load completion.
     deadline = time.time() + max_wait
     while time.time() < deadline:
@@ -256,21 +315,13 @@ def _os_submit_via_keystroke() -> None:
     be driven from inside the page. This brings Chrome forward, activates the
     x.com tab, and sends an OS-level keystroke via System Events (needs
     Accessibility permission)."""
-    osa = '''
-tell application "Google Chrome"
-  activate
-  repeat with w in windows
-    set ti to 0
-    repeat with t in tabs of w
-      set ti to ti + 1
-      if (URL of t contains "x.com" or URL of t contains "twitter.com") then
-        set active tab index of w to ti
-        set index of w to 1
-        exit repeat
-      end if
-    end repeat
-  end repeat
-end tell
+    if _TARGET is None:
+        raise BrowserError("no target tab recorded — refusing to submit blind")
+    osa = _target_script(
+        "  set index of theWin to 1\n"
+        "  set active tab index of theWin to tabIdx\n"
+        "  activate"
+    ) + '''
 delay 0.7
 tell application "System Events"
   keystroke return using command down
