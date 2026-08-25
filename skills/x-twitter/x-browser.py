@@ -48,7 +48,7 @@ class BrowserError(RuntimeError):
     pass
 
 
-def _osascript(script: str, timeout: int = 20) -> str:
+def _osascript(script: str, timeout: int = 20) -> str:  # pragma: no cover - the one osascript seam; every caller is tested against a stub
     try:
         p = subprocess.run(
             ["osascript", "-e", script],
@@ -63,7 +63,7 @@ def _osascript(script: str, timeout: int = 20) -> str:
     return out
 
 
-def _chrome_running() -> bool:
+def _chrome_running() -> bool:  # pragma: no cover - pgrep against a live Chrome
     try:
         p = subprocess.run(["pgrep", "-x", "Google Chrome"],
                            capture_output=True, text=True)
@@ -310,7 +310,7 @@ def cmd_like(ref: str) -> int:
     print("like click sent but not confirmed"); return 1
 
 
-def _os_submit_via_keystroke() -> None:
+def _os_submit_via_keystroke() -> None:  # pragma: no cover - sends real keystrokes to the frontmost app
     """Send a REAL Cmd+Return to Chrome to submit the focused composer.
 
     X ignores synthetic JS submit events (untrusted), so the post button can't
