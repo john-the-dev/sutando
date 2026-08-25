@@ -107,6 +107,7 @@ from git_binary import git_argv  # noqa: E402
 from workspace_default import resolve_workspace, status_read_path  # noqa: E402
 import local_task_protocol  # noqa: E402
 import task_workstreams  # noqa: E402
+from task_archive import task_id_from_filename  # noqa: E402
 
 WORKSPACE_DIR = resolve_workspace()
 TASK_DIR = WORKSPACE_DIR / "tasks"
@@ -353,7 +354,11 @@ def _active_task_rows() -> list[dict]:
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )[:10]:
-        task_id = task_file.stem
+        # A CLAIMED task is task-{id}.claimed-core-N.txt; `.stem` would key the
+        # row by the filename, so its reply is never found under that id.
+        task_id = task_id_from_filename(task_file.name)
+        if task_id is None:
+            continue
         content = task_file.read_text()
         # First `source:` and `task:` regardless of field order; body
         # lookalikes must not override the real headers.

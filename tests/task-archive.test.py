@@ -12,7 +12,7 @@ from datetime import datetime
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from task_archive import archive_file, find_task_file
+from task_archive import archive_file, find_task_file, task_id_from_filename
 
 
 def exdev_from(src):
@@ -269,6 +269,46 @@ TA._move_without_clobbering(src, dest / "task-crash.txt")
             self.assertFalse((root / "dest" / "task-crash.txt").exists(),
                              "a truncated record was published under the authoritative name")
             self.assertTrue((root / "live.txt").exists(), "the live source must survive")
+
+
+class TaskIdFromFilename(unittest.TestCase):
+    """`.stem` and a greedy `^task-(.+)\\.txt$` both return the compound name for a
+    CLAIMED file, so the caller looks for a reply under an id nothing writes."""
+
+    def test_every_real_filename_form_yields_one_canonical_id(self):
+        for name in ("task-abc123.txt",
+                     "task-abc123.claimed-core-2.txt",
+                     "task-abc123.claimed-core-11.txt",
+                     "task-abc123.txt.1",
+                     "task-abc123.txt.archive-failed-9"):
+            with self.subTest(name=name):
+                self.assertEqual(task_id_from_filename(name), "task-abc123")
+
+    def test_claimed_is_the_regression_stem_gets_wrong(self):
+        name = "task-abc123.claimed-core-2.txt"
+        self.assertEqual(Path(name).stem, "task-abc123.claimed-core-2")   # the old behaviour
+        self.assertEqual(task_id_from_filename(name), "task-abc123")      # the fixed one
+
+    def test_hyphenated_ids_survive(self):
+        self.assertEqual(
+            task_id_from_filename("task-cron-pending-questions-1787641302891.txt"),
+            "task-cron-pending-questions-1787641302891")
+
+    def test_non_task_and_malformed_names_are_rejected_not_guessed(self):
+        for name in ("proactive-123.txt", "notes.txt", "task-abc123.claimed-core-x.txt"):
+            with self.subTest(name=name):
+                self.assertIsNone(task_id_from_filename(name))
+
+    def test_round_trips_with_find_task_file(self):
+        """The two directions must agree, or a locator and a reader disagree."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tasks = Path(tmp)
+            claimed = tasks / "task-abc123.claimed-core-2.txt"
+            claimed.write_text("id: task-abc123\n")
+            task_id = task_id_from_filename(claimed.name)
+            self.assertEqual(task_id, "task-abc123")
+            self.assertEqual(find_task_file(tasks, task_id), claimed)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
