@@ -317,6 +317,35 @@ class TaskIdFromFilename(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIsNone(task_id_from_filename(name))
 
+    def test_find_task_file_accepts_every_state_the_id_parser_does(self):
+        """One filename grammar for both functions: a narrower glob here handles
+        one state, misses its sibling, and the archive silently strands the file."""
+        cases = {
+            "task-A.txt": "task-A",
+            "task-B.claimed-core-1.txt": "task-B",
+            "task-C.assigned-core-2.txt": "task-C",
+            "task-D.claimed-worker-7.txt": "task-D",
+            "task-E.claimed-core1.txt": "task-E",
+            "task-F.a.claimed-core-3.txt": "task-F.a",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            tasks = Path(tmp)
+            for name in cases:
+                (tasks / name).write_text("x")
+            for name, task_id in cases.items():
+                with self.subTest(name=name):
+                    self.assertEqual(task_id_from_filename(name), task_id)
+                    found = find_task_file(tasks, task_id)
+                    self.assertIsNotNone(found, f"{name} not located by {task_id}")
+                    self.assertEqual(found.name, name)
+
+    def test_a_shorter_id_does_not_grab_a_dotted_siblings_file(self):
+        """The glob is a prefix match, so the grammar must confirm the id itself."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tasks = Path(tmp)
+            (tasks / "task-F.a.claimed-core-3.txt").write_text("x")
+            self.assertIsNone(find_task_file(tasks, "task-F"))
+
     def test_round_trips_with_find_task_file(self):
         """The two directions must agree, or a locator and a reader disagree."""
         with tempfile.TemporaryDirectory() as tmp:

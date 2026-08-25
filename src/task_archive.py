@@ -39,15 +39,20 @@ def task_id_from_filename(name: str) -> str | None:
 def find_task_file(tasks_dir: Path, task_id: str) -> Path | None:
     """Return the actual task file path for task_id, or None if absent.
 
-    Checks the bare name first (unclaimed), then globs for the claimed
-    variant (task-{id}.claimed-core-N.txt). If multiple claimed variants
-    exist (shouldn't happen but defensive), returns the first lexicographic
-    match and that's good enough — the caller only needs one path to archive.
+    Checks the bare name first (unclaimed), then any state variant. State
+    matching goes through `_ID_STATE` — the same grammar `task_id_from_filename`
+    uses — because a second, narrower pattern here is exactly how one state gets
+    handled and its sibling missed. If multiple variants exist (shouldn't happen
+    but defensive), returns the first lexicographic match; the caller only needs
+    one path to archive.
     """
     bare = tasks_dir / f"{task_id}.txt"
     if bare.exists():
         return bare
-    matches = sorted(tasks_dir.glob(f"{task_id}.claimed-core-*.txt"))
+    matches = sorted(
+        p for p in tasks_dir.glob(f"{task_id}.*")
+        if (m := _ID_STATE.match(p.name)) and m.group(1) == task_id
+    )
     if matches:
         return matches[0]
     # Quarantined last: it is the task's only surviving header block, and
