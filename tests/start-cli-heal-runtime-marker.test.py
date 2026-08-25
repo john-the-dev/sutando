@@ -1,15 +1,6 @@
 #!/usr/bin/env python3
-"""The heal path launches a Claude core and must stamp the runtime marker.
-
-start-cli.sh exits at the end of the heal branch, well before the create path's
-stamp. That branch is what `sutando-ctl.sh restart-core` takes, so without a stamp
-there the ordinary Claude restart leaves core-runtime.json reading whatever the
-previous runtime wrote.
-
-Unlike start-cli-core-runtime-marker.test.py, this exercises REAL tmux — the heal
-branch is unreachable without it. The socket is a disposable path inside the test's
-own temp dir and is asserted to differ from the live one before anything runs.
-"""
+"""The heal branch exits before the create path's stamp, so it must stamp the marker itself.
+Uses REAL tmux on a disposable socket, asserted to differ from the live one before anything runs."""
 from __future__ import annotations
 
 import json

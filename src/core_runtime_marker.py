@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
-"""Sole writer of the core-runtime marker and the session-start log.
-
-Both launchers declare which runtime owns the core. Two inline copies drifted:
-Claude's omitted the marker and the log's `runtime` field entirely, so after a
-Codex->Claude switch readers saw a runtime that no longer matched reality.
-
-The launcher injects runtime, session and source; schema, atomicity and failure
-semantics live here. `core-runtime.json` is replaced atomically because readers
-poll it — a truncating write publishes an empty file to anyone reading mid-write.
-The log is append-only and each line stands alone, so it needs no rename.
-
-Best-effort by contract: a launch must never fail because bookkeeping did.
-"""
+"""Sole writer of the marker and session-start log; launchers inject runtime/session/source.
+core-runtime.json is replaced atomically (readers poll it); best-effort — a launch never fails on it."""
 from __future__ import annotations
 
 import json
@@ -27,10 +16,7 @@ VALID_RUNTIMES = ("claude", "codex")
 
 def write_marker(workspace, runtime: str, session: str, source: str = "start-cli") -> bool:
     """Declare `runtime` as the core in `workspace`. True if both records landed.
-
-    Raises ValueError on an unknown runtime: that is a caller bug, and writing it
-    would publish a value no reader understands.
-    """
+    Raises ValueError on an unknown runtime — it would publish a value no reader understands."""
     if runtime not in VALID_RUNTIMES:
         raise ValueError(f"unknown runtime {runtime!r}; expected one of {VALID_RUNTIMES}")
     if not workspace:

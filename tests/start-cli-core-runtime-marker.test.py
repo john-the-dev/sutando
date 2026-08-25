@@ -1,24 +1,6 @@
 #!/usr/bin/env python3
-"""Tests that src/agent/claude/cli/start-cli.sh writes the Claude runtime marker.
-
-Gap this covers: only the Codex launcher (src/agent/codex/cli/start-cli.sh) wrote
-`state/core-runtime.json` (hardcoded runtime:"codex"). The Claude launcher wrote
-neither the marker nor a `runtime` field on its `state/session-starts.log` line, so
-after a Codex->Claude core switch the marker stayed stale ("codex") or absent, even
-though the live core was Claude. Readers (health-check's Codex-repair path, the
-dashboard, rollback logic) then saw a runtime that no longer matched reality.
-
-This drives the real launcher through its no-tmux fallback with a stub `claude`
-(records argv, exits) and a stub `pgrep` (always "not running"), and redirects the
-workspace to a per-test tmp dir via the sanctioned SUTANDO_TEST_MODE escape hatch
-(src/sutando_config.py resolve_workspace). It asserts the launcher wrote, before it
-exec'd claude:
-  - state/core-runtime.json = {"runtime":"claude","session":"sutando-core","started_at":<int>}
-  - state/session-starts.log last line carries source:"start-cli" AND runtime:"claude"
-
-Run: python3 tests/start-cli-core-runtime-marker.test.py
-Exit: 0 on pass, 1 on fail.
-"""
+"""Pins that the Claude launcher writes core-runtime.json and a runtime field BEFORE exec.
+Drives the real launcher through its no-tmux fallback with stub claude/pgrep."""
 from __future__ import annotations
 import json
 import shutil
@@ -136,10 +118,7 @@ def case_detached_publish_is_behind_the_liveness_gate() -> list[str]:
 
 def case_exec_paths_publish_adjacent_to_exec() -> list[str]:
     """`exec` replaces the process, so no post-launch point exists on those paths.
-
-    Pre-exec publication there is a structural limit, not a chosen behaviour —
-    pinned so it cannot silently spread to a path that CAN verify.
-    """
+    Pinned so pre-exec publication cannot spread to a path that CAN verify."""
     src = SCRIPT.read_text(encoding="utf-8")
     fails: list[str] = []
     for anchor in ("exec claude --name", 'exec tmux -S "$TMUX_SOCKET" new-session -A'):

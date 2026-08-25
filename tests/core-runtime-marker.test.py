@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """Contract for the shared core-runtime writer, plus each launcher's delegation.
-
-Two inline copies of this record drifted once already. The contract half pins
-schema/atomicity/failure semantics; the delegation half fails if either launcher
-grows its own writer back, which is the drift the extraction exists to prevent.
-"""
+The delegation half fails if either launcher grows its own writer back."""
 from __future__ import annotations
 
 import importlib.util
@@ -151,10 +147,7 @@ class TestLauncherDelegation(unittest.TestCase):
 
     def test_main_returns_in_process(self):
         """Call main() directly, not only through a subprocess.
-
-        A subprocess proves the CLI is invocable but is invisible to coverage and
-        hides which branch ran; these assert the exit contract at the source.
-        """
+        A subprocess is invisible to coverage and hides which branch ran."""
         ws = Path(tempfile.mkdtemp())
         self.assertEqual(crm.main(["prog", str(ws), "codex", "sess"]), 0)
         self.assertEqual(crm.main(["prog", "only-a-workspace"]), 2)      # usage
