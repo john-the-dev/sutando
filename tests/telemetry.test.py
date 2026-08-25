@@ -546,6 +546,40 @@ def run():
         passed += 1
         print("ok   BEFORE legacy opt-out lost on churn / AFTER durable opt-out survives (#2147)")
 
+    # 21) Adversarial numeric aliases, asserted on the SERIALISED payload rather
+    #     than on _coarse_model: the raw value must be absent from every field.
+    for raw, family in (("claude-15551234567", "claude"),
+                        ("gemini-4111111111111111", "gemini"),
+                        ("gpt-123456789012345678901234567890", "gpt"),
+                        ("gpt-12345678", "gpt")):
+        with tempfile.TemporaryDirectory() as td:
+            mod = _load(Path(td), key="phc_live", env={"SUTANDO_CORE_MODEL": raw})
+            calls = []
+            mod._post = lambda payload: calls.append(payload)  # type: ignore
+            _capture_sync(mod, "core_started", {"interval_s": 30})
+            pr = calls[0]["properties"]
+            digits = raw.split("-", 1)[1]
+            wire = json.dumps(calls[0])
+            assert pr["core_model"] == family, f"{raw}: got {pr['core_model']!r}"
+            assert pr["$set"]["core_model"] == family, pr["$set"]
+            assert digits not in wire, f"{raw}: raw identifier reached the wire in {wire}"
+    passed += 1
+    print("ok   adversarial numeric aliases collapse to family, absent from the payload")
+
+    # 22) Control for 21: without this, a guard that collapses EVERYTHING would
+    #     pass 21 and prove nothing.
+    for raw in ("claude-3-5-sonnet-20241022", "claude-sonnet-4-5-20250929",
+                "gpt-4o", "claude-opus-4-1", "gemini-2.5-pro", "llama-70b", "o3-mini"):
+        with tempfile.TemporaryDirectory() as td:
+            mod = _load(Path(td), key="phc_live", env={"SUTANDO_CORE_MODEL": raw})
+            calls = []
+            mod._post = lambda payload: calls.append(payload)  # type: ignore
+            _capture_sync(mod, "core_started", {"interval_s": 30})
+            got = calls[0]["properties"]["core_model"]
+            assert got == raw, f"real model id was collapsed: {raw} -> {got}"
+    passed += 1
+    print("ok   real model ids survive the numeric guard intact (control)")
+
     print(f"\nALL PASS ({passed} checks)")
     return 0
 
