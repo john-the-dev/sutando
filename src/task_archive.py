@@ -18,10 +18,10 @@ import re
 from pathlib import Path
 
 
-# The suffixes a task file can carry. `find_task_file` maps id -> path; this
-# maps path -> id, which several readers were deriving with `.stem` instead.
-_ID_PLAIN = re.compile(r"^(task-[^.]+)\.txt(?:\.\d+|\.archive-failed.*)?$")
-_ID_CLAIMED = re.compile(r"^(task-[^.]+)\.claimed-core-\d+\.txt$")
+# A dot is legal inside an id: pool_lead allows [A-Za-z0-9._~-] and excludes the
+# state suffixes by lookahead rather than banning dots.
+_ID_STATE = re.compile(r"^(task-.+?)\.(?:assigned|claimed)-.+?\.txt$")
+_ID_PLAIN = re.compile(r"^(task-.+?)\.txt(?:\.\d+|\.archive-failed.*)?$")
 
 
 def task_id_from_filename(name: str) -> str | None:
@@ -29,9 +29,11 @@ def task_id_from_filename(name: str) -> str | None:
 
     `Path.stem` and a greedy `^task-(.+)\.txt$` both return the compound name
     for a CLAIMED file, so the caller then looks for a result under an id that
-    nothing ever writes.
+    nothing ever writes. Covers the lead's `.assigned-<inst>` rename too.
     """
-    match = _ID_PLAIN.match(name) or _ID_CLAIMED.match(name)
+    # _ID_STATE first: the non-greedy id in _ID_PLAIN would otherwise swallow a
+    # state suffix and hand back the compound name this function exists to avoid.
+    match = _ID_STATE.match(name) or _ID_PLAIN.match(name)
     return match.group(1) if match else None
 
 def find_task_file(tasks_dir: Path, task_id: str) -> Path | None:

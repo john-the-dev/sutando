@@ -279,6 +279,8 @@ class TaskIdFromFilename(unittest.TestCase):
         for name in ("task-abc123.txt",
                      "task-abc123.claimed-core-2.txt",
                      "task-abc123.claimed-core-11.txt",
+                     "task-abc123.assigned-core-3.txt",
+                     "task-abc123.assigned-follower-7.txt",
                      "task-abc123.txt.1",
                      "task-abc123.txt.archive-failed-9"):
             with self.subTest(name=name):
@@ -289,13 +291,29 @@ class TaskIdFromFilename(unittest.TestCase):
         self.assertEqual(Path(name).stem, "task-abc123.claimed-core-2")   # the old behaviour
         self.assertEqual(task_id_from_filename(name), "task-abc123")      # the fixed one
 
+    def test_instance_label_is_opaque(self):
+        """pool_lead interpolates the instance with re.escape, so the label is
+        arbitrary — a reader must not assume `core-<digits>`."""
+        for name in ("task-abc123.claimed-core-x.txt",
+                     "task-abc123.assigned-follower-7.txt",
+                     "task-abc123.claimed-core-2.local.txt"):
+            with self.subTest(name=name):
+                self.assertEqual(task_id_from_filename(name), "task-abc123")
+
+    def test_a_dot_inside_an_id_is_legal(self):
+        """pool_lead allows [A-Za-z0-9._~-] in an id and excludes the state
+        suffixes by lookahead, so banning dots would reject a valid name."""
+        self.assertEqual(task_id_from_filename("task-a.b.txt"), "task-a.b")
+        self.assertEqual(
+            task_id_from_filename("task-a.b.claimed-core-2.txt"), "task-a.b")
+
     def test_hyphenated_ids_survive(self):
         self.assertEqual(
             task_id_from_filename("task-cron-pending-questions-1787641302891.txt"),
             "task-cron-pending-questions-1787641302891")
 
     def test_non_task_and_malformed_names_are_rejected_not_guessed(self):
-        for name in ("proactive-123.txt", "notes.txt", "task-abc123.claimed-core-x.txt"):
+        for name in ("proactive-123.txt", "notes.txt", "reply-1.txt"):
             with self.subTest(name=name):
                 self.assertIsNone(task_id_from_filename(name))
 
