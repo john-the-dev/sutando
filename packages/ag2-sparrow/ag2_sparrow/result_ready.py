@@ -136,6 +136,40 @@ def _release_reservation(state: Path, name: str) -> None:
         pass  # a lingering reservation is reused, never double-spent
 
 
+def _reconcile_history(state: Path, tid: str) -> bool:
+    """Raise today's history floor to cover `tid`. Caller holds the counter lock.
+
+    The count commits before the history write, so an attempt that died between
+    them left a reservation whose day-total row was never recorded.
+    """
+    history = state / "task-completions-daily.json"
+    day, _, seq = tid.partition("-")
+    try:
+        n = int(seq)
+    except Exception:
+        return False
+    try:
+        try:
+            hist = json.loads(history.read_text())
+            if not isinstance(hist, dict):
+                hist = {}
+        except Exception:
+            hist = {}
+        try:
+            cur = int(hist.get(day, 0))
+        except Exception:
+            cur = 0
+        if cur >= n:
+            return True
+        hist[day] = n
+        tmp = history.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(hist))
+        tmp.replace(history)
+        return True
+    except Exception:
+        return False
+
+
 def _alloc_locked(state: Path, reserve_for: str | None = None) -> str | None:
     """Allocate the next ID. THE CALLER MUST ALREADY HOLD the counter lock.
 
@@ -257,8 +291,13 @@ def stamp_result_file(p: Path) -> str | None:
             return fresh  # already stamped (or exempt) — adopt what is on disk
         # The count commits before the body is written, so an attempt that dies in
         # between must resume on its reserved ID rather than spend a second one.
-        tid = _reserved_id(state, p.name) or _alloc_locked(state, reserve_for=p.name)
+        reserved = _reserved_id(state, p.name)
+        tid = reserved or _alloc_locked(state, reserve_for=p.name)
         if not tid:
+            return None
+        # A reserved retry resumes past the history write, so reconcile before
+        # persisting — releasing the reservation is what makes the gap permanent.
+        if reserved and not _reconcile_history(state, tid):
             return None
         stamped = f"[task {tid}]\n\n{fresh}"
         # Atomic replace, not truncate-in-place: this module's own contract is

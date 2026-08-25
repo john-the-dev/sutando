@@ -67,6 +67,62 @@ empty.write_text("   \n")
 check("an empty file is still not ready (and mints no ID)",
       rr.read_ready_result(empty) is None)
 
+# A reserved retry must reconcile the day's history. The count commits BEFORE
+# the history write, so a failure between them stranded the row permanently.
+import json as _json
+
+
+def _stamp_env():
+    root = Path(tempfile.mkdtemp())
+    r, st = root / "results", root / "state"
+    r.mkdir()
+    st.mkdir()
+    return r, st
+
+
+def _agree(st, body, seq):
+    """counter, stamped body and daily history all describe the same one ID."""
+    ctr = _json.loads((st / "task-counter.json").read_text())
+    hist_p = st / "task-completions-daily.json"
+    if not hist_p.exists():
+        return False, "history file absent"
+    day = ctr.get("date")
+    hist = _json.loads(hist_p.read_text())
+    return (body.startswith(f"[task {day}-{seq:03d}]")
+            and ctr.get("count") == seq
+            and "pending" not in ctr
+            and hist.get(day) == seq), f"ctr={ctr} hist={hist} body={body.splitlines()[0]!r}"
+
+
+_r, _st = _stamp_env()
+_p = _r / "task-hist-fail.txt"
+_p.write_text("body\n")
+(_st / "task-completions-daily.json.tmp").mkdir()          # force the history write to fail
+_first = rr.stamp_result_file(_p)
+_ctr = _json.loads((_st / "task-counter.json").read_text())
+check("a failed history write fails the stamp closed, keeping the reservation",
+      _first is None and _ctr.get("count") == 1
+      and (_ctr.get("pending") or {}).get("task-hist-fail.txt", "").endswith("-001"),
+      f"got {_first!r} ctr={_ctr}")
+check("and today's history really is missing at that point",
+      not (_st / "task-completions-daily.json").exists())
+(_st / "task-completions-daily.json.tmp").rmdir()
+_second = rr.stamp_result_file(_p)
+_ok, _why = _agree(_st, _second or "", 1)
+check("the reserved retry reconciles history — counter, result and history agree",
+      _ok, _why)
+check("and the retry spends no second ID",
+      (_second or "").startswith("[task ") and _p.read_text().startswith(_second or "x"))
+
+# Control: the same assertion on an unobstructed run, so a reconcile that wrote
+# nothing could not pass the check above by accident.
+_r2, _st2 = _stamp_env()
+_p2 = _r2 / "task-clean.txt"
+_p2.write_text("body\n")
+_clean = rr.stamp_result_file(_p2)
+_ok2, _why2 = _agree(_st2, _clean or "", 1)
+check("control: an unobstructed stamp already agrees on all three", _ok2, _why2)
+
 print("\n" + ("PASS — delivery-boundary task stamping" if not FAILED
               else f"FAIL — {len(FAILED)} check(s): {FAILED}"))
 sys.exit(1 if FAILED else 0)
