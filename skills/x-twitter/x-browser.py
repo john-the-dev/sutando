@@ -32,6 +32,8 @@ Engagement notes:
     For bulk/headless writes with no foregrounding, prefer the API path
     (x-post.py).
 """
+from __future__ import annotations
+
 import sys
 import json
 import time
