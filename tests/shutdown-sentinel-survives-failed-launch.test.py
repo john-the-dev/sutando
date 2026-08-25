@@ -60,10 +60,18 @@ check("bash WITH execfail does reach it",
 # 2. Each launcher arms that behavior and has something to run afterwards.
 for label, path in LAUNCHERS.items():
     src = path.read_text(encoding="utf-8")
-    check(f"{label}: arms `shopt -s execfail`", "shopt -s execfail" in src,
+    # A commented-out `shopt` and a bare function DEFINITION both satisfy a
+    # substring search, so neither is evidence the mechanism is live.
+    check(f"{label}: arms `shopt -s execfail` on a live line", 
+          re.search(r"^[ \t]*shopt -s execfail\b", src, re.M) is not None,
           "otherwise the restore below is dead code")
-    check(f"{label}: restores the sentinel after a failed exec",
-          "restore_shutdown_sentinel" in src)
+    execs = [m.end() for m in re.finditer(rf"^[ \t]*exec {label}\b", src, re.M)]
+    check(f"{label}: has a bare-exec launch path at all", bool(execs))
+    for pos in execs:
+        after = src[pos:pos + 1200]
+        check(f"{label}: exec at line {src[:pos].count(chr(10))+1} is followed by a restore CALL",
+              re.search(r"^[ \t]*restore_shutdown_sentinel[ \t]*$", after, re.M) is not None,
+              "the definition existing is not the same as it being called")
     check(f"{label}: refuses to clear when the core binary is absent",
           re.search(r"command -v (claude|codex).*\n.*not clearing the shutdown sentinel",
                     src, re.M) is not None)
@@ -95,6 +103,50 @@ for pos in ccalls:
 startup = (REPO / "src" / "startup.sh").read_text(encoding="utf-8")
 check("startup.sh does not clear the sentinel itself", "shutdown.py" not in startup,
       "it runs ~850 lines before `exec start-cli.sh`, so it cannot know a core started")
+
+
+# 5. BEHAVIORAL: the harness supplies its own restore call, so this proves the
+#    HELPERS survive a real failed exec — not that a launcher calls them (§2).
+import os
+import tempfile
+
+def _helper_block(src: str) -> str:
+    """The contiguous _SENTINEL_STASH / shopt / stash_ / restore_ region."""
+    start = src.index('_SENTINEL_STASH=""')
+    anchor = src.index("restore_shutdown_sentinel() {", start)
+    end = src.index("\n}\n", anchor) + len("\n}\n")
+    return src[start:end]
+
+for label, path in LAUNCHERS.items():
+    src = path.read_text(encoding="utf-8")
+    try:
+        block = _helper_block(src)
+    except ValueError:
+        check(f"{label}: helper block is extractable", False, "layout changed")
+        continue
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        (td / "src").mkdir()
+        sentinel = td / "state" / "shutdown.sentinel"
+        sentinel.parent.mkdir(parents=True)
+        sentinel.write_text("intentional stop")
+        (td / "src" / "shutdown.py").write_text(
+            "import os,sys\nprint(os.environ['FAKE_SENTINEL'])\n")
+        script = td / "harness.sh"
+        script.write_text(
+            "set -u\n"
+            f'PY={sys.executable}\n_sd_py={sys.executable}\nREPO="{td}"\n'
+            + block
+            + "\nstash_shutdown_sentinel\n"
+              'rm -f "$FAKE_SENTINEL"\n'          # the launcher's clear
+              "exec no_such_binary_xyz_2165\n"     # the launch that fails
+              "restore_shutdown_sentinel\n"
+        )
+        env = {**os.environ, "FAKE_SENTINEL": str(sentinel)}
+        subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env)
+        check(f"{label}: a failed exec leaves the sentinel ON DISK (behavioral)",
+              sentinel.exists(),
+              "stash/restore did not survive a real failed exec — the stop gate was lost")
 
 if failures:
     print(f"\n{len(failures)} failure(s) of {checks}")
