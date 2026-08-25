@@ -75,10 +75,10 @@ def test_bucket_pct_edges():
     t, _ = _load()
     assert t._bucket_pct(0) == 0
     assert t._bucket_pct(100) == 100
-    assert t._bucket_pct(97.5) == 100      # clamped + rounded
-    assert t._bucket_pct(150) == 100       # clamp high
-    assert t._bucket_pct(-5) == 0          # clamp low
-    assert t._bucket_pct(None) == -1       # missing → sentinel
+    assert t._bucket_pct(97.5) == 100
+    assert t._bucket_pct(150) == 100
+    assert t._bucket_pct(-5) == 0
+    assert t._bucket_pct(None) == -1
     assert t._bucket_pct("x") == -1
     assert t._bucket_pct(float("nan")) == -1
     assert t._bucket_pct(float("inf")) == -1

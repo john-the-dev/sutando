@@ -188,11 +188,8 @@ def _emit_token_usage() -> None:  # pragma: no cover — network + optional-skil
         from telemetry import enabled, token_usage
         from util_paths import claude_home_path
 
-        # Opt-out (DO_NOT_TRACK / SUTANDO_TELEMETRY=0) or no key configured: do NO
-        # telemetry-only local work. Skipping here — before launching read-quota.py
-        # — matters because that reader calls _update_burn_rate() and writes
-        # state/quota-burn-history.json, so running it would break the documented
-        # silent no-op/opt-out contract (not just suppress the upload). See #2148 CR.
+        # Skip BEFORE read-quota.py: that reader writes quota-burn-history.json,
+        # so running it would break the opt-out contract, not just the upload.
         if not enabled():
             return
         script = claude_home_path("skills", "quota-tracker", "scripts", "read-quota.py")
@@ -241,9 +238,8 @@ def main(argv: list[str] | None = None) -> int:
         capture("core_started", {"interval_s": args.interval})
     except Exception:  # pragma: no cover — telemetry must never break the core
         pass
-    # Anonymous token/quota-usage snapshot (bucketed utilization + core model),
-    # once per boot, in a daemon thread so a quota read never delays the beat
-    # loop. Best-effort; no-op if telemetry is off or the quota-tracker is absent.
+    # Daemon thread so a quota read never delays the beat loop. Best-effort:
+    # no-op if telemetry is off or the quota-tracker is absent.
     try:  # pragma: no cover — fire-and-forget glue
         import threading
         threading.Thread(target=_emit_token_usage, daemon=True).start()

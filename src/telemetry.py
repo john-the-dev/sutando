@@ -416,9 +416,8 @@ def _dispatch(event: str, properties: dict | None, *, flush: bool = False) -> No
     # caller spread + merged into any existing $set so it's always present.
     surface = _install_surface()
     props["surface"] = surface
-    # Core model (categorical) on EVERY event + as a person property, so any
-    # metric — installs, tasks, features — can be broken down by which model the
-    # core runs. "unknown" until the launcher sets $SUTANDO_CORE_MODEL.
+    # On every event AND as a person property, so any metric can be split by
+    # core model. "unknown" until the launcher sets $SUTANDO_CORE_MODEL.
     model = _core_model()
     props["core_model"] = model
     props["$set"] = {**props.get("$set", {}), "surface": surface, "core_model": model}

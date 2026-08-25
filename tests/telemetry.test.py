@@ -425,9 +425,9 @@ def run():
         assert p["properties"]["status"] == "allowed", p["properties"]
         assert p["properties"]["core_model"] == "claude-sonnet-5", p["properties"]
         assert mod._bucket_pct(0) == 0 and mod._bucket_pct(100) == 100
-        assert mod._bucket_pct(150) == 100 and mod._bucket_pct(-5) == 0  # clamp
-        assert mod._bucket_pct(97.5) == 100                              # round
-        assert mod._bucket_pct(None) == -1 and mod._bucket_pct("x") == -1  # sentinel
+        assert mod._bucket_pct(150) == 100 and mod._bucket_pct(-5) == 0
+        assert mod._bucket_pct(97.5) == 100
+        assert mod._bucket_pct(None) == -1 and mod._bucket_pct("x") == -1
         passed += 1
         print("ok   token_usage bucketed (5%) + status + model; _bucket_pct clamps/sentinels")
 
@@ -437,12 +437,13 @@ def run():
         mod = _load(Path(td), key="phc_live")
         # Safe categorical ids pass (lowercased); PII/high-cardinality → unknown.
         assert mod._coarse_model("claude-opus-4-8") == "claude-opus-4-8"
-        assert mod._coarse_model("  Claude-Sonnet-5 ") == "claude-sonnet-5"   # trim + lower
-        assert mod._coarse_model("acme-tenant/prod-model") == "unknown"       # path sep
-        assert mod._coarse_model("https://ep.acme.com/v1") == "unknown"       # endpoint
-        assert mod._coarse_model("user@acme.com") == "unknown"                # email
-        # A tenant alias satisfies the charset check, so the family allow-list is
-        # what stops it reaching the wire verbatim.
+        assert mod._coarse_model("  Claude-Sonnet-5 ") == "claude-sonnet-5"
+        assert mod._coarse_model("acme-tenant/prod-model") == "unknown"
+        assert mod._coarse_model("https://ep.acme.com/v1") == "unknown"
+        assert mod._coarse_model("user@acme.com") == "unknown"
+
+        # A tenant alias passes the charset check; the family allow-list is what
+        # stops it reaching the wire verbatim.
         assert mod._coarse_model("acme-prod") == "unknown"
         assert mod._coarse_model("customer_foo") == "unknown"
         assert mod._coarse_model("internal-claude-clone") == "unknown"
@@ -453,22 +454,20 @@ def run():
         assert mod._coarse_model("gpt-customer-foo") == "gpt"
         assert mod._coarse_model("opus-internal-project-x") == "opus"
         assert mod._coarse_model("claude-" + "a" * 32) == "claude"
-        # A LEADING DIGIT is not a version. The first tightening only required the
-        # token to START with a digit, so digits-led free text still shipped
-        # verbatim — all three verified reaching the wire on the review head.
+        # A leading digit is not a version: requiring only the FIRST character to
+        # be one let digits-led free text ship verbatim.
         assert mod._coarse_model("claude-1janedoe") == "claude"
         assert mod._coarse_model("claude-1.jane.doe") == "claude"
         assert mod._coarse_model("gpt-7customer42") == "gpt"
-        # ...while real model ids keep their version detail. These are the other
-        # half of the check: a grammar that collapsed EVERYTHING would satisfy the
+        # The other half: a grammar that collapsed EVERYTHING would satisfy the
         # asserts above and destroy the metric, so both directions are pinned.
         assert mod._coarse_model("claude-3-5-haiku-20241022") == "claude-3-5-haiku-20241022"
         assert mod._coarse_model("gpt-4") == "gpt-4"
         assert mod._coarse_model("gpt-5") == "gpt-5"
         assert mod._coarse_model("gemini-2.5-pro") == "gemini-2.5-pro"
-        assert mod._coarse_model("gpt-4o") == "gpt-4o"          # single trailing letter
-        assert mod._coarse_model("gpt-4.1") == "gpt-4.1"        # dotted minor
-        assert mod._coarse_model("llama-3-70b") == "llama-3-70b"  # param-count suffix
+        assert mod._coarse_model("gpt-4o") == "gpt-4o"
+        assert mod._coarse_model("gpt-4.1") == "gpt-4.1"
+        assert mod._coarse_model("llama-3-70b") == "llama-3-70b"
         assert mod._coarse_model("model with spaces") == "unknown"
         assert mod._coarse_model("x" * 60) == "unknown"                       # over length cap
         assert mod._coarse_model("") == "unknown"
