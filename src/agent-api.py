@@ -354,8 +354,8 @@ def _active_task_rows() -> list[dict]:
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )[:10]:
-        # A CLAIMED task is task-{id}.claimed-core-N.txt; `.stem` would key the
-        # row by the filename, so its reply is never found under that id.
+        # A CLAIMED task is task-{id}.claimed-core-N.txt, but every writer puts
+        # the reply at results/{id}.txt — so key AND look up by the canonical id.
         task_id = task_id_from_filename(task_file.name)
         if task_id is None:
             continue
@@ -363,13 +363,13 @@ def _active_task_rows() -> list[dict]:
         # First `source:` and `task:` regardless of field order; body
         # lookalikes must not override the real headers.
         task_line, source_line = _task_display_fields(content)
-        result_file = RESULT_DIR / task_file.name
+        result_file = RESULT_DIR / f"{task_id}.txt"
         existing = task_history.get(task_id, {})
         # Priority: live file, then in-memory history, then archive. The
         # archive lookup is what survives a restart, when history is empty.
         archived_file = None
         for month_dir in (RESULT_DIR / "archive").glob("*/"):
-            candidate = month_dir / task_file.name
+            candidate = month_dir / f"{task_id}.txt"
             if candidate.exists():
                 archived_file = candidate
                 break
