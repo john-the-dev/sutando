@@ -12,6 +12,8 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
+import contextlib
+import io
 import tempfile
 from pathlib import Path
 
@@ -74,6 +76,15 @@ check("main('clear') → 0 and removes sentinel",
       sd.main(["shutdown.py", "clear"]) == 0 and not sd.is_shutting_down())
 check("main() with no arg defaults to check", sd.main(["shutdown.py"]) == 1)
 check("main('bogus') → 2 usage", sd.main(["shutdown.py", "bogus"]) == 2)
+
+# `path` is a contract the shell launchers depend on: they stash/restore the
+# sentinel around a launch and must not re-derive its location themselves.
+_out = io.StringIO()
+with contextlib.redirect_stdout(_out):
+    _rc = sd.main(["shutdown.py", "path"])
+check("main('path') → 0", _rc == 0)
+check("main('path') prints the resolved sentinel path, not a re-derived one",
+      _out.getvalue().strip() == str(sd._sentinel_path()))
 
 # Drives the model gate with the REAL is_shutting_down(), not a reimplementation:
 # that is what makes this a before/after proof instead of restating the fix.
