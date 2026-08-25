@@ -20,9 +20,14 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+# startup.sh is deliberately NOT here: it clears ~850 lines before its own
+# `exec start-cli.sh`, so it can never know a core came up (#2165 P1).
 LAUNCHERS = {
     "src/agent/claude/cli/start-cli.sh": "the launcher the desktop app actually uses",
-    "src/startup.sh": "the headless/service launcher",
+    "src/agent/codex/cli/start-cli.sh": "the Codex-runtime launcher",
+}
+DELEGATES = {
+    "src/startup.sh": "always ends in `exec start-cli.sh`, which clears once a core is verified",
 }
 CLEAR_RE = re.compile(r'^[^\n]*shutdown\.py"?\s+clear[^\n]*$', re.M)
 failures: list[str] = []
@@ -48,13 +53,20 @@ for rel, why in LAUNCHERS.items():
                 f"{rel}: clear runs a bare `python3`, which can resolve to the "
                 f"Xcode-CLT stub; route it through the resolved interpreter")
 
+for rel, why in DELEGATES.items():
+    path = REPO / rel
+    if path.exists() and CLEAR_RE.search(path.read_text()):
+        failures.append(
+            f"{rel}: clears the sentinel itself, but {why} — a clear here precedes "
+            f"every way the launch can still fail, opening intake with no core")
+
 if failures:
     for f in failures:
         print(f"FAIL: {f}")
     print(f"\nResults: {len(failures)} failure(s)")
     sys.exit(1)
-print("OK: both production launchers clear the sentinel, via a resolved interpreter, "
-      "without discarding failure")
+print("OK: both CLI launchers clear the sentinel via a resolved interpreter without "
+      "discarding failure, and startup.sh delegates rather than clearing early")
 
 def test_clear_is_past_every_reuse_exit_in_the_claude_launcher():
     """Attaching to a live core must NOT clear: that cancels a --stop-only that is

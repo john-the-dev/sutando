@@ -491,10 +491,8 @@ bash "$REPO/scripts/install-session-start-hook.sh" 2>&1 || true
 # rules. Idempotent — safe to run on every start.
 bash "$REPO/scripts/install-personal-claude-hook.sh" 2>&1 || true
 
-# Boot is not a shutdown: clear any sentinel left by `restart.sh --stop-only`
-# so the fresh core loop does not immediately short-circuit.
-"$PY" "$REPO/src/shutdown.py" clear >/dev/null \
-    || echo "startup.sh: shutdown.py clear failed — the boot gate may still hold tasks" >&2
+# The sentinel is NOT cleared here. This runs ~850 lines before the
+# `exec start-cli.sh` below, which clears it once a core is verified live.
 
 # Auto-bootstrap: create-if-missing files and dirs that the agent + skills
 # expect to exist (logs, state, tasks, results, notes, contextual-chips.json,

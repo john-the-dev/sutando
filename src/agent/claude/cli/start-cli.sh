@@ -71,6 +71,33 @@ clear_shutdown_sentinel() {
     echo "start-cli.sh: no runnable interpreter — shutdown sentinel NOT cleared" >&2
   fi
 }
+
+# Clearing the sentinel before a launch that never yields a live core opens
+# intake with nothing serving, so exec paths stash it and restore on failure.
+_SENTINEL_STASH=""
+# Without execfail bash exits 127 on a failed exec, which would make every
+# restore-after-exec below unreachable dead code.
+shopt -s execfail
+stash_shutdown_sentinel() {
+  _SENTINEL_STASH=""
+  [ -n "$PY" ] || return 0
+  _sp="$("$PY" "$REPO/src/shutdown.py" path 2>/dev/null)" || return 0
+  [ -n "$_sp" ] && [ -f "$_sp" ] || return 0
+  _SENTINEL_STASH="$(mktemp "${TMPDIR:-/tmp}/sutando-sentinel.XXXXXX" 2>/dev/null)" || return 0
+  cp "$_sp" "$_SENTINEL_STASH" 2>/dev/null || _SENTINEL_STASH=""
+}
+# Only reachable when exec FAILED: exec never returns on success.
+restore_shutdown_sentinel() {
+  [ -n "$_SENTINEL_STASH" ] && [ -f "$_SENTINEL_STASH" ] || return 0
+  _sp="$("$PY" "$REPO/src/shutdown.py" path 2>/dev/null)" || return 0
+  if [ -n "$_sp" ]; then
+    mkdir -p "$(dirname "$_sp")" 2>/dev/null || true
+    cp "$_SENTINEL_STASH" "$_sp" 2>/dev/null \
+      || echo "start-cli.sh: could not restore the shutdown sentinel after a failed launch" >&2
+  fi
+  rm -f "$_SENTINEL_STASH" 2>/dev/null || true
+  _SENTINEL_STASH=""
+}
 export SUTANDO_CORE_RUNTIME=claude
 CORE_ENV_ARGS=(-e SUTANDO_CORE_SESSION=1 -e SUTANDO_CORE_RUNTIME=claude)
 [ -n "${SUTANDO_TMUX_SOCKET:-}" ] && CORE_ENV_ARGS+=(-e "SUTANDO_TMUX_SOCKET=$SUTANDO_TMUX_SOCKET")
@@ -707,8 +734,8 @@ if tmux_session_exists; then
   exit 0
 fi
 
-# Past every attach/adopt/heal exit above, so this is a genuine fresh boot.
-clear_shutdown_sentinel
+# Past every attach/adopt/heal exit above, so this is a genuine fresh boot. The
+# sentinel is cleared at each launch site below, never before one can fail.
 
 # Auto-install tmux via Homebrew if missing. Sutando.app's
 # watcher-auto-restart depends on a tmux-wrapped CLI pane.
@@ -733,9 +760,18 @@ if ! command -v tmux > /dev/null 2>&1; then
   echo "  ⚠ tmux not found — running without tmux wrapper"
   echo "    (Sutando.app's watcher-auto-restart won't work; brew install tmux to enable)"
   [ -n "${SUTANDO_CLAUDE_WORKING_DIR:-}" ] && cd "$SUTANDO_CLAUDE_WORKING_DIR"
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "  ⚠ claude not found — not clearing the shutdown sentinel, no core can start." >&2
+    exit 127
+  fi
+  stash_shutdown_sentinel
+  clear_shutdown_sentinel
   exec claude --name "$SESSION" --remote-control "Sutando" --chrome --dangerously-skip-permissions --add-dir "$HOME" \
     ${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"} \
     -- "/startup"
+  restore_shutdown_sentinel
+  echo "  ⚠ claude failed to exec — shutdown sentinel restored, no core is live." >&2
+  exit 1
 fi
 
 # Explicit -S socket path so Sutando.app (which runs under a different
@@ -757,16 +793,30 @@ apply_tmux_defaults
 #   - No TTY (Sutando.app's Restart Core or any background invocation):
 #     start detached so we don't hang, server keeps running.
 #
-# NOTE: the working dir (`-c` in CWD_ARGS) applies only when `new-session -A`
-# CREATES the session. If the session already exists, `-A` attaches and the
-# start-directory is silently dropped — so re-anchoring a running core to a new
-# working dir must go through `--restart` (kill-then-create), not a bare rerun.
+# NOTE: the working dir (`-c` in CWD_ARGS) applies only when new-session CREATES
+# the session. An existing session keeps its own start-directory, so re-anchoring
+# a running core to a new working dir must go through `--restart`
+# (kill-then-create), not a bare rerun.
 if [ -t 1 ]; then
   ensure_core_monitor   # backgrounded child survives the exec below
-  exec tmux -S "$TMUX_SOCKET" new-session -A -s "$SESSION" ${CORE_ENV_ARGS[@]+"${CORE_ENV_ARGS[@]}"} ${CWD_ARGS[@]+"${CWD_ARGS[@]}"} \
+  tmux -S "$TMUX_SOCKET" new-session -d -s "$SESSION" ${CORE_ENV_ARGS[@]+"${CORE_ENV_ARGS[@]}"} ${CWD_ARGS[@]+"${CWD_ARGS[@]}"} \
     claude --name "$SESSION" --remote-control "Sutando" --chrome --dangerously-skip-permissions --add-dir "$HOME" \
     ${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"} \
-    -- "/startup"
+    -- "/startup" || true
+  # Create-then-attach rather than `new-session -A`, so the sentinel clears only
+  # once a session demonstrably exists; the poll below is the single verdict.
+  for _ in $(seq 1 25); do
+    tmux_core_session_running && break
+    sleep 0.2
+  done
+  if ! tmux_core_session_running; then
+    echo "  ⚠ $SESSION did not come up within ~5s of launch — start FAILED." >&2
+    [ -n "$RESTART_REQUESTED" ] && log_restart_attempt "FAILED: core did not come up within ~5s"
+    exit 1
+  fi
+  clear_shutdown_sentinel
+  [ -n "$RESTART_REQUESTED" ] && log_restart_attempt "success: core live"
+  exec tmux -S "$TMUX_SOCKET" attach -t "$SESSION"
 else
   tmux -S "$TMUX_SOCKET" new-session -d -s "$SESSION" ${CORE_ENV_ARGS[@]+"${CORE_ENV_ARGS[@]}"} ${CWD_ARGS[@]+"${CWD_ARGS[@]}"} \
     claude --name "$SESSION" --remote-control "Sutando" --chrome --dangerously-skip-permissions --add-dir "$HOME" \
@@ -787,6 +837,9 @@ else
     [ -n "$RESTART_REQUESTED" ] && log_restart_attempt "FAILED: core did not come up within ~5s"
     exit 1
   fi
+  # Verified live above, so this is the first point at which clearing the
+  # intentional-stop gate cannot open intake with nothing serving.
+  clear_shutdown_sentinel
   [ -n "$RESTART_REQUESTED" ] && log_restart_attempt "success: core live"
   ensure_core_monitor   # canonical session now exists — start the supervisor monitor
   if [ "$VISIBLE" = 1 ]; then

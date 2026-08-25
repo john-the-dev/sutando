@@ -82,7 +82,12 @@ def main(argv: list[str]) -> int:
         return 0
     if cmd == "check":
         return 0 if is_shutting_down() else 1
-    print(f"usage: {argv[0]} mark|clear|check [reason]", file=sys.stderr)
+    if cmd == "path":
+        # Shell launchers stash/restore the sentinel byte-for-byte around a
+        # launch; they must not re-derive this path and drift from it.
+        print(_sentinel_path())
+        return 0
+    print(f"usage: {argv[0]} mark|clear|check|path [reason]", file=sys.stderr)
     return 2
 
 
