@@ -192,6 +192,39 @@ class TestSutandoConfig(unittest.TestCase):
             load_config(repo_root=self.repo)
         self.assertIn("JSON object", str(ctx.exception))
 
+    def test_scalar_object_block_raises_naming_file_and_key(self):
+        # `{"workspace": "<path>"}` is the shape a user writes by hand. Before
+        # this guard it reached `(cfg.get("workspace") or {}).get("path")`.
+        _write_config(self.repo, "sutando.config.local.json", {"workspace": "/tmp/ws"})
+        with self.assertRaises(RuntimeError) as ctx:
+            load_config(repo_root=self.repo)
+        msg = str(ctx.exception)
+        self.assertIn("sutando.config.local.json", msg)
+        self.assertIn("'workspace'", msg)
+        self.assertIn("str", msg)
+
+    def test_scalar_object_block_raises_for_every_guarded_key(self):
+        for key in sorted(sutando_config._OBJECT_TOP_LEVEL_KEYS):
+            with self.subTest(key=key):
+                sutando_config._reset_cache_for_tests()
+                _write_config(self.repo, "sutando.config.json", {key: "scalar"})
+                with self.assertRaises(RuntimeError) as ctx:
+                    load_config(repo_root=self.repo)
+                self.assertIn(f"'{key}'", str(ctx.exception))
+
+    def test_list_valued_block_also_rejected(self):
+        _write_config(self.repo, "sutando.config.json", {"vault": ["a"]})
+        with self.assertRaises(RuntimeError) as ctx:
+            load_config(repo_root=self.repo)
+        self.assertIn("'vault'", str(ctx.exception))
+
+    def test_non_object_typed_keys_are_left_alone(self):
+        # `stand` is a string and `core_config_dirs` a list by design — guarding
+        # them would reject valid configs.
+        _write_config(self.repo, "sutando.config.json",
+                      {"stand": "mbp", "core_config_dirs": [], "workspace": {"path": "/tmp/w"}})
+        self.assertEqual(load_config(repo_root=self.repo)["stand"], "mbp")
+
     # ------------------------------------------------------------------ #
     #  6. Empty .local.json treated as {}                                 #
     # ------------------------------------------------------------------ #
@@ -782,6 +815,33 @@ class TestConfigGetEnvFirst(TestConfigGet):
         repo = self._make_repo(local={"env": {"MY_KEY": "from_config"}})
         os.environ["MY_KEY"] = "from_env"
         self.assertEqual(config_get("MY_KEY", repo_root=repo), "from_config")
+
+
+class TestNullBlockIsAbsent(unittest.TestCase):
+    """A null block loads today on both loaders; guarding it must not change that."""
+
+    def _load(self, body):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "sutando.config.local.json"
+            p.write_text(body)
+            return sutando_config._load_json(p)
+
+    def test_null_block_loads_and_reads_as_absent(self):
+        out = self._load('{"vault": null, "workspace": null}')
+        self.assertIsNone(out["vault"])
+        # the shape every consumer already relies on
+        self.assertIsNone((out.get("vault") or {}).get("remote_url"))
+
+    def test_scalar_and_array_blocks_still_rejected(self):
+        for body, shown in (('{"workspace": "/tmp/ws"}', "str"),
+                            ('{"vault": []}', "list")):
+            with self.assertRaises(RuntimeError) as cm:
+                self._load(body)
+            self.assertIn(shown, str(cm.exception))
+
+    def test_real_object_block_still_loads(self):
+        out = self._load('{"vault": {"remote_url": "git@example:v.git"}}')
+        self.assertEqual(out["vault"]["remote_url"], "git@example:v.git")
 
 
 if __name__ == "__main__":

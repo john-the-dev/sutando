@@ -260,6 +260,19 @@ def _valid_local_tid(tid: str) -> bool:
     m = _LOCAL_TID_RE.fullmatch(tid)
     return bool(m) and m.group(1) not in (".", "..")
 
+
+def _task_pending(tid: str) -> bool:
+    """Is this task still live in tasks/, under ANY of its names?
+
+    A pooled task is renamed twice -- unassigned -> `.assigned-<core>` (lead
+    picked a core) -> `.claimed-<core>` (core took it). Every caller asking
+    "is this still being worked?" must accept all three, so the question has
+    one owner: a state missed here reads as finished, which drops a reply
+    mid-flight or re-queues work another core already holds."""
+    return ((TASKS_DIR / f"{tid}.txt").exists()
+            or any(TASKS_DIR.glob(f"{tid}.assigned-*"))
+            or any(TASKS_DIR.glob(f"{tid}.claimed-*")))
+
 # Persist the in-flight set (tasks pulled from the gateway, awaiting result-POST)
 # so a client restart between pull and POST doesn't strand the result. Scoped to
 INFLIGHT_FILE = _STATE / f"remote-task-inflight{_INST_SUFFIX}.json"
@@ -560,13 +573,22 @@ def _owner_review_dm(owner: str) -> str:
 
 def _review_messages(record: dict) -> list[str]:
     rid = str(record.get("review_id") or "")
-    origin = str((record.get("context") or {}).get("channel_id") or "")
+    context = record.get("context") or {}
+    origin = _one_line(context.get("channel_id") or "").strip()
+    room_name = _one_line(context.get("room_name") or "").strip()
+    # Keep room-controlled values in code spans and neutralize backticks so
+    # room metadata cannot alter the review message's Markdown structure.
+    origin_label = origin.replace("`", "'")
+    room_label = room_name.replace("`", "'")
+    room_info = (
+        f"`{origin_label}` (name: `{room_label}`)" if room_label else f"`{origin_label}`"
+    )
     body = str(record.get("withheld_body") or "")
     header = (
         f"**Private result review `{rid}`**\n\n"
         "This result was withheld from the shared room because it may contain "
         "sensitive information or delivery-control markers.\n\n"
-        f"Original room: `{origin}`\n\n")
+        f"Original room: {room_info}\n\n")
     decision = (
         "Reply directly to this message with **Yes** to confirm it should stay "
         "private, or **No** to mark it as a false positive and publish it to the "
@@ -890,7 +912,8 @@ def _guarded_result_body(tid: str, body: str):
             headers = local_task_protocol.parse_task_headers_trusted(
                 tfile.read_text(encoding="utf-8", errors="replace")).headers
             context = {key: headers.get(key, "") for key in (
-                "source", "channel_id", "reply_to_event", "source_message_id", "user_id")}
+                "source", "channel_id", "room_name", "reply_to_event",
+                "source_message_id", "user_id")}
         except OSError:
             pass
     verdict = classify(
@@ -1786,11 +1809,12 @@ def _recover_auth(code: int) -> bool:
     cycle = 0
     while True:
         pending = _reenroll_state["code"]
+        # `backoff_s` means "retryable TRANSPORT backoff"; this loop is waiting on
+        # a human, so it stays 0 — the re-check cadence is not a reconnect estimate.
         _emit_gateway_status(False,
                              error=(f"auth rejected HTTP {code} — relink pending "
                                     f"(code {pending})" if pending else
-                                    f"auth rejected HTTP {code} — waiting for re-connect"),
-                             backoff_s=AUTH_RECHECK_INTERVAL)
+                                    f"auth rejected HTTP {code} — waiting for re-connect"))
         time.sleep(AUTH_RECHECK_INTERVAL)
         if not _heartbeat_singleton():
             sys.exit("FATAL: lost poller singleton while waiting for token rotation")
@@ -2228,7 +2252,7 @@ def _write_task(task: dict) -> str | None:
     task = {**task, "id": tid}
     dest = TASKS_DIR / f"{tid}.txt"
     # Idempotent: don't re-write a task already queued, claimed, or archived.
-    if dest.exists() or any(TASKS_DIR.glob(f"{tid}.claimed-*")):
+    if _task_pending(tid):
         return tid
     # Relay redelivery of already-handled work: on reconnect the gateway replays
     # its unacked pool, including tasks this node long since processed (the
@@ -3123,8 +3147,7 @@ def _reconcile_abandoned(inflight: set[str], suspects: set[str]) -> set[str]:
     instead of being raced. Returns the new suspects set for the next pass."""
     gone = {tid for tid in inflight
             if _valid_local_tid(tid)
-            and not (TASKS_DIR / f"{tid}.txt").exists()
-            and not any(TASKS_DIR.glob(f"{tid}.claimed-*"))
+            and not _task_pending(tid)
             and not (RESULTS_DIR / f"{tid}.txt").exists()
             and not _task_archived_recently(tid)}
     confirmed = gone & suspects
