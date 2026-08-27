@@ -71,6 +71,7 @@ _OBJECT_TOP_LEVEL_KEYS = {
     "claude_sutando_config_dir",
     "vault",
     "migrate",
+    "env",
     "health_check",
     "bridges",
 }

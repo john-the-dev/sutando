@@ -61,6 +61,7 @@ const OBJECT_TOP_LEVEL_KEYS = new Set([
 	'claude_sutando_config_dir',
 	'vault',
 	'migrate',
+	'env',
 	'health_check',
 	'bridges',
 ]);
