@@ -242,9 +242,16 @@ _MODEL_FAMILIES = ("claude", "gpt", "o1", "o3", "o4", "gemini", "llama", "mistra
 _MODEL_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,39}")
 
 
-# A version is <=4 digits per group or a date stamp (20YYMMDD), plus at most one
-# trailing letter. An unbounded digit run is a tenant alias, not a version.
-_VERSION_TOKEN = re.compile(r"(?:20\d{6}|\d{1,4})(?:\.\d{1,4})*[a-z]?")
+# A version is a date stamp (20YYMMDD) or <=3 dot-groups of <=4 digits, and never
+# more digits in total than a date stamp. A chunked identifier is not a version.
+_VERSION_TOKEN = re.compile(r"(?:20\d{6}|\d{1,4})(?:\.\d{1,4}){0,2}[a-z]?")
+_VERSION_MAX_DIGITS = 8
+
+
+def _is_version(tok: str) -> bool:
+    """Shape AND size: the group cap alone still admits 16 digits (2026.1111.1111)."""
+    return (_VERSION_TOKEN.fullmatch(tok) is not None
+            and sum(c.isdigit() for c in tok) <= _VERSION_MAX_DIGITS)
 # Vendor tier words that appear in real model ids. Bounded on purpose — the
 # point is a finite vocabulary, so an unlisted word collapses to the family.
 _MODEL_QUALIFIERS = frozenset({
@@ -264,7 +271,7 @@ def _coarse_model(raw: str) -> str:
         return "unknown"
     for tok in parts[1:]:
         if (tok in _MODEL_FAMILIES or tok in _MODEL_QUALIFIERS
-                or _VERSION_TOKEN.fullmatch(tok)):
+                or _is_version(tok)):
             continue
         return parts[0]  # unrecognised tail: keep the family, drop the free text
     return s

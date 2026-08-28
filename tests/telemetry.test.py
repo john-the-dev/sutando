@@ -547,10 +547,17 @@ def run():
 
     # 21) Adversarial numeric aliases, asserted on the SERIALISED payload rather
     #     than on _coarse_model: the raw value must be absent from every field.
+    #     The dot-chunked rows are the same identifiers re-encoded as "versions";
+    #     a group cap alone still admits 16 digits, so the digit cap carries them.
     for raw, family in (("claude-15551234567", "claude"),
                         ("gemini-4111111111111111", "gemini"),
                         ("gpt-123456789012345678901234567890", "gpt"),
-                        ("gpt-12345678", "gpt")):
+                        ("gpt-12345678", "gpt"),
+                        ("claude-1.555.123.4567", "claude"),
+                        ("claude-4111.1111.1111.1111", "claude"),
+                        ("claude-555.123.4567", "claude"),
+                        ("gemini-4111.1111.1111", "gemini"),
+                        ("gpt-2026.1111.1111", "gpt")):
         with tempfile.TemporaryDirectory() as td:
             mod = _load(Path(td), key="phc_live", env={"SUTANDO_CORE_MODEL": raw})
             calls = []
@@ -564,6 +571,21 @@ def run():
             assert digits not in wire, f"{raw}: raw identifier reached the wire in {wire}"
     passed += 1
     print("ok   adversarial numeric aliases collapse to family, absent from the payload")
+
+    # 21b) Positive control for the row above: a rule that rejected every dotted
+    #      token would pass all of it. Real versions must still reach the wire.
+    for raw in ("claude-4.5", "claude-2026.08.28", "claude-1.0.0", "gpt-4.1",
+                "gemini-2.5", "claude-20260828", "claude-4.5a", "claude-opus-4-1"):
+        with tempfile.TemporaryDirectory() as td:
+            mod = _load(Path(td), key="phc_live", env={"SUTANDO_CORE_MODEL": raw})
+            calls = []
+            mod._post = lambda payload: calls.append(payload)  # type: ignore
+            _capture_sync(mod, "core_started", {"interval_s": 30})
+            pr = calls[0]["properties"]
+            assert pr["core_model"] == raw, \
+                f"{raw}: a real version was collapsed to {pr['core_model']!r}"
+    passed += 1
+    print("ok   dot-chunked identifiers collapse; real versions survive verbatim")
 
     # 22) Control for 21: without this, a guard that collapses EVERYTHING would
     #     pass 21 and prove nothing.
