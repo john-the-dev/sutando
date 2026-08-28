@@ -37,10 +37,11 @@ def _grep_stamped_values(key: str) -> set:
     Write signatures only — quoted-key assignment ("access_tier":
     "ambient") and header-line writes inside string literals ("access_tier:
     ambient\\n" or backtick-terminated `access_tier: owner`). Prose in
-    comments, `key: Type` annotations, `.key === 'x'` comparisons and a
-    third-party call's options object ({ priority: 'high' }) match none of
-    these, which is what keeps this a producer census rather than a word
-    search."""
+    comments, `key: Type` annotations, `.key === 'x'` comparisons, a
+    third-party call's options object ({ priority: 'high' }) and a struct
+    that merely carries the field (observability's Actor descriptor) match
+    none of these, which is what keeps this a producer census rather than a
+    word search."""
     pat = _stamp_pattern(key)
     found = set()
     roots = [REPO / "src", REPO / "skills", REPO / "packages"]
@@ -73,6 +74,13 @@ class TestStampPatternMatchesProducersOnly(unittest.TestCase):
                 "  `A delegated task just finished. ...`,\n"
                 "  { priority: 'high' });\n")
         self.assertEqual(self._found(text), set())
+
+    def test_a_struct_that_carries_the_field_is_not_a_stamp(self):
+        # src/observability/** builds Actor descriptors with access_tier, under
+        # its own AccessTier vocabulary ('owner'|'team'|'public'|'unknown').
+        text = ("const ACTOR = { user_id: 'core', channel: 'claude-code',\n"
+                "                access_tier: 'owner' as AccessTier, tenant_id: null };\n")
+        self.assertEqual(self._found(text, key="access_tier"), set())
 
     def test_a_header_line_write_IS_a_stamp(self):
         self.assertEqual(self._found('f"priority: urgent\\n"'), {"urgent"})
