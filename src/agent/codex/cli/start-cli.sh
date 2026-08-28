@@ -47,6 +47,18 @@ session_runtime() {
     | sed -n 's/^SUTANDO_CORE_RUNTIME=//p' || true
 }
 
+# Publish only once the session exists and is verifiably ours: a failed launch
+# must not replace a truthful marker for a runtime that never became live.
+stamp_runtime_codex() {
+  session_exists "$SESSION" || return 0
+  [ "$(session_runtime)" = "codex" ] || return 0
+  local _ws
+  _ws="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null)" || return 0
+  [ -n "$_ws" ] || return 0
+  "${PY:-python3}" "$REPO/src/core_runtime_marker.py" \
+    "$_ws" codex "$SESSION" "${1:-start-cli}" > /dev/null 2>&1 || true
+}
+
 if ! command -v codex >/dev/null 2>&1; then
   echo "Codex CLI is not installed. Install it, run 'codex login', then retry." >&2
   exit 127
@@ -279,21 +291,17 @@ if ! command -v fswatch >/dev/null 2>&1; then
 fi
 
 apply_tmux_defaults
-if ws="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null)" && [ -n "$ws" ]; then
-  # Schema and atomicity belong to the shared writer; inject only the resolved
-  # workspace and this launcher's runtime.
-  "${PY:-python3}" "$REPO/src/core_runtime_marker.py" \
-    "$ws" codex "$SESSION" start-cli > /dev/null 2>&1 || true
-fi
 
 if [ -t 1 ] && [ -z "${TMUX:-}" ]; then
   tmux -S "$TMUX_SOCKET" new-session -d -s "$SESSION" "${CORE_ENV_ARGS[@]}" codex "${CODEX_ARGS[@]}"
+  stamp_runtime_codex
   ensure_task_notifier
   ensure_core_monitor
   ensure_core_heartbeat
   exec tmux -S "$TMUX_SOCKET" attach -t "$SESSION"
 else
   tmux -S "$TMUX_SOCKET" new-session -d -s "$SESSION" "${CORE_ENV_ARGS[@]}" codex "${CODEX_ARGS[@]}"
+  stamp_runtime_codex
   ensure_task_notifier
   ensure_core_monitor
   ensure_core_heartbeat
