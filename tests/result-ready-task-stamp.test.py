@@ -11,7 +11,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-_SRC = Path(__file__).resolve().parent.parent / "src" / "result_ready.py"
+_SRC = Path(__file__).resolve().parent.parent / "src" / "delivery" / "readiness.py"
 _spec = importlib.util.spec_from_file_location("result_ready", _SRC)
 rr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rr)

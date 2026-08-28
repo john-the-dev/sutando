@@ -178,7 +178,7 @@ def main() -> int:
         "src/slack-bridge.py",
         # Not a delivery bridge, but it DECIDES on marker position: it must not
         # stamp a body whose markers a stamp would displace (#2125).
-        "src/result_ready.py",
+        "src/delivery/readiness.py",
     )
     for rel in consumers:
         src = (REPO / rel).read_text()
@@ -194,10 +194,8 @@ def main() -> int:
                 'parse_markers() actions with kind == "attach" instead',
                 rel,
             )
-        # Same name-independent rule for the SKIP/REDIRECT grammar. result_ready
-        # carried `[(?:no-send]|deduped:|REPLIED]|channel:|dm-only])` privately,
-        # which already drifted (IGNORECASE made it match a `[replied]` the
-        # canonical parser does not recognise as a marker at all).
+        # Same name-independent rule for the SKIP/REDIRECT grammar: a private copy
+        # of it drifted, matching a `[replied]` the canonical parser rejects.
         for m in re.finditer(r"re\.compile\((.{0,160}?)\)", src, re.S):
             literal = m.group(1)
             hits = sum(tok in literal for tok in

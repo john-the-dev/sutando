@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contract for src/result_ready.py and delegation by every delivery consumer.
+"""Contract for src/delivery/readiness.py and delegation by every delivery consumer.
 
 Readiness of a task-result file has one owner. Each consumer binds its own
 results directory and keeps only provider-specific delivery.
@@ -16,8 +16,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-import result_ready  # noqa: E402
-from result_ready import (  # noqa: E402
+import delivery.readiness as result_ready  # noqa: E402
+from delivery.readiness import (  # noqa: E402
     alloc_task_id, is_ready_body, read_ready_result, stamp_result_file,
 )
 
@@ -32,12 +32,8 @@ CONSUMERS = {
 
 
 class ContractTest(unittest.TestCase):
-    # DELIBERATE: this fixture was `task-abc.txt`, which matches the stamping
-    # gate, so every readiness assertion below was silently also asserting "no
-    # ID is added" — and they broke the moment stamping landed. `proactive-` is
-    # a real result filename that is exempt, so these cases test the readiness
-    # contract ALONE. The stamping behaviour gets its own tests in StampTest,
-    # where it can be asserted on purpose instead of as a side effect.
+    # `proactive-` is stamp-exempt, so these cases test the readiness contract
+    # ALONE; a `task-` fixture would assert "no ID added" as a silent side effect.
     def _write(self, td: str, text: str | None, name: str = "proactive-abc.txt") -> Path:
         p = Path(td) / name
         if text is not None:
@@ -108,9 +104,8 @@ class ContractTest(unittest.TestCase):
 
             def gated(name, body):
                 verdict = real_needs(name, body)
-                # Once per THREAD: the fixed path re-checks this inside the
-                # transaction, and gating that second call would block a thread
-                # against a barrier its partner has already cleared.
+                # Once per THREAD: the second, in-transaction check must not gate,
+                # or a thread blocks on a barrier its partner already cleared.
                 with waited_lock:
                     first = threading.get_ident() not in waited
                     waited.add(threading.get_ident())
@@ -180,7 +175,7 @@ class DelegationTest(unittest.TestCase):
                 self.assertTrue(path.exists(), f"{name}: missing at {path}")
                 self.assertRegex(
                     path.read_text(),
-                    r"from (?:\.)?result_ready import read_ready_result",
+                    r"from (?:delivery\.readiness|\.result_ready) import read_ready_result",
                     f"{name}: does not import read_ready_result from the shared owner",
                 )
 
@@ -195,14 +190,14 @@ class DelegationTest(unittest.TestCase):
                 self.assertEqual(
                     hits, [],
                     f"{name}: reads a result file directly ({hits}) — readiness "
-                    f"belongs to src/result_ready.read_ready_result",
+                    f"belongs to src/delivery/readiness.read_ready_result",
                 )
 
     def test_sparrow_bundle_matches_src(self):
         pkg = (REPO / "packages" / "ag2-sparrow" / "ag2_sparrow" / "result_ready.py")
         self.assertTrue(pkg.exists(), "result_ready.py not bundled into ag2-sparrow")
         self.assertEqual(
-            pkg.read_text(), (REPO / "src" / "result_ready.py").read_text(),
+            pkg.read_text(), (REPO / "src" / "delivery" / "readiness.py").read_text(),
             "ag2-sparrow copy drifted from src/ — run tools/sync_from_src.py",
         )
 

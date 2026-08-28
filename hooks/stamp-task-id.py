@@ -34,19 +34,15 @@ import sys
 import time
 from pathlib import Path
 
-# Only stamp a result file the CURRENT turn just wrote — mtime within this many
-# seconds of now. Without this, a backlog of old undelivered results in results/
-# would each get stamped, inflating the counter (NNN must mean "tasks done today",
-# not "files sitting in results/"). PostToolUse fires within ~1s of the write, so
-# a small window is ample.
+# Only stamp what the current turn wrote (mtime within this window): a backlog of
+# stale results would each mint an ID, so NNN would count files, not tasks done.
 _FRESH_S = 45
 
-# Resolve the workspace the same way the rest of the stack does — the sanctioned
-# resolver (workspace_default.resolve_workspace) owns all fallback/override logic;
-# never reconstruct a workspace path inline here.
+# The sanctioned resolver owns all fallback/override logic; never reconstruct a
+# workspace path inline here.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from workspace_default import resolve_workspace  # noqa: E402
-from result_ready import needs_task_stamp, stamp_result_file  # noqa: E402
+from delivery.readiness import needs_task_stamp, stamp_result_file  # noqa: E402
 
 WS = Path(resolve_workspace())
 
@@ -73,8 +69,7 @@ def main() -> None:
                 continue  # empty/placeholder — leave it
             if not needs_task_stamp(p.name, body):
                 continue  # cheap pre-filter only; the binding re-check is under the lock
-            # The delivery path stamps these same files. Allocating here and
-            # writing outside the lock let both mint an ID for one completion.
+            # Delivery stamps these too; allocating outside the lock double-mints.
             stamp_result_file(p)
     except Exception:
         pass

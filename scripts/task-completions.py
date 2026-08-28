@@ -21,9 +21,8 @@ import json
 import sys
 from pathlib import Path
 
-# Resolve the workspace the same way the rest of the stack does — the sanctioned
-# resolver (workspace_default.resolve_workspace) owns all fallback/override logic;
-# never reconstruct a workspace path inline here.
+# The sanctioned resolver owns all fallback/override logic; never reconstruct a
+# workspace path inline here.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from workspace_default import resolve_workspace  # noqa: E402
 
@@ -73,10 +72,8 @@ def render(hist: dict[str, int], days: int | None) -> str:
     if days is None:
         shown = ordered
     else:
-        # Last N CALENDAR days, not the newest N recorded entries. Days with no
-        # tasks aren't in the history, so `ordered[:days]` would reach further
-        # back than N calendar days whenever there are gaps (CR #2125). Filter by
-        # a date cutoff instead: today and the N-1 days before it.
+        # CALENDAR days, not the newest N entries: empty days are absent from the
+        # history, so a slice reaches further back than N days whenever there are gaps.
         cutoff = (datetime.date.today() - datetime.timedelta(days=days - 1)).strftime("%Y%m%d")
         shown = [(ymd, n) for ymd, n in ordered if ymd >= cutoff]
     today = datetime.date.today().strftime("%Y%m%d")

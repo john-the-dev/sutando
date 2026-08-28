@@ -52,13 +52,11 @@ def _point(mod, ws: Path):
         mod.RESULTS = ws / "results"
 
 
-RR = _load(REPO / "src" / "result_ready.py", "result_ready_owner")
+RR = _load(REPO / "src" / "delivery" / "readiness.py", "result_ready_owner")
 
 TODAY = datetime.date.today().strftime("%Y%m%d")
 
-# ---------------------------------------------------------------------------
-# alloc_task_id — tested against its owner, result_ready, directly
-# ---------------------------------------------------------------------------
+# alloc_task_id — tested against its owner directly
 with tempfile.TemporaryDirectory() as t:
     ws = Path(t)
     hook = _load(REPO / "hooks" / "stamp-task-id.py", "stamp_task_id")
@@ -127,10 +125,8 @@ with tempfile.TemporaryDirectory() as t:
     check("alloc recovers from a corrupt counter", got == f"{TODAY}-001", got)
     check("history rebuilt after corruption", json.load(open(hook.HISTORY)).get(TODAY) == 1)
 
-# CR #2125: concurrent alloc_task_id must never mint a duplicate id or lose a count.
-# Each _alloc opens its own fd and takes an exclusive flock, so the RMW is
-# serialized even across threads (separate open-file-descriptions → flock
-# serializes). Without the lock, interleaved read-increment-write would collide.
+# Concurrent alloc_task_id must never mint a duplicate id or lose a count: each
+# _alloc takes an exclusive flock on its own fd, serializing the read-modify-write.
 import threading as _threading
 with tempfile.TemporaryDirectory() as t:
     ws = Path(t)
@@ -155,9 +151,7 @@ with tempfile.TemporaryDirectory() as t:
     check("concurrent alloc_task_id final counter == total allocations",
           json.load(open(hookc.COUNTER)).get("count") == 100, str(json.load(open(hookc.COUNTER))))
 
-# ---------------------------------------------------------------------------
 # hook.main — stamping behavior
-# ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as t:
     ws = Path(t)
     hook = _load(REPO / "hooks" / "stamp-task-id.py", "stamp_task_id3")
@@ -187,11 +181,8 @@ with tempfile.TemporaryDirectory() as t:
     counter = json.load(open(hook.COUNTER))
     check("only fresh file advanced the counter (=1)", counter.get("count") == 1, str(counter))
 
-# ---------------------------------------------------------------------------
-# hook.main — bridge control markers must be left unstamped (PR #2125 review):
-# prepending `[task …]` would push the marker off line 1 and break delivery
-# routing (result_markers.parse_markers / discord-bridge skip+redirect).
-# ---------------------------------------------------------------------------
+# Bridge control markers must be left unstamped: a prepended `[task …]` pushes the
+# marker off line 1, which is the only place skip/redirect routing reads it.
 with tempfile.TemporaryDirectory() as t:
     ws = Path(t)
     hook = _load(REPO / "hooks" / "stamp-task-id.py", "stamp_task_id_markers")
@@ -220,9 +211,7 @@ with tempfile.TemporaryDirectory() as t:
     check("no bridge-marker file consumed a counter id",
           not hook.COUNTER.exists() or json.load(open(hook.COUNTER)).get("count", 0) == 0)
 
-# ---------------------------------------------------------------------------
 # report — load_history + render
-# ---------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as t:
     ws = Path(t)
     rep = _load(REPO / "scripts" / "task-completions.py", "task_completions")
@@ -241,10 +230,8 @@ with tempfile.TemporaryDirectory() as t:
     check("render marks today", "today: 3" in out_all, out_all)
     check("render shows a total line", "total" in out_all, out_all)
 
-    # CR #2125: a bounded --days window is CALENDAR days, not the newest N
-    # recorded entries. The Jan fixtures are months old, so a 14-day window
-    # excludes them — the old `ordered[:14]` wrongly included them whenever few
-    # days were recorded.
+    # A bounded --days window is CALENDAR days: the months-old fixtures must fall
+    # outside a 14-day window even though few days are recorded.
     out14 = rep.render(hist, days=14)
     check("render --days 14 excludes months-old days (calendar window)",
           "2026-01-02" not in out14 and "2026-01-01" not in out14, out14)
@@ -291,21 +278,15 @@ with tempfile.TemporaryDirectory() as t:
     rc, out = run_main(["--days", "1"])
     check("main() --days 1 shows a single day", rc == 0 and out.count(":") >= 1, out[:80])
 
-# ---------------------------------------------------------------------------
-# hook.main vs the delivery path — the two writers must not both mint an ID for
-# one completion. The hook used to allocate under a short-lived lock and then
-# write outside it; a delivery landing in that window stamped its own ID, the
-# hook's later write clobbered it, and the ID on the wire disagreed with the one
-# left on disk. Measured on the pre-fix tree: 115/120 double-mint, 114/120
-# mismatch — so a violation here is a real regression, not a flake.
-# ---------------------------------------------------------------------------
+# hook.main vs the delivery path: the two writers must not both mint an ID for one
+# completion, or the ID on the wire disagrees with the one left on disk.
 _TRIALS = 30
 _double = _mismatch = 0
 _idre = __import__("re").compile(r"\[task (\d{8}-\d{3})\]")
 for _i in range(_TRIALS):
     with tempfile.TemporaryDirectory() as t:
         ws = Path(t)
-        _rr = _load(REPO / "src" / "result_ready.py", f"rr_race{_i}")
+        _rr = _load(REPO / "src" / "delivery" / "readiness.py", f"rr_race{_i}")
         _hk = _load(REPO / "hooks" / "stamp-task-id.py", f"hk_race{_i}")
         _point(_hk, ws)
         f = ws / "results" / "task-9.txt"
