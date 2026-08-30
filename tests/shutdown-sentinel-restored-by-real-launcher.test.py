@@ -77,10 +77,8 @@ with tempfile.TemporaryDirectory() as tmp:
     sentinel = workspace / "state" / "shutdown.sentinel"
     sentinel.write_text("stopped-on-purpose\n")
 
-    # The launcher branches on `command -v tmux`. Hiding tmux by ORDERING fails
-    # wherever tmux lives in a dir we still need (CI has it in /usr/bin), so the
-    # sandbox PATH is built from scratch: symlinks to exactly the tools the
-    # launcher needs, and deliberately no tmux.
+    # Hiding tmux by PATH ORDER fails where it lives in a dir the launcher needs.
+    # So: build the PATH from scratch, with no tmux and no node (see below).
     for tool in ("bash", "sh", "env", "python3", "python", "uname", "mkdir", "rm",
                  "cat", "grep", "sed", "awk", "dirname", "basename", "mktemp",
                  "cp", "mv", "date", "tr", "id", "stat", "sleep", "head", "tail",
