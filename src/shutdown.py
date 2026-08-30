@@ -10,7 +10,7 @@ mid-pass and leave an orphaned task recovered only after the result-watcher
 timeout.
 
 This sentinel is that signal on the STOP paths only. Writers (restart.sh
---stop-only, an explicit "stop") call mark_shutdown(); startup.sh clears it on
+--stop-only, an explicit "stop") call mark_shutdown(); the core launchers clear it on
 boot; readers (the proactive loop at the top of a pass, bridges) call
 is_shutting_down(). A plain restart marks and clears it within seconds and the
 core is meant to survive, so clean core exit is a --stop-only guarantee; what
