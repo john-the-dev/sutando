@@ -47,9 +47,8 @@ def _exe(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-# tmux ACCEPTS everything and reports the session present. It never claims a
-# child is alive — that answer comes from pgrep, which finds nothing. Splitting
-# the two is the whole point: acceptance and liveness are different questions.
+# tmux accepts every command and reports the session present; liveness is
+# answered separately by pgrep, which finds nothing.
 TMUX_STUB = """#!/bin/bash
 args="$*"
 case "$args" in
@@ -84,7 +83,7 @@ def run_branch(label: str, launcher_rel: str, env_extra: dict) -> None:
         _exe(binp / "tmux", TMUX_STUB)
         _exe(binp / "pgrep", PGREP_STUB)
         # mktemp is load-bearing: without it claude_config_dir.sh fails and the
-        # launcher refuses to start, so nothing under test ever runs.
+        # launcher exits before reaching tmux, making the assert vacuous.
         for real in ("bash", "python3", "sed", "awk", "grep", "ps", "seq", "sleep",
                      "cat", "mkdir", "rm", "date", "uname", "dirname", "basename",
                      "tr", "head", "tail", "cut", "wc", "sort", "id", "hostname",
@@ -108,9 +107,8 @@ def run_branch(label: str, launcher_rel: str, env_extra: dict) -> None:
         })
         env.update(env_extra)
 
-        # Mark the sentinel through the production writer, then assert the
-        # launcher leaves it alone. Reading it back first proves the probe can
-        # see a set sentinel at all — otherwise "still set" is vacuous.
+        # Read it back after marking: otherwise "still set" is vacuous, since a
+        # probe that never sees a set sentinel cannot fail.
         mark = subprocess.run([sys.executable, str(root / "src/shutdown.py"), "mark", label],
                               capture_output=True, text=True, env=env, cwd=str(root))
         path_p = subprocess.run([sys.executable, str(root / "src/shutdown.py"), "path"],
@@ -138,12 +136,8 @@ def run_branch(label: str, launcher_rel: str, env_extra: dict) -> None:
 
 run_branch("claude-heal", "src/agent/claude/cli/start-cli.sh", {})
 
-# The two Codex tmux branches are NOT asserted here. This harness reaches the
-# Claude heal branch but not those, so an assertion on them passes without
-# executing the code it names — the same vacuous green this file exists to
-# replace. Verified: at 7cc1414c, with all three branches broken, a codex
-# assertion still reported OK. Covering them needs a harness that drives the
-# Codex launcher to its launch sites; until then the gap is stated, not faked.
+# The two Codex branches are NOT asserted: this harness never reaches them, so
+# a check there passes without running the code it names (verified at 7cc1414c).
 
 if failures:
     print("\nFAILURES:")
