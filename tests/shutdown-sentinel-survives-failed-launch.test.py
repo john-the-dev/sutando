@@ -62,7 +62,7 @@ for label, path in LAUNCHERS.items():
     src = path.read_text(encoding="utf-8")
     # A commented-out `shopt` and a bare function DEFINITION both satisfy a
     # substring search, so neither is evidence the mechanism is live.
-    check(f"{label}: arms `shopt -s execfail` on a live line", 
+    check(f"{label}: arms `shopt -s execfail` on a live line",
           re.search(r"^[ \t]*shopt -s execfail\b", src, re.M) is not None,
           "otherwise the restore below is dead code")
     execs = [m.end() for m in re.finditer(rf"^[ \t]*exec {label}\b", src, re.M)]

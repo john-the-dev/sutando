@@ -359,14 +359,34 @@ fi
 
 if [ -t 1 ] && [ -z "${TMUX:-}" ]; then
   tmux -S "$TMUX_SOCKET" new-session -d -s "$SESSION" "${CORE_ENV_ARGS[@]}" codex "${CODEX_ARGS[@]}"
-  clear_shutdown_sentinel   # session exists, so a core is serving
+  # new-session rc=0 means tmux accepted it; a child that exits at once leaves
+  # has-session failing. Poll before opening intake rather than assuming.
+  for _ in $(seq 1 25); do
+    session_exists "$SESSION" && break
+    sleep 0.2
+  done
+  if session_exists "$SESSION"; then
+    clear_shutdown_sentinel
+  else
+    echo "  ⚠ $SESSION did not come up within ~5s — sentinel NOT cleared, no core is serving." >&2
+  fi
   ensure_task_notifier
   ensure_core_monitor
   ensure_core_heartbeat
   exec tmux -S "$TMUX_SOCKET" attach -t "$SESSION"
 else
   tmux -S "$TMUX_SOCKET" new-session -d -s "$SESSION" "${CORE_ENV_ARGS[@]}" codex "${CODEX_ARGS[@]}"
-  clear_shutdown_sentinel   # session exists, so a core is serving
+  # new-session rc=0 means tmux accepted it; a child that exits at once leaves
+  # has-session failing. Poll before opening intake rather than assuming.
+  for _ in $(seq 1 25); do
+    session_exists "$SESSION" && break
+    sleep 0.2
+  done
+  if session_exists "$SESSION"; then
+    clear_shutdown_sentinel
+  else
+    echo "  ⚠ $SESSION did not come up within ~5s — sentinel NOT cleared, no core is serving." >&2
+  fi
   ensure_task_notifier
   ensure_core_monitor
   ensure_core_heartbeat

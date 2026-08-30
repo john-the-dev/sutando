@@ -719,7 +719,17 @@ if tmux_session_exists; then
   # quiet gateway (same reason launch-sutando.sh creates siblings with -d).
   tmux -S "$TMUX_SOCKET" select-window -t "$SESSION:${healed_idx:-0}" 2>/dev/null || true
   ensure_core_monitor
-  clear_shutdown_sentinel   # healed window is a fresh core
+  # new-window returning an index proves tmux ACCEPTED the command, not that the
+  # child lives; poll before opening intake, same bound as the fresh-start path.
+  for _ in $(seq 1 25); do
+    tmux_core_session_running && break
+    sleep 0.2
+  done
+  if tmux_core_session_running; then
+    clear_shutdown_sentinel
+  else
+    echo "  ⚠ healed window did not come up within ~5s — sentinel NOT cleared, no core is serving." >&2
+  fi
   if [ -t 1 ]; then
     echo "Attaching to healed $SESSION (Ctrl-b d to detach)..."
     exec tmux -S "$TMUX_SOCKET" attach -t "$SESSION"
