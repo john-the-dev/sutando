@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Regression tests for Claude proactive-loop quota-aware cadence."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+SCRIPT = REPO / "skills" / "proactive-loop" / "scripts" / "claude-quota-cadence.py"
+SPEC = importlib.util.spec_from_file_location("claude_quota_cadence", SCRIPT)
+cadence = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+SPEC.loader.exec_module(cadence)
+
+
+def _crons(expression: str = "*/5 * * * *") -> list[dict]:
+    return [{
+        "name": "main-loop",
+        "cron": expression,
+        "prompt_skill": "proactive-loop",
+    }]
+
+
+class ClaudeQuotaCadenceTest(unittest.TestCase):
+    def test_proactive_loop_reconciles_the_registered_cron(self) -> None:
+        text = (REPO / "skills" / "proactive-loop" / "SKILL.md").read_text()
+        self.assertIn("claude-quota-cadence.py --json", text)
+        self.assertIn("CronDelete", text)
+        self.assertIn("CronCreate", text)
+
+    def test_boot_registration_uses_the_effective_cron(self) -> None:
+        text = (REPO / "skills" / "schedule-crons" / "SKILL.md").read_text()
+        self.assertIn("claude-quota-cadence.py --json", text)
+        self.assertIn("effective_cron", text)
+
+    def test_below_threshold_keeps_configured_cadence(self) -> None:
+        result = cadence.choose_cadence(
+            {"utilization_7d": 0.79}, _crons(), quota_age_seconds=5,
+        )
+        self.assertFalse(result["throttled"])
+        self.assertEqual(result["effective_cron"], "*/5 * * * *")
+
+    def test_threshold_throttles_to_thirty_minutes(self) -> None:
+        result = cadence.choose_cadence(
+            {"utilization_7d": 0.80}, _crons(), quota_age_seconds=5,
+        )
+        self.assertTrue(result["throttled"])
+        self.assertEqual(result["effective_cron"], "*/30 * * * *")
+
+    def test_reset_restores_exact_configured_cadence(self) -> None:
+        high = cadence.choose_cadence(
+            {"utilization_7d": 0.95}, _crons("*/15 * * * *"), quota_age_seconds=5,
+        )
+        reset = cadence.choose_cadence(
+            {"utilization_7d": 0.02}, _crons("*/15 * * * *"), quota_age_seconds=5,
+        )
+        self.assertEqual(high["effective_cron"], "*/30 * * * *")
+        self.assertEqual(reset["effective_cron"], "*/15 * * * *")
+
+    def test_stale_or_missing_quota_fails_safe_to_thirty_minutes(self) -> None:
+        stale = cadence.choose_cadence(
+            {"utilization_7d": 0.10}, _crons(), quota_age_seconds=31 * 60,
+        )
+        missing = cadence.choose_cadence(None, _crons(), quota_age_seconds=None)
+        self.assertEqual(stale["effective_cron"], "*/30 * * * *")
+        self.assertEqual(missing["effective_cron"], "*/30 * * * *")
+        self.assertEqual(stale["reason"], "quota-unavailable")
+
+    def test_header_only_quota_shape_is_supported(self) -> None:
+        result = cadence.choose_cadence({"headers": {
+            "anthropic-ratelimit-unified-7d-utilization": "0.81",
+        }}, _crons(), quota_age_seconds=5)
+        self.assertEqual(result["effective_cron"], "*/30 * * * *")
+
+    def test_direct_prompt_loop_restores_its_configured_cadence(self) -> None:
+        crons = [{
+            "name": "custom-loop",
+            "cron": "*/5 * * * *",
+            "prompt": "/proactive-loop",
+        }]
+        result = cadence.choose_cadence(
+            {"utilization_7d": 0.10}, crons, quota_age_seconds=5,
+        )
+        self.assertEqual(result["effective_cron"], "*/5 * * * *")
+
+    def test_never_speeds_up_a_slower_or_custom_schedule(self) -> None:
+        slow = cadence.choose_cadence(
+            {"utilization_7d": 0.95}, _crons("*/45 * * * *"), quota_age_seconds=5,
+        )
+        custom = cadence.choose_cadence(
+            {"utilization_7d": 0.95}, _crons("5,35 * * * *"), quota_age_seconds=5,
+        )
+        self.assertEqual(slow["effective_cron"], "*/45 * * * *")
+        self.assertEqual(custom["effective_cron"], "5,35 * * * *")
+        self.assertEqual(custom["reason"], "unsupported-normal-cron")
+
+    def test_path_reader_uses_mtime_staleness(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            quota = root / "quota-state.json"
+            crons = root / "crons.json"
+            quota.write_text(json.dumps({"utilization_7d": 0.10}))
+            crons.write_text(json.dumps(_crons()))
+            now = time.time()
+            old = now - 31 * 60
+            os.utime(quota, (old, old))
+            result = cadence.evaluate_paths(quota, crons, now=now)
+        self.assertEqual(result["effective_cron"], "*/30 * * * *")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
