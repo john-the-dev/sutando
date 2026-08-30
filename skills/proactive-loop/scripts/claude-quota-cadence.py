@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -66,12 +67,19 @@ def choose_cadence(
     crons: Any,
     *,
     quota_age_seconds: Optional[float],
+    base_url: Optional[str],
 ) -> dict[str, Any]:
     normal_cron = _normal_cron(crons)
     match = _INTERVAL_CRON.fullmatch(normal_cron)
     utilization = _utilization_7d(quota)
     stale = quota_age_seconds is None or quota_age_seconds > STALE_AFTER_SECONDS
-    available = utilization is not None and not stale
+    repo = Path(__file__).resolve().parents[3]
+    quota_scripts = repo / "skills" / "quota-tracker" / "scripts"
+    sys.path.insert(0, str(quota_scripts))
+    from quota_availability import availability_decision
+
+    decision = availability_decision(quota, base_url=base_url, stale=stale)
+    available = decision["available"] and utilization is not None
     over_threshold = available and utilization >= SEVEN_DAY_THRESHOLD
     fail_safe = not available
 
@@ -84,6 +92,7 @@ def choose_cadence(
             "seven_day_threshold": SEVEN_DAY_THRESHOLD,
             "throttled": False,
             "utilization_7d": utilization,
+            "unavailable_reason": decision["unavailable_reason"],
         }
 
     normal_minutes = int(match.group(1))
@@ -102,6 +111,7 @@ def choose_cadence(
         "seven_day_threshold": SEVEN_DAY_THRESHOLD,
         "throttled": should_throttle,
         "utilization_7d": utilization,
+        "unavailable_reason": decision["unavailable_reason"],
     }
 
 
@@ -110,6 +120,7 @@ def evaluate_paths(
     crons_path: Path,
     *,
     now: Optional[float] = None,
+    base_url: Optional[str] = None,
 ) -> dict[str, Any]:
     now = time.time() if now is None else now
     try:
@@ -122,19 +133,24 @@ def evaluate_paths(
         crons = json.loads(crons_path.read_text())
     except (OSError, TypeError, ValueError):
         crons = None
-    return choose_cadence(quota, crons, quota_age_seconds=quota_age)
+    return choose_cadence(
+        quota,
+        crons,
+        quota_age_seconds=quota_age,
+        base_url=base_url,
+    )
 
 
 def _runtime_paths() -> tuple[Path, Path]:
     repo = Path(__file__).resolve().parents[3]
     sys.path.insert(0, str(repo / "src"))
-    from util_paths import personal_path
+    from util_paths import _host_label
     from workspace_default import resolve_workspace, status_read_path
 
     workspace = resolve_workspace(migrate=False)
     return (
         status_read_path("quota-state.json", workspace),
-        personal_path("crons.json", workspace),
+        workspace / "hosts" / _host_label() / "crons.json",
     )
 
 
@@ -143,7 +159,11 @@ def main() -> int:
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     quota_path, crons_path = _runtime_paths()
-    result = evaluate_paths(quota_path, crons_path)
+    result = evaluate_paths(
+        quota_path,
+        crons_path,
+        base_url=os.environ.get("ANTHROPIC_BASE_URL"),
+    )
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:

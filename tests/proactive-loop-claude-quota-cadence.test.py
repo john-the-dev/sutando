@@ -17,6 +17,15 @@ SPEC = importlib.util.spec_from_file_location("claude_quota_cadence", SCRIPT)
 cadence = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(cadence)
+PROXY_URL = "http://localhost:7846"
+
+
+def _quota(utilization: float, *, available: bool = True, status: str = "allowed") -> dict:
+    return {
+        "available": available,
+        "utilization_7d": utilization,
+        "headers": {"anthropic-ratelimit-unified-status": status},
+    }
 
 
 def _crons(expression: str = "*/5 * * * *") -> list[dict]:
@@ -33,6 +42,8 @@ class ClaudeQuotaCadenceTest(unittest.TestCase):
         self.assertIn("claude-quota-cadence.py --json", text)
         self.assertIn("CronDelete", text)
         self.assertIn("CronCreate", text)
+        self.assertLess(text.index("`CronCreate` the new job"), text.index("Then `CronDelete`"))
+        self.assertIn("exactly one `/proactive-loop` job remains", text)
 
     def test_boot_registration_uses_the_effective_cron(self) -> None:
         text = (REPO / "skills" / "schedule-crons" / "SKILL.md").read_text()
@@ -41,41 +52,42 @@ class ClaudeQuotaCadenceTest(unittest.TestCase):
 
     def test_below_threshold_keeps_configured_cadence(self) -> None:
         result = cadence.choose_cadence(
-            {"utilization_7d": 0.79}, _crons(), quota_age_seconds=5,
+            _quota(0.79), _crons(), quota_age_seconds=5, base_url=PROXY_URL,
         )
         self.assertFalse(result["throttled"])
         self.assertEqual(result["effective_cron"], "*/5 * * * *")
 
     def test_threshold_throttles_to_thirty_minutes(self) -> None:
         result = cadence.choose_cadence(
-            {"utilization_7d": 0.80}, _crons(), quota_age_seconds=5,
+            _quota(0.80), _crons(), quota_age_seconds=5, base_url=PROXY_URL,
         )
         self.assertTrue(result["throttled"])
         self.assertEqual(result["effective_cron"], "*/30 * * * *")
 
     def test_reset_restores_exact_configured_cadence(self) -> None:
         high = cadence.choose_cadence(
-            {"utilization_7d": 0.95}, _crons("*/15 * * * *"), quota_age_seconds=5,
+            _quota(0.95), _crons("*/15 * * * *"), quota_age_seconds=5, base_url=PROXY_URL,
         )
         reset = cadence.choose_cadence(
-            {"utilization_7d": 0.02}, _crons("*/15 * * * *"), quota_age_seconds=5,
+            _quota(0.02), _crons("*/15 * * * *"), quota_age_seconds=5, base_url=PROXY_URL,
         )
         self.assertEqual(high["effective_cron"], "*/30 * * * *")
         self.assertEqual(reset["effective_cron"], "*/15 * * * *")
 
     def test_stale_or_missing_quota_fails_safe_to_thirty_minutes(self) -> None:
         stale = cadence.choose_cadence(
-            {"utilization_7d": 0.10}, _crons(), quota_age_seconds=31 * 60,
+            _quota(0.10), _crons(), quota_age_seconds=31 * 60, base_url=PROXY_URL,
         )
-        missing = cadence.choose_cadence(None, _crons(), quota_age_seconds=None)
+        missing = cadence.choose_cadence(None, _crons(), quota_age_seconds=None, base_url=PROXY_URL)
         self.assertEqual(stale["effective_cron"], "*/30 * * * *")
         self.assertEqual(missing["effective_cron"], "*/30 * * * *")
         self.assertEqual(stale["reason"], "quota-unavailable")
 
     def test_header_only_quota_shape_is_supported(self) -> None:
-        result = cadence.choose_cadence({"headers": {
+        result = cadence.choose_cadence({"available": True, "headers": {
+            "anthropic-ratelimit-unified-status": "allowed",
             "anthropic-ratelimit-unified-7d-utilization": "0.81",
-        }}, _crons(), quota_age_seconds=5)
+        }}, _crons(), quota_age_seconds=5, base_url=PROXY_URL)
         self.assertEqual(result["effective_cron"], "*/30 * * * *")
 
     def test_direct_prompt_loop_restores_its_configured_cadence(self) -> None:
@@ -85,16 +97,16 @@ class ClaudeQuotaCadenceTest(unittest.TestCase):
             "prompt": "/proactive-loop",
         }]
         result = cadence.choose_cadence(
-            {"utilization_7d": 0.10}, crons, quota_age_seconds=5,
+            _quota(0.10), crons, quota_age_seconds=5, base_url=PROXY_URL,
         )
         self.assertEqual(result["effective_cron"], "*/5 * * * *")
 
     def test_never_speeds_up_a_slower_or_custom_schedule(self) -> None:
         slow = cadence.choose_cadence(
-            {"utilization_7d": 0.95}, _crons("*/45 * * * *"), quota_age_seconds=5,
+            _quota(0.95), _crons("*/45 * * * *"), quota_age_seconds=5, base_url=PROXY_URL,
         )
         custom = cadence.choose_cadence(
-            {"utilization_7d": 0.95}, _crons("5,35 * * * *"), quota_age_seconds=5,
+            _quota(0.95), _crons("5,35 * * * *"), quota_age_seconds=5, base_url=PROXY_URL,
         )
         self.assertEqual(slow["effective_cron"], "*/45 * * * *")
         self.assertEqual(custom["effective_cron"], "5,35 * * * *")
@@ -105,13 +117,34 @@ class ClaudeQuotaCadenceTest(unittest.TestCase):
             root = Path(td)
             quota = root / "quota-state.json"
             crons = root / "crons.json"
-            quota.write_text(json.dumps({"utilization_7d": 0.10}))
+            quota.write_text(json.dumps(_quota(0.10)))
             crons.write_text(json.dumps(_crons()))
             now = time.time()
             old = now - 31 * 60
             os.utime(quota, (old, old))
-            result = cadence.evaluate_paths(quota, crons, now=now)
+            result = cadence.evaluate_paths(quota, crons, now=now, base_url=PROXY_URL)
         self.assertEqual(result["effective_cron"], "*/30 * * * *")
+
+    def test_rejected_proxy_flag_and_unrouted_telemetry_fail_closed(self) -> None:
+        rejected = cadence.choose_cadence(
+            _quota(0.10, status="rejected"), _crons(), quota_age_seconds=5,
+            base_url=PROXY_URL,
+        )
+        unavailable = cadence.choose_cadence(
+            _quota(0.10, available=False), _crons(), quota_age_seconds=5,
+            base_url=PROXY_URL,
+        )
+        unrouted = cadence.choose_cadence(
+            _quota(0.10), _crons(), quota_age_seconds=5, base_url=None,
+        )
+        for result in (rejected, unavailable, unrouted):
+            self.assertFalse(result["available"])
+            self.assertEqual(result["effective_cron"], "*/30 * * * *")
+
+    def test_runtime_cron_path_is_the_canonical_host_path(self) -> None:
+        source = SCRIPT.read_text()
+        self.assertIn('workspace / "hosts" / _host_label() / "crons.json"', source)
+        self.assertNotIn('personal_path("crons.json"', source)
 
 
 if __name__ == "__main__":

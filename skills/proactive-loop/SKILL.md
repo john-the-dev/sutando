@@ -54,9 +54,13 @@ Each pass, in order:
    Then run `python3 skills/proactive-loop/scripts/claude-quota-cadence.py --json`. The helper
    preserves the configured `main-loop` cron while 7-day utilization is below 80%, selects
    `*/30 * * * *` at or above 80%, and conservatively selects 30 minutes when quota telemetry is
-   missing or stale. Compare `effective_cron` with the `/proactive-loop` job in `CronList`. Only
-   when they differ, `CronDelete` that job, `CronCreate` it again with `prompt: "/proactive-loop"`
-   and `cron: <effective_cron>`, then confirm the replacement in `CronList`. Do not edit
+   missing, stale, rejected, or not authoritative for this routed core. Compare `effective_cron`
+   with the `/proactive-loop` job in `CronList`. Only when they differ, capture the old job ID,
+   `CronCreate` the new job with `prompt: "/proactive-loop"` and `cron: <effective_cron>`, and
+   confirm the new ID and cadence in `CronList` **before** deleting anything. Then `CronDelete`
+   the captured old ID and confirm exactly one `/proactive-loop` job remains at the effective
+   cadence. If create or confirmation fails, retain the old job and stop loudly; a brief duplicate
+   is recoverable, while deleting the only loop driver is not. Do not edit
    `crons.json`: its cron is the normal cadence restored automatically after the 7-day reset.
    **Tier EACH window by its OWN rule, then take the MOST RESTRICTIVE TIER.** `read-quota.py`
    reports two windows and they are scored differently — do not apply one window's thresholds to the

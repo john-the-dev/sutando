@@ -98,7 +98,8 @@ When `core.runtime` is `codex`, the canonical unmarked `main-loop` entry (`promp
      `python3 skills/proactive-loop/scripts/claude-quota-cadence.py --json` when the selected core
      is Claude. For the canonical `main-loop` entry, use its `effective_cron` instead of the raw
      `cron` field. The helper returns the configured cron below 80% 7-day utilization and
-     `*/30 * * * *` at/above 80% or when quota telemetry is unavailable. This is a registration
+     `*/30 * * * *` at/above 80% or when quota telemetry is missing, stale, rejected, or not
+     authoritative for this routed core. This is a registration
      override only; never rewrite `crons.json`, because that configured value is the restoration
      target after quota resets. Codex keeps using its own quota telemetry and durable scheduler.
 3. For each job in the config:
@@ -106,9 +107,12 @@ When `core.runtime` is `codex`, the canonical unmarked `main-loop` entry (`promp
    - Skip entries with `execution: "codex-task"`; the OS-backed runner owns them.
    - **Skip any entry with `"launchd": true`** — it is owned by the OS-level cron-runner (see "Reliable OS-level crons" below), which emits its task independently. Registering it here too would double-fire (duplicate deliveries — the exact noise class the launchd path was built to avoid).
    - **For a `CronCreate`-registered entry (one visible as a job in `CronList`): if a job for this
-     entry already exists, RE-REGISTER it rather than skipping** — `CronDelete` the existing job,
-     then `CronCreate` from the current `crons.json` text, and confirm the replacement in
-     `CronList`. This bullet does **not** apply to the dynamic-loop branch below (`loop: "dynamic"`),
+     entry already exists, RE-REGISTER it rather than skipping** — capture every existing job ID,
+     `CronCreate` the replacement from the current `crons.json` text, and confirm its new ID in
+     `CronList` before deleting any captured old ID. Then delete the old IDs and confirm exactly one
+     replacement remains. If creation or confirmation fails, retain the old job and stop loudly;
+     a brief duplicate preserves liveness, while delete-first can strand a session with no driver.
+     This bullet does **not** apply to the dynamic-loop branch below (`loop: "dynamic"`),
      which is never `CronCreate`d and keeps its own freshness-sentinel guard — re-launching one
      mid-session would re-run the loop body immediately, the exact failure that guard prevents. A session cron is a **snapshot of the prompt taken at registration
      time**; editing `crons.json` afterwards does not reach it. The former rule here was "skip if a
