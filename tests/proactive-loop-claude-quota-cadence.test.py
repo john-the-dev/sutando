@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "skills" / "proactive-loop" / "scripts" / "claude-quota-cadence.py"
@@ -142,9 +146,64 @@ class ClaudeQuotaCadenceTest(unittest.TestCase):
             self.assertEqual(result["effective_cron"], "*/30 * * * *")
 
     def test_runtime_cron_path_is_the_canonical_host_path(self) -> None:
-        source = SCRIPT.read_text()
-        self.assertIn('workspace / "hosts" / _host_label() / "crons.json"', source)
-        self.assertNotIn('personal_path("crons.json"', source)
+        sys.path.insert(0, str(REPO / "src"))
+        import util_paths
+        import workspace_default
+
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(workspace_default, "resolve_workspace", return_value=Path(td)), \
+                mock.patch.object(util_paths, "_host_label", return_value="test-host"):
+            quota_path, crons_path = cadence._runtime_paths()
+        self.assertEqual(quota_path, Path(td) / "state" / "quota-state.json")
+        self.assertEqual(crons_path, Path(td) / "hosts" / "test-host" / "crons.json")
+
+    def test_cli_round_trip_throttles_then_restores_configured_cadence(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            quota = root / "quota-state.json"
+            crons = root / "hosts" / "test-host" / "crons.json"
+            crons.parent.mkdir(parents=True)
+            crons.write_text(json.dumps(_crons()))
+
+            outputs = []
+            with mock.patch.object(cadence, "_runtime_paths", return_value=(quota, crons)), \
+                    mock.patch.dict(os.environ, {"ANTHROPIC_BASE_URL": PROXY_URL}), \
+                    mock.patch("sys.argv", [str(SCRIPT), "--json"]):
+                for utilization in (0.85, 0.10):
+                    quota.write_text(json.dumps(_quota(utilization)))
+                    stream = io.StringIO()
+                    with redirect_stdout(stream):
+                        self.assertEqual(cadence.main(), 0)
+                    outputs.append(json.loads(stream.getvalue()))
+            self.assertEqual(len(json.loads(crons.read_text())), 1)
+
+        self.assertEqual(outputs[0]["effective_cron"], "*/30 * * * *")
+        self.assertEqual(outputs[1]["effective_cron"], "*/5 * * * *")
+
+    def test_cli_human_output_and_malformed_inputs_fail_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            quota = root / "quota-state.json"
+            crons = root / "crons.json"
+            quota.write_text("not-json")
+            crons.write_text("not-json")
+            stream = io.StringIO()
+            with mock.patch.object(cadence, "_runtime_paths", return_value=(quota, crons)), \
+                    mock.patch.dict(os.environ, {"ANTHROPIC_BASE_URL": PROXY_URL}), \
+                    mock.patch("sys.argv", [str(SCRIPT)]), redirect_stdout(stream):
+                self.assertEqual(cadence.main(), 0)
+        self.assertIn("*/30 * * * * (quota-unavailable, 7d=None)", stream.getvalue())
+
+    def test_malformed_values_and_cron_entries_use_safe_defaults(self) -> None:
+        for value in (True, object(), "not-a-number", float("inf"), -0.1, 1.1):
+            self.assertIsNone(cadence._finite_fraction(value))
+        self.assertIsNone(cadence._utilization_7d([]))
+        self.assertIsNone(cadence._utilization_7d({"headers": []}))
+        self.assertEqual(cadence._normal_cron(None), cadence.FALLBACK_NORMAL_CRON)
+        self.assertEqual(
+            cadence._normal_cron([None, {"name": "other"}, {"name": "main-loop", "cron": 5}]),
+            cadence.FALLBACK_NORMAL_CRON,
+        )
 
 
 if __name__ == "__main__":
