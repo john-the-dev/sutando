@@ -77,12 +77,24 @@ with tempfile.TemporaryDirectory() as tmp:
     sentinel = workspace / "state" / "shutdown.sentinel"
     sentinel.write_text("stopped-on-purpose\n")
 
-    # PATH excludes tmux (homebrew) so the launcher takes its documented bare-exec
-    # fallback rather than the tmux path.
+    # The launcher branches on `command -v tmux`. Hiding tmux by ORDERING fails
+    # wherever tmux lives in a dir we still need (CI has it in /usr/bin), so the
+    # sandbox PATH is built from scratch: symlinks to exactly the tools the
+    # launcher needs, and deliberately no tmux.
+    for tool in ("bash", "sh", "env", "python3", "python", "uname", "mkdir", "rm",
+                 "cat", "grep", "sed", "awk", "dirname", "basename", "mktemp",
+                 "cp", "mv", "date", "tr", "id", "stat", "sleep", "head", "tail",
+                 "wc", "cut", "sort", "touch", "chmod", "ln", "readlink"):
+        # node is deliberately ABSENT: the launcher builds its --settings JSON with
+        # it, and the sandbox has no .mjs, so present-but-broken errexits before the branch.
+        src = shutil.which(tool)
+        if src and not (binp / tool).exists():
+            (binp / tool).symlink_to(src)
+    assert shutil.which("tmux", path=str(binp)) is None, "sandbox PATH must not expose tmux"
+
     proc = subprocess.run(
         ["bash", str(root / "src/agent/claude/cli/start-cli.sh")],
-        env={"HOME": os.environ.get("HOME", tmp), "PATH": f"{binp}:/usr/bin:/bin:/usr/sbin:/sbin",
-             "TERM": "dumb"},
+        env={"HOME": os.environ.get("HOME", tmp), "PATH": str(binp), "TERM": "dumb"},
         capture_output=True, text=True, timeout=180,
     )
 
@@ -104,5 +116,16 @@ with tempfile.TemporaryDirectory() as tmp:
         failures.append(
             "the failed-launch notice never printed — the restore branch was not reached")
 
-print("\n".join(f"  FAIL {f}" for f in failures) if failures else "  ok  failed launch restores the shutdown sentinel, on the real launcher")
+if failures:
+    # Without this a CI failure says only "an assertion failed" and costs a whole
+    # round trip to learn which branch the launcher actually took.
+    print("\n".join(f"  FAIL {f}" for f in failures))
+    print(f"  --- launcher rc={proc.returncode} ---")
+    for stream, name in ((proc.stdout, "stdout"), (proc.stderr, "stderr")):
+        tail = [ln for ln in (stream or "").splitlines() if ln.strip()][-12:]
+        print(f"  --- {name} (last {len(tail)}) ---")
+        for ln in tail:
+            print(f"      {ln[:160]}")
+else:
+    print("  ok  failed launch restores the shutdown sentinel, on the real launcher")
 sys.exit(1 if failures else 0)
