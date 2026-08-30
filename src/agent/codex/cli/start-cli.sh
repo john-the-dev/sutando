@@ -320,10 +320,15 @@ if ! tmux_available; then
   fi
   stash_shutdown_sentinel
   clear_shutdown_sentinel
+  # errexit would exit on the failed exec before the restore below is reached;
+  # drop it just around the exec and re-raise the exec's own status.
+  set +e
   exec codex "${CODEX_ARGS[@]}"
+  _exec_rc=$?
+  set -e
   restore_shutdown_sentinel
   echo "  ⚠ codex failed to exec — shutdown sentinel restored, no core is live." >&2
-  exit 1
+  exit "$_exec_rc"
 fi
 
 if ! command -v fswatch >/dev/null 2>&1; then
