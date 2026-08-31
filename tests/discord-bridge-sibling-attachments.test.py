@@ -126,9 +126,8 @@ def test_skips_non_referenced_users():
 
 
 def test_respects_cutoff_early_stop():
-    # Ordered newest-first: once we hit an older-than-cutoff message the scan
-    # stops, so an in-window attachment BEHIND an out-of-window message from the
-    # same user is (intentionally) not reached.
+    # Newest-first: the scan stops at the first older-than-cutoff message, so an
+    # in-window attachment behind an out-of-window one is intentionally missed.
     history = _hist(
         _Msg(999, "Alice", _NOW - timedelta(minutes=20), ["too-old.mp4"]),
         _Msg(999, "Alice", _NOW - timedelta(minutes=25), ["also-old.mp4"]),
@@ -188,11 +187,8 @@ def test_multiple_referenced_users():
 
 
 def test_sibling_history_fetch_is_time_bounded():
-    # CR #2126: the sibling-attachment history scan must fetch by the 15-minute
-    # TIME window (after=cutoff), not a fixed small message count that can
-    # truncate a busy channel before reaching an in-window attachment. (The scan
-    # itself lives in the un-coverable async handler, so this pins the query shape
-    # structurally.)
+    # A fixed message count truncates a busy channel before the in-window
+    # attachment; the scan lives in an un-coverable handler, so pin it here.
     src = (REPO / "src" / "discord-bridge.py").read_text()
     assert "after=cutoff" in src, "sibling history scan must be time-bounded (after=cutoff)"
     assert "limit=15, before=message" not in src, "bare 15-message count fetch must be gone"
