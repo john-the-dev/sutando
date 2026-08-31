@@ -80,31 +80,26 @@ def test_cron_next_run_no_match_in_horizon():
 # get_schedules
 # --------------------------------------------------------------------------- #
 def _with_crons(tmp: Path, jobs):
-    host = "test-host"
-    dashboard._host_label = lambda: host  # production keys hosts/<host>/ off _host_label()
-    dashboard.WORKSPACE_DIR = tmp
-    d = tmp / "hosts" / host
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "crons.json").write_text(json.dumps(jobs))
+    # get_schedules resolves the file via _crons_path() (canonical host-label,
+    # not bare socket.gethostname) as of the editable-schedules change. Point
+    # _crons_path at a temp file directly.
+    cf = tmp / "crons.json"
+    cf.write_text(json.dumps(jobs))
+    dashboard._crons_path = lambda: cf
     return dashboard.get_schedules()
 
 
 def test_get_schedules_missing_file_returns_empty():
     with tempfile.TemporaryDirectory() as td:
-        dashboard._host_label = lambda: "nohost"
-        dashboard.WORKSPACE_DIR = Path(td)
+        dashboard._crons_path = lambda: Path(td) / "crons.json"  # missing
         assert dashboard.get_schedules() == []
 
 
 def test_get_schedules_bad_json_returns_empty():
     with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td)
-        host = "test-host"
-        dashboard._host_label = lambda: host
-        dashboard.WORKSPACE_DIR = tmp
-        d = tmp / "hosts" / host
-        d.mkdir(parents=True)
-        (d / "crons.json").write_text("{not valid json")
+        cf = Path(td) / "crons.json"
+        cf.write_text("{not valid json")
+        dashboard._crons_path = lambda: cf
         assert dashboard.get_schedules() == []
 
 
@@ -125,6 +120,9 @@ def test_get_schedules_formats_all_branches():
         # minute-bucket + prompt-derived desc with Run: prefix, HTML chars, truncation
         {"name": "sync", "cron": f"{soon.minute} {soon.hour} * * *",
          "prompt": "Run: sync & flush <everything> " + "x" * 120},
+        # mechanical launchd job → shell kind and command-derived desc
+        {"name": "poll", "cron": f"{soon.minute} {soon.hour} * * *",
+         "shell_command": "bash scripts/poll.sh"},
         # valid expr but no match in horizon → ">7d"
         {"name": "leap", "cron": "0 0 30 2 *"},
         # no cron → "invalid"; no name → "?"
@@ -138,6 +136,8 @@ def test_get_schedules_formats_all_branches():
     assert by_name["loop"]["desc"] == "Runs the /proactive-loop skill"
     assert by_name["brief"]["desc"] == "Daily briefing"
     assert by_name["brief"]["kind"] == "prompt"
+    assert by_name["poll"]["kind"] == "shell"
+    assert by_name["poll"]["desc"] == "Runs shell command: bash scripts/poll.sh"
 
     # next-string buckets
     assert by_name["loop"]["next"].endswith("(in 0m)") or "in " in by_name["loop"]["next"]
@@ -188,11 +188,16 @@ def test_render_dashboard_includes_schedules_block():
     assert "1 active." in html
 
 
-def test_render_dashboard_omits_schedules_when_none():
+def test_render_dashboard_shows_add_form_when_none():
+    # The Schedules card now renders even with 0 jobs so the Add row is
+    # reachable (editable-schedules change). Assert the card + add form show,
+    # and no job rows.
     _stub_render_deps()
     dashboard.get_schedules = lambda: []
     html = dashboard.render_dashboard()
-    assert "<h2>Schedules</h2>" not in html
+    assert "<h2>Schedules</h2>" in html
+    assert 'id="ns-name"' in html and 'onclick="addCron()"' in html
+    assert 'data-name=' not in html  # no job rows
 
 
 def main():
@@ -208,7 +213,7 @@ def main():
         test_get_schedules_bad_json_returns_empty,
         test_get_schedules_formats_all_branches,
         test_render_dashboard_includes_schedules_block,
-        test_render_dashboard_omits_schedules_when_none,
+        test_render_dashboard_shows_add_form_when_none,
     ]
     failures = []
     for fn in tests:

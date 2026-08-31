@@ -79,7 +79,9 @@ def _drive_main(*, sentinel_present: bool) -> str:
     """Run main() against stubbed collaborators and a temp workspace, returning
     stdout. Exercises the two print sites themselves — asserting on
     `completion_line` alone would leave main() free to print anything."""
-    import io, tempfile, contextlib
+    import io
+    import tempfile
+    import contextlib
     from datetime import datetime
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
@@ -88,7 +90,7 @@ def _drive_main(*, sentinel_present: bool) -> str:
         saved = {k: getattr(mb, k) for k in
                  ("RESULTS_DIR", "STATE_DIR", "get_weather", "get_calendar_events",
                   "get_reminders", "get_overnight_discord", "get_pending_questions",
-                  "get_health_issues", "get_daily_insight")}
+                  "get_health_issues")}
         try:
             mb.RESULTS_DIR, mb.STATE_DIR = results, state
             mb.get_weather = lambda: "62F and overcast"
@@ -97,7 +99,6 @@ def _drive_main(*, sentinel_present: bool) -> str:
             mb.get_overnight_discord = lambda: []
             mb.get_pending_questions = lambda: []
             mb.get_health_issues = lambda: []
-            mb.get_daily_insight = lambda: None
             if sentinel_present:
                 today = datetime.now().strftime("%Y-%m-%d")
                 (state / f"morning-briefing-{today}.sentinel").write_text("x")
