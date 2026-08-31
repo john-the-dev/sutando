@@ -545,10 +545,8 @@ def run():
         passed += 1
         print("ok   BEFORE legacy opt-out lost on churn / AFTER durable opt-out survives (#2147)")
 
-    # 21) Adversarial numeric aliases, asserted on the SERIALISED payload rather
-    #     than on _coarse_model: the raw value must be absent from every field.
-    #     The dot-chunked rows are the same identifiers re-encoded as "versions";
-    #     a group cap alone still admits 16 digits, so the digit cap carries them.
+    # 21) Asserted on the SERIALISED payload, not _coarse_model: the raw value
+    #     must be absent from EVERY field. Dot-chunked rows are the same ids re-encoded.
     for raw, family in (("claude-15551234567", "claude"),
                         ("gemini-4111111111111111", "gemini"),
                         ("gpt-123456789012345678901234567890", "gpt"),
