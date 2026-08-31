@@ -487,7 +487,7 @@ async def _process_sibling_attachment(att, author_str: str):
     download failed. The transcription subprocess is synchronous with a long
     timeout, so it is offloaded with ``asyncio.to_thread`` — scanning up to five
     sibling attachments must never block the gateway event loop and starve
-    heartbeats (CR #2126, qingyun-wu; same offload as #2159). A voice attachment
+    heartbeats. A voice attachment
     yields a transcript note, anything else a file note; image attachments are
     additionally pushed for the core's multimodal context. Kept a module-level
     helper (out of the un-coverable I/O handler) so the offload is unit-testable.
@@ -568,9 +568,7 @@ def _select_sibling_attachments(history, referenced_ids, cutoff, cap=5):
     When someone pings the bot with text but no media of their own and mentions
     another user ("@bot make the video @Alice sent"), the media usually lives on
     that user's own earlier, un-mentioned messages. Those messages neither invoke
-    the bot nor are replied-to, so nothing downloads them (2026-07-16: a friend
-    posted a garden video, the owner @mentioned the bot in a separate message,
-    and the video was silently dropped).
+    the bot nor are replied-to, so nothing downloads them.
 
     Pure selection logic, kept out of the async I/O loop so it is unit-testable
     without a live discord channel. `history` is an iterable of message-like
@@ -607,13 +605,6 @@ def _select_sibling_attachments(history, referenced_ids, cutoff, cap=5):
     for author_str, atts in reversed(groups):
         picked.extend((author_str, att) for att in atts)
     return picked
-
-
-# Presenter mode: when scripts/presenter-mode.sh is active, the bridge
-# must not send proactive DMs to the owner. The sentinel contains an
-# ISO-8601 expiry; see scripts/presenter-mode.sh for the contract.
-# Matches the check in src/check-pending-questions.py — both scripts
-# share the same sentinel path + comparison logic.
 
 
 
