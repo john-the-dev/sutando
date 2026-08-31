@@ -18,10 +18,13 @@ Run: python3 tests/shutdown-sentinel-immediate-exit-controls.test.py  (exit 0/1)
 from __future__ import annotations
 
 import os
+import pty
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from types import SimpleNamespace
 from pathlib import Path
 
 REAL_REPO = Path(__file__).resolve().parent.parent
@@ -67,7 +70,42 @@ PGREP_STUB = "#!/bin/bash\nexit 1\n"
 CODEX_STUB = "#!/bin/bash\nexit 0\n"
 
 
-def run_branch(label: str, launcher_rel: str, env_extra: dict) -> None:
+def _launch(cmd, env, cwd, tty: bool):
+    """Run the launcher, optionally under a pty so `[ -t 1 ]` is true."""
+    if not tty:
+        return subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=cwd, timeout=180)
+    # capture_output makes stdout a pipe, so `[ -t 1 ]` is false and the TTY
+    # branch is unreachable however the case is labelled. A pty is the only way in.
+    mfd, sfd = pty.openpty()
+    chunks: list[bytes] = []
+
+    def _drain():
+        while True:
+            try:
+                b = os.read(mfd, 4096)
+            except OSError:
+                break
+            if not b:
+                break
+            chunks.append(b)
+
+    th = threading.Thread(target=_drain, daemon=True)
+    th.start()
+    proc = subprocess.Popen(cmd, stdin=sfd, stdout=sfd, stderr=subprocess.PIPE,
+                            text=True, env=env, cwd=cwd)
+    err = proc.communicate(timeout=180)[1]
+    os.close(sfd)
+    th.join(timeout=2)
+    try:
+        os.close(mfd)
+    except OSError:
+        pass
+    return SimpleNamespace(returncode=proc.returncode,
+                           stdout=b"".join(chunks).decode("utf-8", "replace"),
+                           stderr=err or "")
+
+
+def run_branch(label: str, launcher_rel: str, env_extra: dict, *, tty: bool = False) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root, binp = Path(tmp) / "repo", Path(tmp) / "bin"
         binp.mkdir(parents=True)
@@ -112,6 +150,9 @@ def run_branch(label: str, launcher_rel: str, env_extra: dict) -> None:
             "SUTANDO_TMUX_SESSION": "sutando-core",
         })
         env.update(env_extra)
+        # `[ -t 1 ] && [ -z "$TMUX" ]` — a pty alone is not enough if TMUX is inherited.
+        if tty:
+            env.pop("TMUX", None)
 
         # Read it back after marking: otherwise "still set" is vacuous, since a
         # probe that never sees a set sentinel cannot fail.
@@ -125,12 +166,17 @@ def run_branch(label: str, launcher_rel: str, env_extra: dict) -> None:
                             f"(mark rc={mark.returncode}, stderr={mark.stderr.strip()[:200]})")
             return
 
-        proc = subprocess.run(["bash", str(root / launcher_rel)],
-                              capture_output=True, text=True, env=env, cwd=str(root),
-                              timeout=180)
+        proc = _launch(["bash", str(root / launcher_rel)], env, str(root), tty)
 
         # A branch that never ran also leaves the sentinel in place, so "SURVIVED"
         # cannot tell a working gate from an unreached one without this line.
+        # Both branches print "did not come up", so that alone cannot prove WHICH ran.
+        # The detached tail is unique to the else branch; a tty case emitting it collapsed.
+        if tty and "Started sutando-core detached" in (proc.stdout + proc.stderr):
+            failures.append(
+                f"{label}: took the DETACHED branch despite tty=True — this control is a "
+                f"duplicate of the detached one, not coverage of the TTY path")
+            return
         if "did not come up" not in proc.stderr:
             failures.append(
                 f"{label}: launcher never reached the liveness gate (rc={proc.returncode}) — "
@@ -151,9 +197,10 @@ def run_branch(label: str, launcher_rel: str, env_extra: dict) -> None:
 run_branch("claude-heal", "src/agent/claude/cli/start-cli.sh", {})
 run_branch("codex-detached", "src/agent/codex/cli/start-cli.sh",
            {"TMUX": "forced", "STUB_HAS_SESSION_RC": "1"})
+run_branch("codex-tty", "src/agent/codex/cli/start-cli.sh",
+           {"STUB_HAS_SESSION_RC": "1"}, tty=True)
 
-# The Codex TTY/create-then-attach branch is still NOT asserted: reaching it needs a
-# pty, since capture_output makes stdout a pipe and `[ -t 1 ]` is then false.
+
 
 if failures:
     print("\nFAILURES:")
