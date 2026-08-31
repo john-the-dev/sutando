@@ -168,8 +168,6 @@ def run_branch(label: str, launcher_rel: str, env_extra: dict, *, tty: bool = Fa
 
         proc = _launch(["bash", str(root / launcher_rel)], env, str(root), tty)
 
-        # A branch that never ran also leaves the sentinel in place, so "SURVIVED"
-        # cannot tell a working gate from an unreached one without this line.
         # Both branches print "did not come up", so that alone cannot prove WHICH ran.
         # The detached tail is unique to the else branch; a tty case emitting it collapsed.
         if tty and "Started sutando-core detached" in (proc.stdout + proc.stderr):
@@ -177,6 +175,9 @@ def run_branch(label: str, launcher_rel: str, env_extra: dict, *, tty: bool = Fa
                 f"{label}: took the DETACHED branch despite tty=True — this control is a "
                 f"duplicate of the detached one, not coverage of the TTY path")
             return
+
+        # A branch that never ran also leaves the sentinel in place, so "SURVIVED"
+        # cannot tell a working gate from an unreached one without this line.
         if "did not come up" not in proc.stderr:
             failures.append(
                 f"{label}: launcher never reached the liveness gate (rc={proc.returncode}) — "
