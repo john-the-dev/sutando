@@ -34,6 +34,9 @@ NEEDED = (
     "src/workspace_default.py",
     "src/sutando_config.py",
     "src/util_paths.py",
+    "src/agent/codex/cli/task-notifier.sh",
+    "src/agent/codex/cli/task-notifier-supervisor.sh",
+    "src/watch-tasks-stream.sh",
     "scripts/python-binary.sh",
     "scripts/sutando-config.sh",
     # without these the launcher aborts before tmux and the assert is vacuous
@@ -53,7 +56,7 @@ TMUX_STUB = """#!/bin/bash
 args="$*"
 case "$args" in
   *new-window*|*new-session*) echo 0; exit 0 ;;
-  *has-session*)              exit 0 ;;
+  *has-session*)              exit ${STUB_HAS_SESSION_RC:-0} ;;
   *list-windows*)             echo "0: core"; exit 0 ;;
   *)                          exit 0 ;;
 esac
@@ -61,6 +64,7 @@ esac
 # No process ever matches, so core_claude_running() is false before AND after
 # the window is created — the child that exited immediately.
 PGREP_STUB = "#!/bin/bash\nexit 1\n"
+CODEX_STUB = "#!/bin/bash\nexit 0\n"
 
 
 def run_branch(label: str, launcher_rel: str, env_extra: dict) -> None:
@@ -82,12 +86,14 @@ def run_branch(label: str, launcher_rel: str, env_extra: dict) -> None:
 
         _exe(binp / "tmux", TMUX_STUB)
         _exe(binp / "pgrep", PGREP_STUB)
+        _exe(binp / "codex", CODEX_STUB)
+        _exe(binp / "fswatch", "#!/bin/bash\nexit 0\n")
         # mktemp is load-bearing: without it claude_config_dir.sh fails and the
         # launcher exits before reaching tmux, making the assert vacuous.
         for real in ("bash", "python3", "sed", "awk", "grep", "ps", "seq", "sleep",
                      "cat", "mkdir", "rm", "date", "uname", "dirname", "basename",
                      "tr", "head", "tail", "cut", "wc", "sort", "id", "hostname",
-                     "mktemp", "touch", "chmod", "ln", "cp", "mv", "pwd", "expr",
+                     "cksum", "mktemp", "touch", "chmod", "ln", "cp", "mv", "pwd", "expr",
                      "printf", "sh", "find", "xargs", "stat", "realpath", "env", "which"):
             found = shutil.which(real)
             if found:
@@ -123,6 +129,14 @@ def run_branch(label: str, launcher_rel: str, env_extra: dict) -> None:
                               capture_output=True, text=True, env=env, cwd=str(root),
                               timeout=180)
 
+        # A branch that never ran also leaves the sentinel in place, so "SURVIVED"
+        # cannot tell a working gate from an unreached one without this line.
+        if "did not come up" not in proc.stderr:
+            failures.append(
+                f"{label}: launcher never reached the liveness gate (rc={proc.returncode}) — "
+                f"this check would pass against ANY implementation. stderr tail: "
+                f"{proc.stderr.strip()[-300:]}")
+            return
         if sentinel.exists():
             print(f"OK: {label} — tmux accepted the command, no core lived, sentinel SURVIVED")
         else:
@@ -135,9 +149,11 @@ def run_branch(label: str, launcher_rel: str, env_extra: dict) -> None:
 
 
 run_branch("claude-heal", "src/agent/claude/cli/start-cli.sh", {})
+run_branch("codex-detached", "src/agent/codex/cli/start-cli.sh",
+           {"TMUX": "forced", "STUB_HAS_SESSION_RC": "1"})
 
-# The two Codex branches are NOT asserted: this harness never reaches them, so
-# a check there passes without running the code it names (verified at 7cc1414c).
+# The Codex TTY/create-then-attach branch is still NOT asserted: reaching it needs a
+# pty, since capture_output makes stdout a pipe and `[ -t 1 ]` is then false.
 
 if failures:
     print("\nFAILURES:")
