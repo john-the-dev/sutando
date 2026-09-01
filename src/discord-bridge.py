@@ -581,9 +581,9 @@ def _select_sibling_attachments(history, referenced_ids, cutoff, cap=5):
     picked = []
     groups = []  # (author_str, [attachments]) per qualifying message, newest-first
     total = 0
-    for msg in history:  # newest-first
-        # Stop scanning once we fall outside the time window — history is
-        # ordered, so everything past this point is older still.
+    for msg in history:
+        # history is newest-first, so the first out-of-window message means
+        # every remaining one is older too.
         if msg.created_at < cutoff:
             break
         if msg.author.id not in referenced_ids:
@@ -598,9 +598,8 @@ def _select_sibling_attachments(history, referenced_ids, cutoff, cap=5):
         total += len(atts)
         if total >= cap:
             break
-    # Oldest MESSAGE first (reverse the group order), but keep each message's own
-    # attachments in upload order — reversing the flat list, as before, also
-    # inverted the attachments within each message (CR #2126, qingyun-wu).
+    # Oldest message first, but each message keeps its upload order — reversing
+    # the flat list would also invert the attachments inside each message.
     picked = []
     for author_str, atts in reversed(groups):
         picked.extend((author_str, att) for att in atts)
@@ -3555,16 +3554,7 @@ async def _handle_discord_message(message, force=False):
         except Exception as e:
             print(f"  [reply-context] fetch failed: {e}", flush=True)
 
-    # Sibling-message attachments — when the triggering mention carries no media
-    # of its own but references ANOTHER user ("@bot make the video @Alice sent"),
-    # the media usually lives on that user's own earlier, un-mentioned messages,
-    # which neither the primary loop (this message's attachments) nor the
-    # reply-context loop (a replied-to parent) can see. Pull recent attachments
-    # posted by any referenced user within a short window so the task isn't blind
-    # to the source material the owner is pointing at. Gated on referencing a
-    # non-bot user so a plain mention doesn't vacuum unrelated media. Selection
-    # logic lives in _select_sibling_attachments (unit-tested); the download I/O
-    # below mirrors the primary loop's save + sanitize + vision-push pattern.
+    # Media a mention refers to often sits on that user's own earlier messages.
     if not attachment_note and _message_mentions_bot(message):  # pragma: no cover
         referenced_ids = {
             u.id for u in message.mentions
@@ -3574,13 +3564,8 @@ async def _handle_discord_message(message, force=False):
             try:
                 from datetime import timedelta
                 cutoff = message.created_at - timedelta(minutes=15)
-                # Fetch by the 15-minute TIME window ONLY (after=cutoff, no count
-                # limit), newest-first. Any message-count ceiling — even a high one
-                # — reintroduces the truncation: a busy channel can push a
-                # referenced attachment that is inside the promised window past the
-                # cap and silently drop it (CR #2126, qingyun-wu). limit=None lets
-                # discord.py paginate the whole window; the 15-minute bound keeps it
-                # finite, and _select_sibling_attachments still caps kept attachments.
+                # Time window only, no message-count ceiling: a busy channel can
+                # push an in-window attachment past any cap and silently drop it.
                 history = [
                     m async for m in message.channel.history(
                         limit=None, after=cutoff, before=message, oldest_first=False
