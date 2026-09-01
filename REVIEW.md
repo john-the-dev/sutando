@@ -16,7 +16,8 @@ and loads whichever repo it reviews.
 
 > **Single source of truth.** These lessons live here in `REVIEW.md` only — they are
 > **not** duplicated in `CLAUDE.md`. They reach reviewers three ways: `review-preflight.py`
-> reads this file and prints the criteria on every pre-review run (for the core agent);
+> (**run it before reviewing**: `python3 scripts/review-preflight.py <PR>`) reads this file and
+> prints the criteria on every pre-review run (for the core agent);
 > `scripts/review-checks.sh` runs the machine `checks:` block below in CI; and Claude Code's
 > managed GitHub-App reviewer reads this file directly. (The in-session `/code-review` reads
 > only `CLAUDE.md`, not this file — but it is not part of our review flow.) Add or edit a
@@ -124,7 +125,12 @@ and loads whichever repo it reviews.
    times and the harness was wrong. (d) A peer's probe reported `1 pending question` against
    a true 38 and delivered that number to the owner.
    The tell is that a broken instrument and a clean result are *byte-identical*, so the
-   author's confidence carries no information.
+   author's confidence carries no information. Reinforced 2026-08-17, three more in one
+   hour, all failing in the *reassuring* direction: a timeline query filtered on
+   `auto_merge_enabled` missed arms logged as `auto_squash_enabled` ("never armed");
+   a hand-typed abbreviated SHA returned an empty check-run list ("no runs"); a
+   banner-verification piped through `cut -c1-120` truncated the appended banner
+   ("did not fire"). Each empty result would have closed its investigation.
 
 10. **A fix that changes a decision rule is itself a decision rule — enumerate the
     adjacent inputs before pushing.** When a patch changes *how something is judged*
@@ -232,6 +238,48 @@ and loads whichever repo it reviews.
     if-false control during review); the same construct had just been found blocking a
     team-guard follow-up and in one earlier review the same night. Three authors, one
     evening: a missing convention, not a personal habit. (Lesson: air + 001.)
+15. **A live-path PR is not approvable on harness proof alone — require a real
+    post-restart round trip.** When a diff touches a bridge, the network/delivery loop,
+    or startup, unit and harness tests can pass while the shipped path stays broken — a
+    bridge that reconnects but drops the first message, a delivery claim that never
+    releases, a watcher that respawns wedged. Before **approving**, require evidence that
+    a real message or task flowed *through the restarted service* end-to-end. This is the
+    same witness `CONTRIBUTING.md` already demands at merge time ("Live path (bridge /
+    network / delivery loop / startup)? Include a real post-restart round trip, not just
+    unit tests"); this lesson makes it a **review-time** gate so `review-preflight.py`
+    surfaces it on every review, not only at the merge decision. A reviewer who has seen
+    only green unit tests has not seen the behavior the PR changes. The witness is the
+    author's to run; if it needs an owner-scheduled service window, that is an ASK with
+    its cost named (which service goes down, for how long, whether inbound is replayed) —
+    never grounds to approve without it, and never a disclosure footnote on an approval.
+    *Grounded by:* #3174 (`fix(discord): suppress recreated task results after delivery`)
+    — a Discord delivery-path change approved on its unit suite, then blocked back to
+    CHANGES_REQUESTED on review because the delivery path had no post-restart witness. The
+    approval read clean on every cheap signal (tests green, diff sensible); only exercising
+    the restarted delivery loop end-to-end could have shown whether a recreated result is
+    actually suppressed after a real delivery.
+
+16. **An authorization or approval is a statement about the object as it stood at its
+    timestamp — re-read the current state before acting on it.** Approvals, owner
+    go-aheads, and "it's green, land it" messages all describe a specific head and
+    review state. Before any merge-adjacent action (arming auto-merge, merging,
+    dismissing a review), fetch the CURRENT `reviewDecision` and check whether any
+    block, push, or review postdates the authorization being executed. A stored intent
+    executed against a moved PR is unauthorized in substance even when the words were
+    genuine.
+    *Grounded by:* sonichi/sutando#3056 (2026-08-17) — an agent re-armed auto-merge
+    citing an owner-side message sent when the PR had two approvals and zero blocks;
+    by arm time a `CHANGES_REQUESTED` was 39 seconds old, nothing consulted the review
+    state at the arm site, and a maintainer had to disarm manually 78 seconds later.
+    The same night's counter-example proves the cheap check works: a half-written
+    "armed over a stale approval" bug report was discarded by reading
+    `reviewDecision` first — it was `REVIEW_REQUIRED`, so no authorization was
+    outstanding to be stale. Blocks survive pushes; in this repo so do approvals
+    (approvals are not dismissed on push on either gate surface — classic
+    `dismiss_stale_reviews: false`, ruleset 19110427
+    `dismiss_stale_reviews_on_push: false`) — an approval CAN be stale at arm
+    time, which is exactly why the re-read is necessary rather than optional. The current state, not the
+    remembered one, is what authorizes.
 
 ## Checks (machine-readable — consumed by scripts/review-checks.sh)
 
@@ -260,6 +308,22 @@ checks:
       - 'nohup.out'
 
   hardcoded-paths:
+    # Files matching these globs get a narrower exemption, not blanket exclusion
+    # (checked against the WHOLE path, matched full-diff-line via fnmatch, so
+    # '*.patch' also matches a nested path like 'skills/x/y.patch'). Within a
+    # match, only a line whose SECOND character (the nested diff's own syntax)
+    # is '-' is skipped — a stored .patch/.diff's own removal line reads as an
+    # ADDED line in the outer PR diff, and that second character distinguishes
+    # it from a real hardcoded path without inspecting content. An inner
+    # addition or inner-context line stays in scope, since that's what a
+    # re-applied patch (skills/plugin-patches/) actually introduces. Omitting
+    # the key uses these defaults rather than disabling the exemption. Mirrors
+    # the analogous glob under root-artifacts above, which lists the same two
+    # extensions for the same underlying reason (a stored patch's own diff
+    # syntax is not code to police).
+    skip_glob:
+      - '*.patch'
+      - '*.diff'
     # Added lines containing any of these substrings are flagged as errors...
     flag:
       - '/Users/'
@@ -301,6 +365,13 @@ checks:
       - '/usr/fake'
       - '/tmp/'
       - 'example.com'
+      # The send-allowlist's OWN policy data, not a host path a helper could
+      # resolve: is_path_sendable compares realpaths and macOS resolves /tmp to
+      # /private/tmp, so both spellings must be listed or the prefix never
+      # matches. Token-specific on purpose — a bare '/private/tmp/' allow would
+      # also hide unrelated findings under that root.
+      - '/private/tmp/sutando-'
+      - '/private/tmp/echo-'
     # Tokens allowed ONLY when the SAME added line also carries a companion path
     # for the SAME binary — i.e. the portable candidate-list shape, never a naked
     # literal. Encoded as 'TOKEN_PREFIX :: COMPANION_PREFIX'.
