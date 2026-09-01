@@ -4201,19 +4201,8 @@ AGENT_ACTIVE_SEC = 30 * 60
 # the check this whole probe exists to make actionable (qingyun, #2445).
 NON_PROXY_RUNTIMES = {"codex"}
 
-# Both launch records now come from ONE timestamp: `src/core_runtime_marker.py`
-# stamps core-runtime.json and session-starts.log from the same `now`, so a pair
-# written by either launcher cannot skew. The margin remains for records left by the
-# older launcher, which used two separate `date +%s` calls and could produce
-# started_at=N and session_started_at=N+1 if the second rolled between them. A
-# strict `<` then reads a CURRENT marker as stale and emits the exact false proxy
-# warning this check exists to suppress (qingyun, #2446).
-#
-# A few seconds of slack cannot mask a real previous-core marker: that marker is
-# separated from the next launch by the entire lifetime of the core that wrote it,
-# which is minutes at the very least. So the margin is generous on purpose — it
-# costs nothing on the true-positive side and closes the whole race, rather than
-# assuming the gap is exactly one second.
+# Absorbs the older launcher's two separate `date +%s` calls, which could write
+# started_at=N and session_started_at=N+1; a strict `<` reads that as stale.
 LAUNCH_RECORD_SKEW_SEC = 5
 
 
