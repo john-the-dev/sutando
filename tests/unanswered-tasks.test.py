@@ -149,13 +149,14 @@ with tempfile.TemporaryDirectory() as d:
           "quiet when [deduped: X] points at a task that DID answer")
 
 with tempfile.TemporaryDirectory() as d:
-    check(uat.unanswered(dedup_case(d, target_exists=True, chain=True), 120) == [],
-          "follows a two-hop dedup chain to a real result")
+    rows = uat.unanswered(dedup_case(d, target_exists=True, chain=True), 120)
+    check(len(rows) == 1 and rows[0][2].startswith("HOLDER-SKIPPED"),
+          "a CHAIN is flagged: the bridge never delivers through a dedup holder")
 
 with tempfile.TemporaryDirectory() as d:
     rows = uat.unanswered(dedup_case(d, target_exists=False, cycle=True), 120)
-    check(len(rows) == 1 and "cycle" in rows[0][2],
-          "FIRES on a dedup cycle instead of recursing forever")
+    check(len(rows) == 1 and rows[0][2].startswith("HOLDER-SKIPPED"),
+          "a dedup CYCLE is flagged (single-hop, so recursion is impossible by construction)")
 
 
 # A DELIVERED target archives as `task-<id>-<epoch>.txt`, never `<id>.txt`.
@@ -238,6 +239,39 @@ with tempfile.TemporaryDirectory() as d:
 with tempfile.TemporaryDirectory() as d:
     check(uat.unanswered(cross_sender_case(d, same_channel=True), 120) == [],
           "quiet when the dedup target is in the SAME room (the case dedup was designed for)")
+
+
+# A [no-send] / [REPLIED] holder never delivered, so the bridge requeues. This
+# is `dedup_holder_delivered`'s verdict, not a rule restated here.
+for marker in ("[no-send]", "[REPLIED]"):
+    with tempfile.TemporaryDirectory() as d:
+        import os
+        root = Path(d)
+        (root / "tasks" / "archive").mkdir(parents=True); (root / "results").mkdir(parents=True)
+        t = root / "tasks" / "task-src.txt"; t.write_text("id: src\n")
+        old = time.time() - 600; os.utime(t, (old, old))
+        (root / "tasks" / "archive" / "task-dst.txt").write_text("id: dst\n")
+        (root / "results" / "task-src.txt").write_text("[deduped: task-dst]\n")
+        (root / "results" / "task-dst.txt").write_text(marker + "\n")
+        rows = uat.unanswered(root, 120)
+        check(len(rows) == 1 and rows[0][2].startswith("HOLDER-SKIPPED"),
+              f"a {marker} holder is not a delivery — flagged, as the bridge requeues it")
+
+
+# The guard must fire on an EMPTY queue too: a lazy per-task import means a
+# missing result_markers.py reports "none" instead of refusing.
+with tempfile.TemporaryDirectory() as d:
+    import shutil
+    import subprocess
+    root = Path(d)
+    (root / "src").mkdir(); (root / "scripts").mkdir()
+    shutil.copy(Path(__file__).resolve().parent.parent / "scripts" / "unanswered-tasks.py",
+                root / "scripts" / "unanswered-tasks.py")
+    ws = root / "ws"; (ws / "tasks").mkdir(parents=True); (ws / "results").mkdir()
+    proc = subprocess.run([sys.executable, str(root / "scripts" / "unanswered-tasks.py"),
+                           "--workspace", str(ws)], capture_output=True, text=True, cwd=root)
+    check(proc.returncode == 2 and "result_markers" in proc.stderr,
+          "refuses (exit 2) when result_markers.py is unimportable, even with an empty queue")
 
 print(f"\nunanswered-tasks: {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

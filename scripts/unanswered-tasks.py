@@ -14,11 +14,8 @@ from __future__ import annotations
 
 import argparse
 import sys
-import re
 import time
 from pathlib import Path
-
-_DEDUP = re.compile(r"\A\s*\[deduped:\s*(task-[\w-]+)\s*\]", re.IGNORECASE)
 
 
 def _result_path(results: Path, task_id: str) -> Path | None:
@@ -68,48 +65,69 @@ def _task_channel(tasks: Path, task_id: str) -> str | None:
     return None
 
 
-def _unanswered_reason(results: Path, task_id: str, tasks: Path | None = None,
-                       origin_channel: str | None = None,
-                       _seen: set[str] | None = None) -> str | None:
-    """None when the room actually heard something; else why it did not.
+_MARKERS = None
 
-    `[deduped: X]` promises the reply lives in X's result. If X never produced
-    one the reply is nowhere, and every cheap check still sees a result file on
-    disk for this task — which is exactly how two replies were lost silently.
-    """
-    seen = set() if _seen is None else _seen
-    if task_id in seen:
-        return f"dedup cycle at {task_id}"
-    seen.add(task_id)
-    path = _result_path(results, task_id)
-    if path is None:
-        return "no result file"
+
+def _markers():
+    """The marker grammar is centralised in src/result_markers.py (CLAUDE.md);
+    re-implementing it drifts from what the bridge actually does."""
+    global _MARKERS
+    if _MARKERS is not None:
+        return _MARKERS
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
     try:
-        head = path.read_text(errors="replace")[:200]
-    except OSError:
-        return None  # present but unreadable: someone wrote a result, don't invent an alarm
-    match = _DEDUP.match(head)
-    if not match:
+        from result_markers import dedup_holder_delivered, parse_markers
+    except ImportError as exc:
+        print(f"unanswered-tasks: cannot import src/result_markers.py ({exc}) — "
+              "refusing to re-implement the marker grammar", file=sys.stderr)
+        raise SystemExit(2) from exc
+    _MARKERS = (dedup_holder_delivered, parse_markers)
+    return _MARKERS
+
+
+def _read(path: Path | None) -> str | None:
+    if path is None:
         return None
-    target = match.group(1)
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return None
+
+
+def _unanswered_reason(results: Path, task_id: str, tasks: Path | None = None) -> str | None:
+    """None when the room heard something; else why it did not.
+
+    Delegates the `[deduped:]` verdict to `dedup_holder_delivered`, which is
+    what the bridge asks — a holder that is itself a skip never delivered.
+    """
+    delivered, parse = _markers()
+    text = _read(_result_path(results, task_id))
+    if text is None:
+        return "no result file"
+    dedup = next((a for a in parse(text).actions
+                  if a.kind == "skip" and a.value == "deduped"), None)
+    if dedup is None:
+        return None  # a real reply, or a deliberate skip decision for THIS task
+    target = str(dedup.extra or "").strip()
+    if not target:
+        return "deduped into nothing (no target id)"
     if tasks is not None:
-        origin = origin_channel if origin_channel is not None else _task_channel(tasks, task_id)
-        dest = _task_channel(tasks, target)
-        # Resolving is not reaching: a target in ANOTHER channel answers someone
-        # else, and this sender is silenced while every existence check passes.
+        origin, dest = _task_channel(tasks, task_id), _task_channel(tasks, target)
+        # Resolving is not reaching: a target in ANOTHER channel answers someone else.
         if origin and dest and origin != dest:
             return f"CROSS-SENDER: deduped into {target}, whose reply goes to {dest}, not {origin}"
-    reason = _unanswered_reason(results, target, tasks, origin_channel, seen)
-    if reason is None:
+    target_path = _result_path(results, target)
+    if delivered(_read(target_path)):
         return None
-    # DANGLING vs ORPHANED: the fixes differ — "never name a peer's id" vs
-    # "your own target never answered" — so never collapse them into one.
-    if tasks is not None and reason == "no result file" and not _task_exists(tasks, target):
-        return f"DANGLING: deduped into {target}, which does not exist in this workspace"
-    return f"ORPHANED: deduped into {target}, which has {reason}"
+    if target_path is None:
+        if tasks is not None and not _task_exists(tasks, target):
+            return f"DANGLING: deduped into {target}, which does not exist in this workspace"
+        return f"ORPHANED: deduped into {target}, which has no result file"
+    return f"HOLDER-SKIPPED: deduped into {target}, whose own result is a skip — the bridge requeues this"
 
 
 def unanswered(workspace: Path, min_age_sec: float, now: float | None = None) -> list[tuple[str, float, str]]:
+    _markers()  # resolve up front: an empty queue must not silently skip the guard
     now = time.time() if now is None else now
     tasks, results = workspace / "tasks", workspace / "results"
     out: list[tuple[str, float, str]] = []
