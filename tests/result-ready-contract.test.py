@@ -18,7 +18,8 @@ sys.path.insert(0, str(REPO / "src"))
 
 import delivery.readiness as result_ready  # noqa: E402
 from delivery.readiness import (  # noqa: E402
-    alloc_task_id, is_ready_body, read_ready_result, stamp_result_file,
+    alloc_task_id, is_ready_body, read_ready_result,
+    read_ready_result_for_delivery, stamp_result_file,
 )
 
 # Every consumer that decides "is this result ready to deliver?".
@@ -117,7 +118,7 @@ class ContractTest(unittest.TestCase):
             self.addCleanup(setattr, result_ready, "needs_task_stamp", real_needs)
 
             def go():
-                out.append(read_ready_result(p))
+                out.append(read_ready_result_for_delivery(p))
 
             ts = [threading.Thread(target=go) for _ in range(2)]
             for t in ts:
@@ -143,7 +144,8 @@ class ContractTest(unittest.TestCase):
             p.write_text("the answer")
             # state/ occupied by a regular file → mkdir and the counter both fail
             (Path(td) / "state").write_text("not a directory")
-            self.assertIsNone(read_ready_result(p), "delivered without an id")
+            self.assertIsNone(read_ready_result_for_delivery(p),
+                              "delivered without an id")
             self.assertEqual(p.read_text(), "the answer", "file must survive for retry")
 
     def test_marker_only_body_is_ready(self):

@@ -3,8 +3,10 @@
 
 The hook stamps after a tool call ends, but a bridge can read and post a visible
 `results/task-*.txt` before that runs. Every delivery consumer funnels through
-read_ready_result, so stamping there is what makes "no ordinary result is
-delivered without an ID" structural rather than timing-dependent.
+read_ready_result_for_delivery, so stamping there is what makes "no ordinary
+result is delivered without an ID" structural rather than timing-dependent.
+The plain reader stays PURE: an inspection caller (runtime-api views, the
+orphan sweep) must never rewrite the result it is only enumerating.
 """
 import importlib.util
 import sys
@@ -32,7 +34,7 @@ res.mkdir()
 # The race itself: the file is already visible when the boundary reads it.
 f = res / "task-1786700000000.txt"
 f.write_text("here is your answer")
-body = rr.read_ready_result(f)
+body = rr.read_ready_result_for_delivery(f)
 check("a visible unstamped result cannot be delivered without an ID",
       body.startswith("[task "), body[:40])
 check("the stamp is persisted, so archive and audit see what was sent",
@@ -59,8 +61,17 @@ ids = []
 for i in range(3):
     q = res / f"task-90{i}.txt"
     q.write_text(f"reply {i}")
-    ids.append(rr.read_ready_result(q).split("]")[0])
+    ids.append(rr.read_ready_result_for_delivery(q).split("]")[0])
 check("each delivered result gets a distinct ID", len(set(ids)) == 3, str(ids))
+
+# The boundary this PR draws: the plain reader is pure. Without this, nothing
+# fails if stamping creeps back into the read path.
+pure = res / "task-1786700000001.txt"
+pure.write_text("untouched by inspection")
+check("the PLAIN reader does not stamp",
+      rr.read_ready_result(pure) == "untouched by inspection")
+check("and does not rewrite the file",
+      pure.read_text() == "untouched by inspection")
 
 empty = res / "task-empty.txt"
 empty.write_text("   \n")

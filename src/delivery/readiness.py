@@ -38,7 +38,8 @@ from datetime import date
 from pathlib import Path
 
 __all__ = [
-    "read_ready_result", "is_ready_body", "needs_task_stamp", "alloc_task_id",
+    "read_ready_result", "read_ready_result_for_delivery", "is_ready_body",
+    "needs_task_stamp", "alloc_task_id",
     "stamp_result_file",
 ]
 
@@ -348,6 +349,19 @@ def read_ready_result(path: str | Path) -> str | None:
     body = body.strip()
     if not body:
         return None
+    return body
+
+
+def read_ready_result_for_delivery(path: str | Path) -> str | None:
+    """`read_ready_result`, plus the stamp a bridge reply needs before sending.
+
+    Separate from the pure reader because stamping REWRITES the file: an
+    inspection caller must never mutate the result it is only enumerating.
+    """
+    body = read_ready_result(path)
+    if body is None:
+        return None
+    p = Path(path)
     if needs_task_stamp(p.name, body):
         # Fail CLOSED: no ID, or an ID we could not durably persist, means this
         # result is not ready. It stays on disk and is retried on the next pass.
