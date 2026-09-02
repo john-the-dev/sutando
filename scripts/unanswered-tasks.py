@@ -45,7 +45,17 @@ def _result_path(results: Path, task_id: str) -> Path | None:
     return hits[0] if hits else None
 
 
-def _unanswered_reason(results: Path, task_id: str, _seen: set[str] | None = None) -> str | None:
+def _task_exists(tasks: Path, task_id: str) -> bool:
+    """Did this id ever exist HERE? Task ids are minted per recipient, so a
+    peer's id is well-formed and still unresolvable — charset cannot tell."""
+    if (tasks / f"{task_id}.txt").exists():
+        return True
+    arch = tasks / "archive"
+    return bool(list(arch.glob(f"**/{task_id}.txt")) + list(arch.glob(f"**/{task_id}-*.txt")))
+
+
+def _unanswered_reason(results: Path, task_id: str, tasks: Path | None = None,
+                       _seen: set[str] | None = None) -> str | None:
     """None when the room actually heard something; else why it did not.
 
     `[deduped: X]` promises the reply lives in X's result. If X never produced
@@ -67,8 +77,14 @@ def _unanswered_reason(results: Path, task_id: str, _seen: set[str] | None = Non
     if not match:
         return None
     target = match.group(1)
-    reason = _unanswered_reason(results, target, seen)
-    return None if reason is None else f"deduped into {target}, which has {reason}"
+    reason = _unanswered_reason(results, target, tasks, seen)
+    if reason is None:
+        return None
+    # DANGLING vs ORPHANED: the fixes differ — "never name a peer's id" vs
+    # "your own target never answered" — so never collapse them into one.
+    if tasks is not None and reason == "no result file" and not _task_exists(tasks, target):
+        return f"DANGLING: deduped into {target}, which does not exist in this workspace"
+    return f"ORPHANED: deduped into {target}, which has {reason}"
 
 
 def unanswered(workspace: Path, min_age_sec: float, now: float | None = None) -> list[tuple[str, float, str]]:
@@ -81,7 +97,7 @@ def unanswered(workspace: Path, min_age_sec: float, now: float | None = None) ->
         age = now - f.stat().st_mtime
         if age < min_age_sec:
             continue  # still plausibly in flight
-        reason = _unanswered_reason(results, f.stem)
+        reason = _unanswered_reason(results, f.stem, tasks)
         if reason is not None:
             out.append((f.stem, age, reason))
     return out

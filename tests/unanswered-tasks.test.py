@@ -188,5 +188,30 @@ with tempfile.TemporaryDirectory() as d:
     check(len(rows) == 1 and "task-dst" in rows[0][2],
           "a QUARANTINED (.too-old) target does not count as delivered")
 
+
+# DANGLING (target never existed here) and ORPHANED (own target never answered)
+# need opposite fixes, so a checker that reports one label for both misroutes.
+def split_case(tmp, *, target_task_exists):
+    import os
+    root = Path(tmp)
+    (root / "tasks" / "archive").mkdir(parents=True); (root / "results").mkdir(parents=True)
+    t = root / "tasks" / "task-src.txt"; t.write_text("id: x\n")
+    old = time.time() - 600; os.utime(t, (old, old))
+    (root / "results" / "task-src.txt").write_text("[deduped: task-dst]\n")
+    if target_task_exists:
+        (root / "tasks" / "archive" / "task-dst.txt").write_text("id: dst\n")
+    return root
+
+
+with tempfile.TemporaryDirectory() as d:
+    rows = uat.unanswered(split_case(d, target_task_exists=False), 120)
+    check(len(rows) == 1 and rows[0][2].startswith("DANGLING"),
+          "a target that never existed here is DANGLING (a peer's id), not ORPHANED")
+
+with tempfile.TemporaryDirectory() as d:
+    rows = uat.unanswered(split_case(d, target_task_exists=True), 120)
+    check(len(rows) == 1 and rows[0][2].startswith("ORPHANED"),
+          "a target that exists here but never answered is ORPHANED, not DANGLING")
+
 print(f"\nunanswered-tasks: {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
