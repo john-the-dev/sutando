@@ -74,7 +74,8 @@ def _markers():
     global _MARKERS
     if _MARKERS is not None:
         return _MARKERS
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+    repo = Path(__file__).resolve().parent.parent  # lint-workspace-resolution: allow-repo-root (sys.path only; the root comes from the CLI arg)
+    sys.path.insert(0, str(repo / "src"))
     try:
         from result_markers import dedup_holder_delivered, parse_markers
     except ImportError as exc:
