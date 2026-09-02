@@ -171,5 +171,22 @@ with tempfile.TemporaryDirectory() as d:
     check(uat.unanswered(root, 120) == [],
           "quiet when the dedup target was DELIVERED (archived with an epoch suffix)")
 
+
+# A prefix without a separator also matches `{id}.too-old.<epoch>` (QUARANTINED)
+# and any longer id sharing the prefix — both would read as delivered.
+with tempfile.TemporaryDirectory() as d:
+    import os
+    root = Path(d)
+    (root / "tasks").mkdir(parents=True); (root / "results" / "archive" / "2026-09").mkdir(parents=True)
+    t = root / "tasks" / "task-src.txt"; t.write_text("id: x\n")
+    old = time.time() - 600; os.utime(t, (old, old))
+    (root / "results" / "task-src.txt").write_text("[deduped: task-dst]\n")
+    a = root / "results" / "archive" / "2026-09"
+    (a / "task-dst.too-old.1787014338.txt").write_text("aged out, never delivered\n")
+    (a / "task-dstrework-1788376009.txt").write_text("a DIFFERENT task sharing the prefix\n")
+    rows = uat.unanswered(root, 120)
+    check(len(rows) == 1 and "task-dst" in rows[0][2],
+          "a QUARANTINED (.too-old) target does not count as delivered")
+
 print(f"\nunanswered-tasks: {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

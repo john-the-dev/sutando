@@ -38,7 +38,10 @@ def _result_path(results: Path, task_id: str) -> Path | None:
         hits = sorted(results.glob(pat))
         if hits:
             return hits[0]
-    hits = sorted((results / "archive").glob(f"**/{task_id}*.txt"))
+    # `{id}-*` requires the separator: a bare `{id}*` prefix also matches
+    # `{id}.too-old.<epoch>`, i.e. QUARANTINED, which is the opposite of delivered.
+    arch = results / "archive"
+    hits = sorted(list(arch.glob(f"**/{task_id}.txt")) + list(arch.glob(f"**/{task_id}-*.txt")))
     return hits[0] if hits else None
 
 
