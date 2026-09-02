@@ -54,7 +54,22 @@ def _task_exists(tasks: Path, task_id: str) -> bool:
     return bool(list(arch.glob(f"**/{task_id}.txt")) + list(arch.glob(f"**/{task_id}-*.txt")))
 
 
+def _task_channel(tasks: Path, task_id: str) -> str | None:
+    """The task's originating channel, from its header."""
+    for cand in [tasks / f"{task_id}.txt", *sorted((tasks / "archive").glob(f"**/{task_id}*.txt"))]:
+        try:
+            text = cand.read_text(errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.startswith("channel_id:"):
+                return line.split(":", 1)[1].strip()
+        return None
+    return None
+
+
 def _unanswered_reason(results: Path, task_id: str, tasks: Path | None = None,
+                       origin_channel: str | None = None,
                        _seen: set[str] | None = None) -> str | None:
     """None when the room actually heard something; else why it did not.
 
@@ -77,7 +92,14 @@ def _unanswered_reason(results: Path, task_id: str, tasks: Path | None = None,
     if not match:
         return None
     target = match.group(1)
-    reason = _unanswered_reason(results, target, tasks, seen)
+    if tasks is not None:
+        origin = origin_channel if origin_channel is not None else _task_channel(tasks, task_id)
+        dest = _task_channel(tasks, target)
+        # Resolving is not reaching: a target in ANOTHER channel answers someone
+        # else, and this sender is silenced while every existence check passes.
+        if origin and dest and origin != dest:
+            return f"CROSS-SENDER: deduped into {target}, whose reply goes to {dest}, not {origin}"
+    reason = _unanswered_reason(results, target, tasks, origin_channel, seen)
     if reason is None:
         return None
     # DANGLING vs ORPHANED: the fixes differ — "never name a peer's id" vs

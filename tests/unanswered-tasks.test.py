@@ -213,5 +213,31 @@ with tempfile.TemporaryDirectory() as d:
     check(len(rows) == 1 and rows[0][2].startswith("ORPHANED"),
           "a target that exists here but never answered is ORPHANED, not DANGLING")
 
+
+# Resolving is not reaching. The target ANSWERED, so every existence check
+# passes -- and the reply went to a different room, silencing this sender.
+def cross_sender_case(tmp, *, same_channel):
+    import os
+    root = Path(tmp)
+    (root / "tasks" / "archive").mkdir(parents=True); (root / "results").mkdir(parents=True)
+    t = root / "tasks" / "task-src.txt"
+    t.write_text("id: src\nchannel_id: !roomA:ag2.space\n")
+    old = time.time() - 600; os.utime(t, (old, old))
+    dest = "!roomA:ag2.space" if same_channel else "!roomB:ag2.space"
+    (root / "tasks" / "archive" / "task-dst.txt").write_text(f"id: dst\nchannel_id: {dest}\n")
+    (root / "results" / "task-src.txt").write_text("[deduped: task-dst]\n")
+    (root / "results" / "task-dst.txt").write_text("the reply, delivered to task-dst's room\n")
+    return root
+
+
+with tempfile.TemporaryDirectory() as d:
+    rows = uat.unanswered(cross_sender_case(d, same_channel=False), 120)
+    check(len(rows) == 1 and rows[0][2].startswith("CROSS-SENDER"),
+          "FIRES on a dedup whose target answers a DIFFERENT room (the target did answer)")
+
+with tempfile.TemporaryDirectory() as d:
+    check(uat.unanswered(cross_sender_case(d, same_channel=True), 120) == [],
+          "quiet when the dedup target is in the SAME room (the case dedup was designed for)")
+
 print(f"\nunanswered-tasks: {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
