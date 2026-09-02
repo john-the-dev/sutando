@@ -51,15 +51,15 @@ def _task_exists(tasks: Path, task_id: str) -> bool:
     return bool(list(arch.glob(f"**/{task_id}.txt")) + list(arch.glob(f"**/{task_id}-*.txt")))
 
 
-def _task_channel(tasks: Path, task_id: str) -> str | None:
-    """The task's originating channel, from its header."""
+def _task_field(tasks: Path, task_id: str, key: str) -> str | None:
+    """One header field of a task, live or archived."""
     for cand in [tasks / f"{task_id}.txt", *sorted((tasks / "archive").glob(f"**/{task_id}*.txt"))]:
         try:
             text = cand.read_text(errors="replace")
         except OSError:
             continue
         for line in text.splitlines():
-            if line.startswith("channel_id:"):
+            if line.startswith(f"{key}:"):
                 return line.split(":", 1)[1].strip()
         return None
     return None
@@ -112,10 +112,15 @@ def _unanswered_reason(results: Path, task_id: str, tasks: Path | None = None) -
     if not target:
         return "deduped into nothing (no target id)"
     if tasks is not None:
-        origin, dest = _task_channel(tasks, task_id), _task_channel(tasks, target)
-        # Resolving is not reaching: a target in ANOTHER channel answers someone else.
-        if origin and dest and origin != dest:
-            return f"CROSS-SENDER: deduped into {target}, whose reply goes to {dest}, not {origin}"
+        # The dedup is sound only within ONE SENDER's thread. Comparing the CHANNEL
+        # misses every case in a shared room, which is where peers actually talk.
+        who = _task_field(tasks, task_id, "user_id")
+        to = _task_field(tasks, target, "user_id")
+        if who and to and who != to:
+            return f"CROSS-SENDER: deduped into {target}, which answers {to}, not {who}"
+        room, dest_room = _task_field(tasks, task_id, "channel_id"), _task_field(tasks, target, "channel_id")
+        if room and dest_room and room != dest_room:
+            return f"CROSS-ROOM: deduped into {target}, whose reply goes to {dest_room}, not {room}"
     target_path = _result_path(results, target)
     if delivered(_read(target_path)):
         return None

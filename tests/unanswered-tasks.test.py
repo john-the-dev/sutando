@@ -217,7 +217,7 @@ with tempfile.TemporaryDirectory() as d:
 
 # Resolving is not reaching. The target ANSWERED, so every existence check
 # passes -- and the reply went to a different room, silencing this sender.
-def cross_sender_case(tmp, *, same_channel):
+def cross_room_case(tmp, *, same_channel):
     import os
     root = Path(tmp)
     (root / "tasks" / "archive").mkdir(parents=True); (root / "results").mkdir(parents=True)
@@ -232,13 +232,13 @@ def cross_sender_case(tmp, *, same_channel):
 
 
 with tempfile.TemporaryDirectory() as d:
-    rows = uat.unanswered(cross_sender_case(d, same_channel=False), 120)
-    check(len(rows) == 1 and rows[0][2].startswith("CROSS-SENDER"),
+    rows = uat.unanswered(cross_room_case(d, same_channel=False), 120)
+    check(len(rows) == 1 and rows[0][2].startswith("CROSS-ROOM"),
           "FIRES on a dedup whose target answers a DIFFERENT room (the target did answer)")
 
 with tempfile.TemporaryDirectory() as d:
-    check(uat.unanswered(cross_sender_case(d, same_channel=True), 120) == [],
-          "quiet when the dedup target is in the SAME room (the case dedup was designed for)")
+    check(uat.unanswered(cross_room_case(d, same_channel=True), 120) == [],
+          "quiet when the dedup target is the SAME room and sender (what dedup is for)")
 
 
 # A [no-send] / [REPLIED] holder never delivered, so the bridge requeues. This
@@ -272,6 +272,33 @@ with tempfile.TemporaryDirectory() as d:
                            "--workspace", str(ws)], capture_output=True, text=True, cwd=root)
     check(proc.returncode == 2 and "result_markers" in proc.stderr,
           "refuses (exit 2) when result_markers.py is unimportable, even with an empty queue")
+
+
+# The real shape: ONE shared room, many senders. Comparing channels is silent
+# here, which is where every measured cross-sender silence actually happened.
+def same_room_case(tmp, *, same_sender):
+    import os
+    root = Path(tmp)
+    (root / "tasks" / "archive").mkdir(parents=True); (root / "results").mkdir(parents=True)
+    t = root / "tasks" / "task-src.txt"
+    t.write_text("id: src\nchannel_id: !room:ag2.space\nuser_id: @alice:ag2.space\n")
+    old = time.time() - 600; os.utime(t, (old, old))
+    who = "@alice:ag2.space" if same_sender else "@bob:ag2.space"
+    (root / "tasks" / "archive" / "task-dst.txt").write_text(
+        f"id: dst\nchannel_id: !room:ag2.space\nuser_id: {who}\n")
+    (root / "results" / "task-src.txt").write_text("[deduped: task-dst]\n")
+    (root / "results" / "task-dst.txt").write_text("the reply, delivered to dst's sender\n")
+    return root
+
+
+with tempfile.TemporaryDirectory() as d:
+    rows = uat.unanswered(same_room_case(d, same_sender=False), 120)
+    check(len(rows) == 1 and rows[0][2].startswith("CROSS-SENDER"),
+          "FIRES on same-room different-sender — the shape a channel compare cannot see")
+
+with tempfile.TemporaryDirectory() as d:
+    check(uat.unanswered(same_room_case(d, same_sender=True), 120) == [],
+          "quiet on same-room same-sender — the legitimate dedup")
 
 print(f"\nunanswered-tasks: {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
