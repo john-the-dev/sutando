@@ -157,5 +157,19 @@ with tempfile.TemporaryDirectory() as d:
     check(len(rows) == 1 and "cycle" in rows[0][2],
           "FIRES on a dedup cycle instead of recursing forever")
 
+
+# A DELIVERED target archives as `task-<id>-<epoch>.txt`, never `<id>.txt`.
+# An exact-name predicate would call every delivered target ORPHANED.
+with tempfile.TemporaryDirectory() as d:
+    import os
+    root = Path(d)
+    (root / "tasks").mkdir(parents=True); (root / "results" / "archive" / "2026-09").mkdir(parents=True)
+    t = root / "tasks" / "task-src.txt"; t.write_text("id: x\n")
+    old = time.time() - 600; os.utime(t, (old, old))
+    (root / "results" / "task-src.txt").write_text("[deduped: task-dst]\n")
+    (root / "results" / "archive" / "2026-09" / "task-dst-1788376009.txt").write_text("the actual reply\n")
+    check(uat.unanswered(root, 120) == [],
+          "quiet when the dedup target was DELIVERED (archived with an epoch suffix)")
+
 print(f"\nunanswered-tasks: {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
