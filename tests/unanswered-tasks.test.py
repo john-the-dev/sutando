@@ -113,5 +113,49 @@ with tempfile.TemporaryDirectory() as d:
     rc, _ = run_main(["--workspace", str(ws(d, age_sec=600)), "--min-age-sec", "99999"])
     check(rc == 0, "main() honours --min-age-sec (a young task is not a miss)")
 
+
+# --- [deduped: X] is only an answer if X answered ----------------------------
+# A marker naming a task with no result leaves a result file on disk either way.
+def dedup_case(tmp, *, target_exists, chain=False, cycle=False):
+    import os
+    root = Path(tmp)
+    (root / "tasks").mkdir(parents=True, exist_ok=True)
+    (root / "results").mkdir(parents=True, exist_ok=True)
+    t = root / "tasks" / "task-src.txt"
+    t.write_text("id: x\n")
+    old = time.time() - 600
+    os.utime(t, (old, old))
+    res = root / "results"
+    if cycle:
+        (res / "task-src.txt").write_text("[deduped: task-mid]\n")
+        (res / "task-mid.txt").write_text("[deduped: task-src]\n")
+        return root
+    hops = ["task-mid", "task-dst"] if chain else ["task-dst"]
+    (res / "task-src.txt").write_text(f"[deduped: {hops[0]}]\n")
+    for a, b in zip(hops, hops[1:]):
+        (res / f"{a}.txt").write_text(f"[deduped: {b}]\n")
+    if target_exists:
+        (res / f"{hops[-1]}.txt").write_text("the actual reply\n")
+    return root
+
+
+with tempfile.TemporaryDirectory() as d:
+    rows = uat.unanswered(dedup_case(d, target_exists=False), 120)
+    check(len(rows) == 1 and "task-dst" in rows[0][2],
+          "FIRES when [deduped: X] points at a task with no result (the loss this closes)")
+
+with tempfile.TemporaryDirectory() as d:
+    check(uat.unanswered(dedup_case(d, target_exists=True), 120) == [],
+          "quiet when [deduped: X] points at a task that DID answer")
+
+with tempfile.TemporaryDirectory() as d:
+    check(uat.unanswered(dedup_case(d, target_exists=True, chain=True), 120) == [],
+          "follows a two-hop dedup chain to a real result")
+
+with tempfile.TemporaryDirectory() as d:
+    rows = uat.unanswered(dedup_case(d, target_exists=False, cycle=True), 120)
+    check(len(rows) == 1 and "cycle" in rows[0][2],
+          "FIRES on a dedup cycle instead of recursing forever")
+
 print(f"\nunanswered-tasks: {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
