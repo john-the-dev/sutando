@@ -162,6 +162,31 @@ check $? "default backup root lives under the git dir (never trackable)"
 # so git status was trivially clean. The under-the-git-dir check above is the
 # one that actually discriminates.)
 
+# --- A DANGLING SYMLINK is local state too, and `-e` FOLLOWS the link, so it
+# --- reads as absent and takes the DELETING branch. This repo's own `workspace`
+# --- link has exactly that shape whenever its target is unavailable.
+# --- Built with PLUMBING (stage 1 only): a plain delete/delete merges CLEANLY
+# --- and would never reach the fallback at all — a vacuous pass. (I shipped
+# --- that fixture first and only the mutation run below caught it.)
+WS3="$TMP/ws3"; mkdir -p "$WS3"; cd "$WS3" || exit 1
+git init -q .; git config user.email t@t; git config user.name t
+printf 'seed\n' > seed; git add seed; git commit -qm base
+BLOB="$(printf '/nonexistent-target-xyz' | git hash-object -w --stdin)"
+printf '120000 %s 1\tlink\n' "$BLOB" | git update-index --index-info
+ln -s /nonexistent-target-xyz link          # live local state git no longer owns
+
+[ -n "$(git ls-files -u -- link)" ]
+check $? "fixture: link is genuinely UNMERGED (stage 1 only), not a clean merge"
+[ -L link ] && [ ! -e link ]
+check $? "fixture: the path is a DANGLING symlink (-L true, -e false)"
+
+_resolve_conflicts_keep_ours "origin/none" "$TMP/bk3" 2>/dev/null
+
+[ -L link ]
+check $? "THE POINT: a dangling symlink SURVIVES the DD fallback (\`-e\` alone deletes it)"
+[ -z "$(git ls-files -u -- link)" ]
+check $? "dangling-symlink DD conflict is still resolved in the index"
+
 printf '\n%s: %d passed, %d failed\n' "sync conflict preserves theirs" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
 printf 'PASS — sync-workspace conflict fallback preserves the discarded side\n'
