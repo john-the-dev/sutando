@@ -236,6 +236,27 @@ def command_for(target: dict, message: str) -> "list[str]":
 
 _PR_URL = re.compile("github[.]com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/pull/([0-9]+)")
 
+# `owner/repo#12` and a bare `#12`. Two digits minimum: `#1` is far more often
+# prose than a PR, and a guard that cries wolf gets routed around.
+_PR_SHORTHAND = re.compile(
+    r"(?:(?P<repo>[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#|(?<![\w/#])#)(?P<num>[0-9]{2,})")
+
+
+def unrecordable_pr_refs(message: str) -> list:
+    """Shorthand PR references record_asks() will not log: (token, form that works).
+
+    Absence is never reported — an ask need not concern a PR. Only shorthand is,
+    because that is the case that reads as a PR reference and records nothing.
+    """
+    recorded = {num for _, num in _PR_URL.findall(message)}
+    out = []
+    for m in _PR_SHORTHAND.finditer(message):
+        if m.group("num") in recorded:
+            continue
+        repo = m.group("repo") or "<owner>/<repo>"
+        out.append((m.group(0), f"https://github.com/{repo}/pull/{m.group('num')}"))
+    return out
+
 def ledger_path() -> Path:
     from workspace_default import resolve_workspace
     return Path(resolve_workspace()) / "state" / "review-asks.jsonl"
@@ -430,6 +451,14 @@ def main() -> int:
         return refusal_rc if refusal_rc > 0 else 5
     if a.allow_single and len(targets) < 2:
         print(f"single-reviewer ask allowed: {a.allow_single}", file=sys.stderr)
+    if a.send and a.kind == "ask":
+        loose = unrecordable_pr_refs(a.message)
+        if loose:
+            print("REFUSED: this ask would DELIVER and record NOTHING. record_asks() logs "
+                  "only full github.com/<owner>/<repo>/pull/<n> URLs, so pr-unattended would "
+                  "read the PR as never asked. Refused reference(s), and the form that works: "
+                  + "; ".join(f"{tok} -> {fix}" for tok, fix in loose), file=sys.stderr)
+            return 7
     stale, why = _stale_repeat_ask(a.message, targets, load_roster()) if a.kind == "ask" else (False, "")
     if stale and not a.widen_override:
         print(f"REFUSED: {why} Re-asking the same people is not escalation — "
