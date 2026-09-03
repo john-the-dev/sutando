@@ -234,10 +234,17 @@ class MultiRepoDefault(unittest.TestCase):
             {"repository_url": "https://api.github.com/repos/o/alpha"},
             {"repository_url": "https://api.github.com/repos/o/beta"},
         ]}
+        login_in_query = ME
 
         def fake(*args, default=None):
             joined = " ".join(str(a) for a in args)
             if "search/issues" in joined:
+                # A stub that answers regardless of the query pins the plumbing
+                # and not the question asked; the query is on the far side.
+                assert "reviewed-by" in joined, \
+                    f"discovery query lost its reviewed-by filter: {joined}"
+                assert login_in_query in joined, \
+                    f"discovery query does not name the login: {joined}"
                 return search
             if args[0] == "api" and joined.endswith("user"):
                 return {"login": ME}
