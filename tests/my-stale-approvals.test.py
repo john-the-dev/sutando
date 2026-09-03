@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""The two measurements this script exists to get right, both polarities.
+
+SCOPE: a PR carrying your approval must be found whether or not you are also a
+requested reviewer. Filtering by review-requests is the mistake that made a
+by-hand scan report 3 of 19 as the total.
+
+STALENESS: compare against the newest AUTHORED commit. A base merge moves the
+head without anyone writing code, so a scan keyed on the head alone reports
+approvals stale that are not — and a checker that cries wolf gets ignored.
+
+Every positive is paired with its negative: found-when-stale AND absent-when-
+fresh, decisive-when-uncontested AND not-decisive-when-someone-else-blocks.
+
+Run: python3 tests/my-stale-approvals.test.py   (stdlib only, no network)
+"""
+import importlib.util
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "my-stale-approvals.py"
+ME = "me"
+
+
+def _load():
+    spec = importlib.util.spec_from_file_location("_msa", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _commit(date, parents=1):
+    return {"sha": "x" * 40, "parents": [{}] * parents,
+            "commit": {"committer": {"date": date}}}
+
+
+def _review(login, state, at, assoc="COLLABORATOR"):
+    return {"user": {"login": login}, "state": state,
+            "submitted_at": at, "author_association": assoc}
+
+
+class Fake:
+    """Stands in for the gh CLI so the suite never touches the network."""
+
+    def __init__(self, prs, reviews, commits):
+        self.prs, self.reviews, self.commits = prs, reviews, commits
+
+    def __call__(self, *args, default=None):
+        if args[0] == "pr" and args[1] == "list":
+            return self.prs
+        joined = " ".join(args)
+        for num in list(self.reviews) + list(self.commits):
+            if f"/pulls/{num}/reviews" in joined:
+                return self.reviews.get(num, [])
+            if f"/pulls/{num}/commits" in joined:
+                return self.commits.get(num, [])
+        return default
+
+
+class StaleApprovals(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load()
+
+    def _scan(self, prs, reviews, commits, bar=2):
+        with patch.object(self.mod, "gh_json", Fake(prs, reviews, commits)):
+            return self.mod.scan("o/r", ME, bar)
+
+    def _pr(self, n, author="peer", draft=False, base="main"):
+        return {"number": n, "title": f"pr {n}", "author": {"login": author},
+                "isDraft": draft, "baseRefName": base}
+
+    # --- SCOPE ------------------------------------------------------------
+
+    def test_found_even_though_no_review_was_requested_of_me(self):
+        """The defect this script exists to prevent: the review-request list is
+        not the population. Nothing here mentions reviewRequests at all."""
+        rows = self._scan([self._pr(1)],
+                          {1: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z")]},
+                          {1: [_commit("2026-01-02T00:00:00Z")]})
+        self.assertEqual([r["number"] for r in rows], [1])
+        self.assertEqual(rows[0]["commits_after"], 1)
+
+    # --- STALENESS --------------------------------------------------------
+
+    def test_CONTROL_an_approval_at_the_newest_authored_commit_is_not_stale(self):
+        rows = self._scan([self._pr(2)],
+                          {2: [_review(ME, "APPROVED", "2026-01-03T00:00:00Z")]},
+                          {2: [_commit("2026-01-02T00:00:00Z")]})
+        self.assertEqual(rows, [])
+
+    def test_a_base_MERGE_after_my_approval_does_not_make_it_stale(self):
+        """A merge commit moves the head with nobody writing code. Keying on the
+        head alone reports this as stale, which is the false positive."""
+        rows = self._scan([self._pr(3)],
+                          {3: [_review(ME, "APPROVED", "2026-01-03T00:00:00Z")]},
+                          {3: [_commit("2026-01-02T00:00:00Z"),
+                               _commit("2026-01-04T00:00:00Z", parents=2)]})
+        self.assertEqual(rows, [], "a base merge is not authored work")
+
+    def test_my_CHANGES_REQUESTED_is_not_a_stale_approval(self):
+        rows = self._scan([self._pr(4)],
+                          {4: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z"),
+                               _review(ME, "CHANGES_REQUESTED", "2026-01-02T00:00:00Z")]},
+                          {4: [_commit("2026-01-03T00:00:00Z")]})
+        self.assertEqual(rows, [], "latest review wins, and a block is not an authorisation")
+
+    def test_my_own_PR_is_skipped(self):
+        rows = self._scan([self._pr(5, author=ME)],
+                          {5: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z")]},
+                          {5: [_commit("2026-01-02T00:00:00Z")]})
+        self.assertEqual(rows, [])
+
+    # --- DECISIVE ---------------------------------------------------------
+
+    def test_decisive_when_nobody_else_blocks_and_the_bar_is_within_reach(self):
+        rows = self._scan([self._pr(6)],
+                          {6: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z")]},
+                          {6: [_commit("2026-01-02T00:00:00Z")]})
+        self.assertTrue(rows[0]["decisive"])
+        self.assertEqual(rows[0]["qualifying_approvals"], 1)
+
+    def test_NOT_decisive_when_someone_else_holds_changes_requested(self):
+        rows = self._scan([self._pr(7)],
+                          {7: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z"),
+                               _review("other", "CHANGES_REQUESTED", "2026-01-01T00:00:00Z")]},
+                          {7: [_commit("2026-01-02T00:00:00Z")]})
+        self.assertFalse(rows[0]["decisive"])
+        self.assertEqual(rows[0]["blocked_by_others"], ["other"])
+
+    def test_a_CONTRIBUTOR_approval_does_not_count_toward_the_bar(self):
+        """Only COLLABORATOR/MEMBER/OWNER count at the gate, so counting names
+        rather than associations overstates how close a PR is."""
+        rows = self._scan([self._pr(8)],
+                          {8: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z"),
+                               _review("drive-by", "APPROVED", "2026-01-01T00:00:00Z",
+                                       assoc="CONTRIBUTOR")]},
+                          {8: [_commit("2026-01-02T00:00:00Z")]})
+        self.assertEqual(rows[0]["qualifying_approvals"], 1, "the CONTRIBUTOR must not be counted")
+
+    def test_decisive_sorts_first(self):
+        rows = self._scan(
+            [self._pr(9), self._pr(10)],
+            {9: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z"),
+                 _review("other", "CHANGES_REQUESTED", "2026-01-01T00:00:00Z")],
+             10: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z")]},
+            {9: [_commit("2026-01-02T00:00:00Z")],
+             10: [_commit("2026-01-02T00:00:00Z")]})
+        self.assertEqual([r["number"] for r in rows], [10, 9])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
