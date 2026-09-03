@@ -18,6 +18,11 @@ from pathlib import Path
 SRC = (Path(__file__).resolve().parent.parent / "src" / "discord-bridge.py").read_text()
 
 
+ANCHOR = ("then write exactly `[no-send]` to results/task-{id}.txt "
+          "so the task archives")
+REVERTED = "and do NOT write results/task-{id}.txt"
+
+
 def block_2(text: str) -> str:
     start = text.index("2. PR-REVIEW REQUEST")
     end = text.index("2b. MESSAGE OWNER", start)
@@ -43,11 +48,22 @@ class Block2FailureArchives(unittest.TestCase):
         self.assertNotIn("NOT write results/task-{id}", SRC)
         self.assertNotIn("Do NOT write to results/task-{id}", SRC)
 
-    def test_positive_control_the_old_wording_would_fail(self):
-        old = SRC.replace(
-            "then write exactly `[no-send]` to results/task-{id}.txt so the task archives",
-            "and do NOT write results/task-{id}.txt")
+    def test_the_replacement_ANCHOR_still_exists(self):
+        """A fixture guard, NOT a detector control. If the anchor drifts out of
+        SRC, `replace` no-ops and the revert test below silently checks the
+        unmutated file while still passing."""
+        self.assertIn(ANCHOR, SRC)
+
+    def test_BOTH_detectors_flip_on_the_reverted_wording(self):
+        """The real control: the pre-fix text must fail THIS suite's own
+        predicates. The block-scoped one is easy — the revert inserts the very
+        string it looks for. The file-scoped detector uses different wording and
+        a different haystack, so it needs its own arm or nothing shows it is
+        sensitive at all."""
+        old = SRC.replace(ANCHOR, REVERTED)
+        self.assertNotEqual(old, SRC, "anchor drifted: nothing was mutated")
         self.assertIn("do NOT write results/task-{id}.txt", block_2(old))
+        self.assertIn("NOT write results/task-{id}", old)
 
 
 if __name__ == "__main__":
