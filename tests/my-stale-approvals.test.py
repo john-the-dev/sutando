@@ -156,6 +156,17 @@ class StaleApprovals(unittest.TestCase):
         self.assertEqual(rows[0]["commits_after"], 1,
                          "only the strictly-later commit is after the approval")
 
+    def test_NOT_decisive_when_the_bar_is_out_of_reach(self):
+        """`decisive` means my vote is what closes the gap, so an unblocked PR is
+        not automatically decisive. At bar=3 with only my approval nobody is one
+        vote away, and dropping mine changes nothing."""
+        rows = self._scan([self._pr(21)],
+                          {21: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z")]},
+                          {21: [_commit("2026-01-05T00:00:00Z")]}, bar=3)
+        self.assertEqual(rows[0]["qualifying_approvals"], 1)
+        self.assertFalse(rows[0]["decisive"],
+                         "no other blockers is not sufficient; the bar must be reachable")
+
     def test_decisive_sorts_first(self):
         rows = self._scan(
             [self._pr(9), self._pr(10)],
