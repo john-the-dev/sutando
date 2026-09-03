@@ -103,16 +103,26 @@ def case_detached_publish_is_behind_the_liveness_gate() -> list[str]:
     marker with a runtime that never came up."""
     src = SCRIPT.read_text(encoding="utf-8")
     fails: list[str] = []
+    # The heal path says "did not come up within" too and sits EARLIER, so a
+    # global first-match pairs each branch with the wrong gate.
     try:
-        gate = src.index("did not come up within")
-        detached = src.index("new-session -d")
-        pub = src.index("stamp_runtime_claude", gate)
+        region = src.index('if [ -t 1 ]; then\n  ensure_core_monitor')
     except ValueError as exc:
-        return [f"could not locate the detached launch/gate/publish trio: {exc}"]
-    if not (detached < gate < pub):
-        fails.append(
-            "the detached path must publish AFTER its liveness gate "
-            f"(launch={detached}, gate={gate}, publish={pub})")
+        return [f"could not locate the tmux launch block: {exc}"]
+    launches = [i for i in range(region, len(src))
+                if src.startswith("new-session -d", i)]
+    if len(launches) != 2:
+        return [f"expected 2 detached launches (tty + non-tty), found {len(launches)}"]
+    for n, start in enumerate(launches, 1):
+        end = launches[n] if n < len(launches) else len(src)
+        block = src[start:end]
+        gate = block.find("did not come up within")
+        pub = block.find("stamp_runtime_claude")
+        if gate < 0 or pub < 0:
+            fails.append(f"branch {n}: missing gate ({gate}) or publish ({pub})")
+        elif gate > pub:
+            fails.append(f"branch {n} publishes BEFORE its liveness gate "
+                         f"(gate={gate}, publish={pub})")
     return fails
 
 
@@ -121,7 +131,14 @@ def case_exec_paths_publish_adjacent_to_exec() -> list[str]:
     Pinned so pre-exec publication cannot spread to a path that CAN verify."""
     src = SCRIPT.read_text(encoding="utf-8")
     fails: list[str] = []
-    for anchor in ("exec claude --name", 'exec tmux -S "$TMUX_SOCKET" new-session -A'):
+    # `new-session -A` published blind; its ABSENCE is the property now.
+    # Code lines only: a comment naming `new-session -A` is not a launch.
+    revived = [ln for ln in src.splitlines()
+               if "new-session -A" in ln and not ln.lstrip().startswith("#")]
+    if revived:
+        fails.append("an unverifiable `new-session -A` exec launch is back; it "
+                     f"publishes before anything can confirm the core came up: {revived[0].strip()!r}")
+    for anchor in ("exec claude --name",):
         i = src.find(anchor)
         if i < 0:
             fails.append(f"launch anchor vanished: {anchor!r}")
