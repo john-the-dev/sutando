@@ -63,6 +63,10 @@ class StaleApprovals(unittest.TestCase):
         self.mod = _load()
 
     def _scan(self, prs, reviews, commits, bar=2):
+        rows, _reach = self._scan2(prs, reviews, commits, bar)
+        return rows
+
+    def _scan2(self, prs, reviews, commits, bar=2):
         with patch.object(self.mod, "gh_json", Fake(prs, reviews, commits)):
             return self.mod.scan("o/r", ME, bar)
 
@@ -147,6 +151,51 @@ class StaleApprovals(unittest.TestCase):
             {9: [_commit("2026-01-02T00:00:00Z")],
              10: [_commit("2026-01-02T00:00:00Z")]})
         self.assertEqual([r["number"] for r in rows], [10, 9])
+
+
+class Scope(unittest.TestCase):
+    """The second axis: a single-repo scan reported as a total.
+
+    Filtering within a repo and scoping across repos are different defects.
+    Fixing the first and calling the scope fixed is what this class pins.
+    """
+
+    def setUp(self):
+        self.mod = _load()
+
+    def test_repos_reviewed_finds_every_repo_not_just_the_main_one(self):
+        search = {"items": [
+            {"repository_url": "https://api.github.com/repos/o/main-repo"},
+            {"repository_url": "https://api.github.com/repos/o/main-repo"},
+            {"repository_url": "https://api.github.com/repos/other/elsewhere"},
+        ]}
+        with patch.object(self.mod, "gh_json", lambda *a, **k: search):
+            self.assertEqual(self.mod.repos_reviewed(ME), ["o/main-repo", "other/elsewhere"])
+
+    def test_repos_reviewed_is_empty_when_the_search_returns_nothing(self):
+        with patch.object(self.mod, "gh_json", lambda *a, **k: {"items": []}):
+            self.assertEqual(self.mod.repos_reviewed(ME), [])
+
+    def test_reach_counts_PRs_carrying_my_review_so_a_zero_is_testable(self):
+        """A 0 from a repo holding none of your approvals is untestable, not a
+        measurement — positive controls inside a reachable set never test reach."""
+        s2 = StaleApprovals("test_my_own_PR_is_skipped")
+        s2.mod = self.mod
+        rows, reach = s2._scan2(
+            [s2._pr(1)],
+            {1: [_review(ME, "APPROVED", "2026-01-03T00:00:00Z")]},
+            {1: [_commit("2026-01-02T00:00:00Z")]})
+        self.assertEqual(rows, [], "approval is at head, so not stale")
+        self.assertEqual(reach, 1, "but the scan DID see my review here")
+
+    def test_reach_is_zero_when_no_PR_carries_my_review(self):
+        s2 = StaleApprovals("test_my_own_PR_is_skipped")
+        s2.mod = self.mod
+        rows, reach = s2._scan2(
+            [s2._pr(1)],
+            {1: [_review("someone-else", "APPROVED", "2026-01-01T00:00:00Z")]},
+            {1: [_commit("2026-01-02T00:00:00Z")]})
+        self.assertEqual((rows, reach), ([], 0))
 
 
 if __name__ == "__main__":

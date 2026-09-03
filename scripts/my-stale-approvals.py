@@ -54,6 +54,22 @@ def current_login() -> str | None:
     return (d or {}).get("login")
 
 
+def repos_reviewed(login: str):
+    """Every repo holding an open PR this login reviewed, newest first.
+
+    A single-repo scan reported as an exposure is the defect this exists to
+    close: measured, one login had 60 of 98 reviewed PRs in its main repo.
+    """
+    q = f"is:pr is:open reviewed-by:{login}"
+    data = gh_json("api", f"search/issues?q={q.replace(' ', '+')}&per_page=100", default={}) or {}
+    seen = []
+    for item in data.get("items", []):
+        repo = item.get("repository_url", "").split("/repos/", 1)[-1]
+        if repo and repo not in seen:
+            seen.append(repo)
+    return seen
+
+
 def newest_authored(repo: str, number: int) -> str:
     """Newest commit someone actually wrote. Merge commits have 2+ parents and
     move the head without any review-worthy change, so they must not count."""
@@ -73,14 +89,19 @@ def latest_per_author(reviews):
 def scan(repo: str, login: str, bar: int):
     prs = gh_json("pr", "list", "--repo", repo, "--state", "open", "--limit", "200",
                   "--json", "number,title,author,isDraft,baseRefName", default=[]) or []
-    rows = []
+    rows, reach = [], 0
     for p in prs:
         if p["isDraft"] or p["author"]["login"] == login:
             continue
         reviews = gh_json("api", f"repos/{repo}/pulls/{p['number']}/reviews", "--paginate", default=[]) or []
         latest = latest_per_author(reviews)
         mine = latest.get(login)
-        if not mine or mine["state"] != "APPROVED":
+        if not mine:
+            continue
+        # Reach: a 0 from a repo holding none of your approvals is untestable,
+        # not a measurement. reviewed-by: counts COMMENTED; this does not.
+        reach += 1
+        if mine["state"] != "APPROVED":
             continue
         cutoff = newest_authored(repo, p["number"])
         if not cutoff or mine["submitted_at"] > cutoff:
@@ -101,12 +122,13 @@ def scan(repo: str, login: str, bar: int):
             "decisive": not blockers and qualifying >= bar - 1,
         })
     rows.sort(key=lambda r: (not r["decisive"], -r["commits_after"]))
-    return rows
+    return rows, reach
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--repo", default="sonichi/sutando")
+    ap.add_argument("--repo", default=None,
+                    help="one repo; default scans EVERY repo you have reviewed an open PR in")
     ap.add_argument("--login", default=None, help="defaults to the authenticated gh user")
     ap.add_argument("--bar", type=int, default=2, help="required approving reviews")
     ap.add_argument("--decisive-only", action="store_true")
@@ -121,24 +143,45 @@ def main() -> int:
               "pass --login", file=sys.stderr)
         return 2
 
-    rows = scan(a.repo, login, a.bar)
-    if a.decisive_only:
-        rows = [r for r in rows if r["decisive"]]
-    if a.json:
-        print(json.dumps({"repo": a.repo, "login": login, "bar": a.bar, "rows": rows}, indent=2))
-    else:
-        decisive = sum(1 for r in rows if r["decisive"])
-        print(f"{login} on {a.repo}: {len(rows)} stale approval(s), {decisive} decisive (bar={a.bar})")
+    repos = [a.repo] if a.repo else repos_reviewed(login)
+    if not repos:
+        print(f"my-stale-approvals: found no repo with an open PR reviewed by {login}",
+              file=sys.stderr)
+        return 0
+
+    all_rows, scanned = [], []
+    for repo in repos:
+        rows, reach = scan(repo, login, a.bar)
         for r in rows:
-            mark = "DECISIVE" if r["decisive"] else "blocked "
-            why = f"blocked by {','.join(r['blocked_by_others'])}" if r["blocked_by_others"] \
-                else f"{r['qualifying_approvals']}/{a.bar} qualifying"
-            print(f"  {mark} #{r['number']:<5} {r['author']:<15} "
-                  f"{r['commits_after']} commit(s) after your {r['approved_at'][:10]}  "
-                  f"[{why}] base={r['base'][:12]}  {r['title'][:44]}")
-        if not rows:
-            print("  none — every approval of yours is at its PR's newest authored commit")
-    if a.fail_on_decisive and any(r["decisive"] for r in rows):
+            r["repo"] = repo
+        all_rows.extend(rows)
+        scanned.append((repo, len(rows), reach))
+    all_rows.sort(key=lambda r: (not r["decisive"], -r["commits_after"]))
+    shown = [r for r in all_rows if r["decisive"]] if a.decisive_only else all_rows
+
+    if a.json:
+        print(json.dumps({"login": login, "bar": a.bar,
+                          "scanned": [{"repo": r, "stale": n, "reach": k} for r, n, k in scanned],
+                          "rows": shown}, indent=2))
+        return 1 if a.fail_on_decisive and any(r["decisive"] for r in all_rows) else 0
+
+    decisive = sum(1 for r in all_rows if r["decisive"])
+    print(f"{login}: {len(all_rows)} stale approval(s), {decisive} decisive "
+          f"(bar={a.bar}) across {len(repos)} repo(s)")
+    for r in shown:
+        mark = "DECISIVE" if r["decisive"] else "blocked "
+        why = (f"blocked by {','.join(r['blocked_by_others'])}" if r["blocked_by_others"]
+               else f"{r['qualifying_approvals']}/{a.bar} qualifying")
+        print(f"  {mark} {r['repo']}#{r['number']:<5} {r['author']:<15} "
+              f"{r['commits_after']} commit(s) after your {r['approved_at'][:10]}  "
+              f"[{why}] base={r['base'][:12]}  {r['title'][:40]}")
+    # Scope is part of the answer: a repo holding none of your reviews cannot
+    # produce a meaningful zero, so say which zeros were testable.
+    print("  scope:")
+    for repo, n, reach in scanned:
+        note = "" if reach else "  (no approvals of yours here — this 0 is untestable)"
+        print(f"    {repo}: {n} stale, {reach} PR(s) carrying your review{note}")
+    if a.fail_on_decisive and decisive:
         return 1
     return 0
 
