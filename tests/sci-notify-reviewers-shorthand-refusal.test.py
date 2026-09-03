@@ -91,6 +91,19 @@ class Shorthand(unittest.TestCase):
     def test_shorthand_for_a_pr_already_named_by_url_is_not_flagged(self):
         self.assertEqual(self.mod.unrecordable_pr_refs(f"{URL} — i.e. #4242"), [])
 
+    def test_a_url_to_ANOTHER_repo_does_not_cover_a_colliding_number(self):
+        # Low PR numbers collide across repos constantly, so keying on the number
+        # alone let this guard's own failure mode arrive through the guard.
+        out = self.mod.unrecordable_pr_refs(
+            "https://github.com/ag2-space/backend/pull/12 and sonichi/sutando#12")
+        self.assertEqual([t for t, _ in out], ["sonichi/sutando#12"])
+        self.assertEqual(out[0][1], "https://github.com/sonichi/sutando/pull/12")
+
+    def test_CONTROL_a_url_and_the_SAME_repo_shorthand_is_still_allowed(self):
+        msg = "https://github.com/sonichi/sutando/pull/12 and sonichi/sutando#12"
+        self.assertEqual(self.mod.unrecordable_pr_refs(msg), [],
+                         "keying on the pair must not start refusing the same-repo case")
+
     def test_a_single_digit_hash_is_prose_not_a_pr(self):
         self.assertEqual(self.mod.unrecordable_pr_refs("point #1 is wrong"), [])
 

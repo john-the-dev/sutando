@@ -236,8 +236,8 @@ def command_for(target: dict, message: str) -> "list[str]":
 
 _PR_URL = re.compile("github[.]com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/pull/([0-9]+)")
 
-# `owner/repo#12` and a bare `#12`. Two digits minimum: `#1` is far more often
-# prose than a PR, and a guard that cries wolf gets routed around.
+# `owner/repo#12` and a bare `#12`. Two digits minimum is a DELIBERATE trade, not
+# an oversight: `#7` is a real PR and passes silently, but `#1` is usually prose.
 _PR_SHORTHAND = re.compile(
     r"(?:(?P<repo>[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#|(?<![\w/#])#)(?P<num>[0-9]{2,})")
 
@@ -248,13 +248,16 @@ def unrecordable_pr_refs(message: str) -> list:
     Absence is never reported — an ask need not concern a PR. Only shorthand is,
     because that is the case that reads as a PR reference and records nothing.
     """
-    recorded = {num for _, num in _PR_URL.findall(message)}
+    pairs = set(_PR_URL.findall(message))
+    nums = {num for _, num in pairs}
     out = []
     for m in _PR_SHORTHAND.finditer(message):
-        if m.group("num") in recorded:
+        repo, num = m.group("repo"), m.group("num")
+        # Pair-keyed when the repo is known: a URL to one repo must not suppress
+        # another repo's same-numbered shorthand. Bare `#n` can only match a number.
+        if (repo, num) in pairs if repo is not None else num in nums:
             continue
-        repo = m.group("repo") or "<owner>/<repo>"
-        out.append((m.group(0), f"https://github.com/{repo}/pull/{m.group('num')}"))
+        out.append((m.group(0), f"https://github.com/{repo or '<owner>/<repo>'}/pull/{num}"))
     return out
 
 def ledger_path() -> Path:
