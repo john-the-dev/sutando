@@ -61,6 +61,21 @@ with tempfile.TemporaryDirectory() as d:
     check("a base change to an UNRELATED file does not fire", untouched == [], f"got {untouched}")
     check("no files -> no claim", acb.base_touched_since(d, "main", T_EARLY, []) == [])
 
+# The fetch is the one call that fails toward "covered": a stale base has no
+# commits since any approval, so every row reads as covering.
+with tempfile.TemporaryDirectory() as d:
+    git(d, "init", "-q", "-b", "main")
+    ok = acb.refresh_base(d, "origin", "main")
+    check("a fetch against a MISSING remote returns False (fails closed)", ok is False,
+          f"got {ok!r} — a failed refresh must not read as a successful one")
+
+src_main = (ROOT / "scripts" / "approval-covers-base.py").read_text()
+check("main REFUSES on a failed refresh rather than comparing a stale base",
+      "REFUSING: could not refresh" in src_main and "return 3" in src_main)
+check("the refusal is reachable — main calls refresh_base",
+      "refresh_base(a.repo_dir" in src_main)
+check("check=False is gone from the fetch path", "check=False" not in src_main)
+
 # Non-OPEN returns early ON PURPOSE: once merged, the PR's own merge commit is
 # on the base and would match every approval, masking the covering one.
 src = (ROOT / "scripts" / "approval-covers-base.py").read_text()

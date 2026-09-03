@@ -23,6 +23,17 @@ def gh(args: list[str]) -> object:
     return json.loads(r.stdout) if r.stdout.strip() else None
 
 
+def refresh_base(repo_dir: str, remote: str, branch: str) -> bool:
+    """True when `remote/branch` is now up to date.
+
+    Fails CLOSED: the API calls here already raise on failure, and a fetch that
+    fails silently is the one error that makes the gate answer "covered".
+    """
+    r = subprocess.run(["git", "-C", repo_dir, "fetch", remote, branch, "-q"],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
 def base_touched_since(repo_dir: str, base_ref: str, since: str,
                        files: list[str]) -> list[str]:
     """Files in `files` that `base_ref` changed after `since`.
@@ -47,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--repo", required=True)
     ap.add_argument("--repo-dir", default=".")
     ap.add_argument("--remote", default="origin")
+    ap.add_argument("--no-fetch", action="store_true",
+                    help="skip the base refresh; you are asserting it is current")
     a = ap.parse_args(argv)
 
     pr = gh(["pr", "view", str(a.pr), "--repo", a.repo, "--json",
@@ -56,8 +69,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     files = [f["path"] for f in pr["files"]]
     base = f"{a.remote}/{pr['baseRefName']}"
-    subprocess.run(["git", "-C", a.repo_dir, "fetch", a.remote,
-                    pr["baseRefName"], "-q"], check=False)
+    if not a.no_fetch and not refresh_base(a.repo_dir, a.remote, pr["baseRefName"]):
+        print(f"REFUSING: could not refresh {base}. A stale base has no commits since "
+              f"any approval, so every approval would read as covering — the answer "
+              f"this gate exists to distrust. Fetch and retry, or pass --no-fetch if "
+              f"you have already refreshed it.", file=sys.stderr)
+        return 3
 
     reviews = gh(["api", f"repos/{a.repo}/pulls/{a.pr}/reviews", "--paginate"])
     latest: dict = {}
