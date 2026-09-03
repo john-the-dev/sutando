@@ -18,6 +18,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -243,10 +244,11 @@ class MultiRepoDefault(unittest.TestCase):
                 # and not the question asked; the query is on the far side.
                 assert "reviewed-by" in joined, \
                     f"discovery query lost its reviewed-by filter: {joined}"
-                # The FULL token, not the bare login: ME is short enough to
-                # appear inside unrelated words, which passes for a wrong reason.
-                assert f"reviewed-by:{login_in_query}" in joined, \
-                    f"discovery query does not name the login: {joined}"
+                # Parse the value and compare EXACTLY. Any substring form lets a
+                # longer login pass on a prefix: "reviewed-by:me" is inside "merge-bot".
+                got = re.search(r"reviewed-by:([A-Za-z0-9._-]+)", joined)
+                assert got and got.group(1) == login_in_query, \
+                    f"discovery query names {got and got.group(1)!r}, not the login: {joined}"
                 return search
             if args[0] == "api" and joined.endswith("user"):
                 return {"login": ME}
