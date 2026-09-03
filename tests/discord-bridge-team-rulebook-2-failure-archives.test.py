@@ -54,16 +54,30 @@ class Block2FailureArchives(unittest.TestCase):
         unmutated file while still passing."""
         self.assertIn(ANCHOR, SRC)
 
-    def test_BOTH_detectors_flip_on_the_reverted_wording(self):
-        """The real control: the pre-fix text must fail THIS suite's own
-        predicates. The block-scoped one is easy — the revert inserts the very
-        string it looks for. The file-scoped detector uses different wording and
-        a different haystack, so it needs its own arm or nothing shows it is
-        sensitive at all."""
+    def test_the_BLOCK_scoped_detector_flips_on_an_in_block_revert(self):
+        """Exercises the block-scoped predicate only, and says so.
+
+        An in-block revert CANNOT exercise the file-scoped detector: its needle
+        is a SUBSTRING of this one over a SUPERSET haystack, so asserting it
+        here passes by implication whenever this line passes, and never runs
+        when this line fails. That inert assertion lived here until
+        @yixuan-ag2 proved it in review; the arm that does the job is below.
+        """
         old = SRC.replace(ANCHOR, REVERTED)
         self.assertNotEqual(old, SRC, "anchor drifted: nothing was mutated")
         self.assertIn("do NOT write results/task-{id}.txt", block_2(old))
-        self.assertIn("NOT write results/task-{id}", old)
+
+    def test_the_FILE_scoped_detector_flips_on_a_revert_OUTSIDE_block_2(self):
+        """The missing arm: put the old wording where `block_2()` cannot see it.
+
+        `test_NEITHER_branch...` exists to catch a THIRD branch added later
+        carrying the forbidding wording. Only a revert outside block 2 leaves
+        the block-scoped predicate blind while the file-scoped one fires, so
+        only this shows the file detector is sensitive at all.
+        """
+        outside = SRC + "\n# 2c. A LATER BRANCH: do NOT write results/task-{id}.txt\n"
+        self.assertNotIn("NOT write results/task-{id}", block_2(outside))
+        self.assertIn("NOT write results/task-{id}", outside)
 
 
 if __name__ == "__main__":
