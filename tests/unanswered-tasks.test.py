@@ -300,5 +300,54 @@ with tempfile.TemporaryDirectory() as d:
     check(uat.unanswered(same_room_case(d, same_sender=True), 120) == [],
           "quiet on same-room same-sender — the legitimate dedup")
 
+# Error and edge paths. The refusal is asserted above too, but via subprocess,
+# where no tracer follows — so these drive the same branches in-process.
+
+with tempfile.TemporaryDirectory() as d:
+    root = Path(d); (root / "tasks").mkdir()
+    (root / "tasks" / "task-live.txt").write_text("id: live\n")
+    check(uat._task_exists(root / "tasks", "task-live") is True,
+          "_task_exists: True while the task is still LIVE in tasks/ (not yet archived)")
+    check(uat._task_exists(root / "tasks", "task-never") is False,
+          "_task_exists: False for an id that never existed here")
+
+with tempfile.TemporaryDirectory() as d:
+    check(uat._read(Path(d)) is None, "_read: a directory (OSError) reads as None rather than raising")
+    check(uat._read(None) is None, "_read: a None path stays None")
+
+with tempfile.TemporaryDirectory() as d:
+    root = Path(d); (root / "results").mkdir()
+    (root / "results" / "task-x.txt").write_text("[deduped: ]\n")
+    check(uat._unanswered_reason(root / "results", "task-x") == "deduped into nothing (no target id)",
+          "a dedup naming NO target is unanswered — the marker parsed, the reply went nowhere")
+
+# `sys.modules[name] = None` is what makes `from name import x` raise ImportError,
+# so the refusal runs in-process instead of in a child the tracer cannot see.
+import contextlib
+import io
+_saved_markers, _had_mod = uat._MARKERS, "result_markers" in sys.modules
+_saved_mod = sys.modules.get("result_markers")
+uat._MARKERS = None
+sys.modules["result_markers"] = None
+_err = io.StringIO()
+try:
+    with contextlib.redirect_stderr(_err):
+        uat._markers()
+    check(False, "_markers refuses when src/result_markers.py is unimportable")
+except SystemExit as exc:
+    check(exc.code == 2, "_markers exits 2 when src/result_markers.py is unimportable")
+    check("result_markers" in _err.getvalue() and "re-implement" in _err.getvalue(),
+          "the refusal names the missing module and says it will not re-implement the grammar")
+finally:
+    if _had_mod:
+        sys.modules["result_markers"] = _saved_mod
+    else:
+        sys.modules.pop("result_markers", None)
+    uat._MARKERS = _saved_markers
+
+check(uat._markers() is not None,
+      "CONTROL: _markers still works afterwards — the refusal test restored global state")
+
+
 print(f"\nunanswered-tasks: {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
