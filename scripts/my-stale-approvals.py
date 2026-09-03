@@ -16,10 +16,13 @@ Two measurements this makes on your behalf, because both were got wrong by hand:
    A base merge moves the head without anyone writing code, so comparing against
    the head alone marks approvals stale that are not.
 
-DECISIVE means your vote can carry the PR now: open, not draft, nobody else
-holding CHANGES_REQUESTED, and qualifying approvals already at or one short of
-the bar. Those are the ones to re-review first; the rest are blocked by someone
-else regardless of what you do.
+DECISIVE means your unread approval is part of a merge that can happen soon:
+open, not draft, nobody else holding CHANGES_REQUESTED, and the tally already at
+or one short of the bar. It does NOT mean re-reviewing carries the PR by itself —
+at exactly one short, your vote already counts and someone else's is the missing
+one. Both cells are worth re-reading first, for the same reason: a merge lands on
+your stale tick either now or on the next approval. The rest are blocked by
+someone else regardless.
 
 Only COLLABORATOR/MEMBER/OWNER approvals count at the gate, so only those are
 counted toward the bar.

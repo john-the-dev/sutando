@@ -171,15 +171,28 @@ class StaleApprovals(unittest.TestCase):
                          "a vote that does not count at the gate cannot be the decisive one")
 
     def test_NOT_decisive_when_the_bar_is_out_of_reach(self):
-        """`decisive` means my vote is what closes the gap, so an unblocked PR is
-        not automatically decisive. At bar=3 with only my approval nobody is one
-        vote away, and dropping mine changes nothing."""
+        """An unblocked PR is not automatically decisive: the tally must be at or
+        one short of the bar. At bar=3 with one approval it is two short, so no
+        merge is near and the stale tick is not urgent."""
         rows = self._scan([self._pr(21)],
                           {21: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z")]},
                           {21: [_commit("2026-01-05T00:00:00Z")]}, bar=3)
         self.assertEqual(rows[0]["qualifying_approvals"], 1)
         self.assertFalse(rows[0]["decisive"],
                          "no other blockers is not sufficient; the bar must be reachable")
+
+    def test_decisive_AT_one_short_of_the_bar_even_though_my_vote_cannot_carry_it(self):
+        """The cell where the two readings of `decisive` disagree, pinned to the
+        one this tool means. At bar=2 with mine the only qualifying approval, my
+        re-review cannot land the PR — someone else's approval is the missing one.
+        It is still decisive here, because `dismiss_stale_reviews_on_push` is false
+        on this repo, so my stale tick is already half of whatever merges it.
+        Raised by @yixuan-ag2, who read the field name against the code."""
+        rows = self._scan([self._pr(23)],
+                          {23: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z")]},
+                          {23: [_commit("2026-01-02T00:00:00Z")]}, bar=2)
+        self.assertEqual(rows[0]["qualifying_approvals"], 1)  # exactly bar - 1
+        self.assertTrue(rows[0]["decisive"])
 
     def test_decisive_sorts_first(self):
         rows = self._scan(
