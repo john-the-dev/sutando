@@ -17,6 +17,7 @@ Run: python3 tests/my-stale-approvals.test.py   (stdlib only, no network)
 import contextlib
 import importlib.util
 import io
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -279,6 +280,84 @@ class MultiRepoDefault(unittest.TestCase):
         scope = out.split("scope:", 1)[1]
         self.assertIn("o/alpha", scope)
         self.assertIn("o/beta", scope)
+
+
+class Plumbing(unittest.TestCase):
+    """The gh wrapper and main()'s exits. Every one of these is a path a real
+    run takes on a bad day, and all were unreached: the suite patches gh_json,
+    so the thing that actually shells out was never itself exercised."""
+
+    def setUp(self):
+        self.mod = _load()
+
+    class _Proc:
+        def __init__(self, rc, out):
+            self.returncode, self.stdout = rc, out
+
+    def test_gh_json_parses_a_successful_call(self):
+        with patch.object(self.mod.subprocess, "run",
+                          lambda *a, **k: self._Proc(0, '{"x": 1}')):
+            self.assertEqual(self.mod.gh_json("api", "x"), {"x": 1})
+
+    def test_gh_json_returns_the_default_on_a_nonzero_exit(self):
+        with patch.object(self.mod.subprocess, "run",
+                          lambda *a, **k: self._Proc(1, "")):
+            self.assertEqual(self.mod.gh_json("api", "x", default="D"), "D")
+
+    def test_gh_json_returns_the_default_on_UNPARSEABLE_output(self):
+        """rc 0 with garbage is the shape that would otherwise raise mid-scan."""
+        with patch.object(self.mod.subprocess, "run",
+                          lambda *a, **k: self._Proc(0, "not json")):
+            self.assertEqual(self.mod.gh_json("api", "x", default=[]), [])
+
+    def test_current_login_reads_the_authenticated_user(self):
+        with patch.object(self.mod, "gh_json", lambda *a, **k: {"login": "somebody"}):
+            self.assertEqual(self.mod.current_login(), "somebody")
+
+    def test_current_login_is_None_when_gh_cannot_answer(self):
+        with patch.object(self.mod, "gh_json", lambda *a, **k: None):
+            self.assertIsNone(self.mod.current_login())
+
+    def _main(self, argv, gh):
+        err, out = io.StringIO(), io.StringIO()
+        with patch.object(self.mod, "gh_json", gh), \
+             patch.object(self.mod.sys, "argv", ["my-stale-approvals.py"] + argv), \
+             contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            return self.mod.main(), out.getvalue(), err.getvalue()
+
+    def test_an_unresolvable_login_exits_2_and_says_how_to_fix_it(self):
+        rc, _out, err = self._main([], lambda *a, **k: None)
+        self.assertEqual(rc, 2)
+        self.assertIn("--login", err, "the refusal must name the flag that satisfies it")
+
+    def test_no_discovered_repo_exits_0_and_says_so(self):
+        rc, _out, err = self._main(["--login", ME], lambda *a, **k: {"items": []})
+        self.assertEqual(rc, 0, "finding nothing to scan is not an error")
+        self.assertIn("no repo", err)
+
+    def test_json_output_carries_the_scope_so_it_is_not_lost_to_machines(self):
+        rc, out, _err = self._main(["--login", ME, "--repo", "o/r", "--json"],
+                                   lambda *a, **k: [] if a[0] == "pr" else {})
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["login"], ME)
+        self.assertEqual([s["repo"] for s in payload["scanned"]], ["o/r"])
+
+    def test_fail_on_decisive_exits_1_when_a_decisive_row_exists(self):
+        def gh(*args, default=None):
+            joined = " ".join(str(x) for x in args)
+            if args[0] == "pr" and args[1] == "list":
+                return [{"number": 7, "title": "t", "author": {"login": "peer"},
+                         "isDraft": False, "baseRefName": "main"}]
+            if "/reviews" in joined:
+                return [_review(ME, "APPROVED", "2026-01-01T00:00:00Z")]
+            if "/commits" in joined:
+                return [_commit("2026-01-02T00:00:00Z")]
+            return default
+        rc, _out, _err = self._main(["--login", ME, "--repo", "o/r", "--fail-on-decisive"], gh)
+        self.assertEqual(rc, 1, "opt-in gate must fail the build when it is armed")
+        rc2, _o, _e = self._main(["--login", ME, "--repo", "o/r"], gh)
+        self.assertEqual(rc2, 0, "CONTROL: without the flag it stays a report")
 
 
 if __name__ == "__main__":
