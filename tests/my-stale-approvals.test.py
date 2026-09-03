@@ -243,7 +243,9 @@ class MultiRepoDefault(unittest.TestCase):
                 # and not the question asked; the query is on the far side.
                 assert "reviewed-by" in joined, \
                     f"discovery query lost its reviewed-by filter: {joined}"
-                assert login_in_query in joined, \
+                # The FULL token, not the bare login: ME is short enough to
+                # appear inside unrelated words, which passes for a wrong reason.
+                assert f"reviewed-by:{login_in_query}" in joined, \
                     f"discovery query does not name the login: {joined}"
                 return search
             if args[0] == "api" and joined.endswith("user"):
