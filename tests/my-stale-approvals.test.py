@@ -156,6 +156,20 @@ class StaleApprovals(unittest.TestCase):
         self.assertEqual(rows[0]["commits_after"], 1,
                          "only the strictly-later commit is after the approval")
 
+    def test_NOT_decisive_at_the_PRODUCTION_bar_when_my_own_approval_does_not_count(self):
+        """The bar clause has to discriminate at bar=2, the bar this fleet uses.
+        It does, in exactly one place: `qualifying` counts my own review, so it is
+        >= 1 whenever my association gates — and 0 when it does not, which is the
+        only case where `not blockers` and the real predicate disagree here."""
+        rows = self._scan([self._pr(22)],
+                          {22: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z",
+                                        assoc="CONTRIBUTOR")]},
+                          {22: [_commit("2026-01-02T00:00:00Z")]})
+        self.assertEqual(rows[0]["qualifying_approvals"], 0)
+        self.assertEqual(rows[0]["blocked_by_others"], [])
+        self.assertFalse(rows[0]["decisive"],
+                         "a vote that does not count at the gate cannot be the decisive one")
+
     def test_NOT_decisive_when_the_bar_is_out_of_reach(self):
         """`decisive` means my vote is what closes the gap, so an unblocked PR is
         not automatically decisive. At bar=3 with only my approval nobody is one
