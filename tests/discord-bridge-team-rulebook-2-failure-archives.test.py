@@ -74,10 +74,20 @@ class Block2FailureArchives(unittest.TestCase):
         carrying the forbidding wording. Only a revert outside block 2 leaves
         the block-scoped predicate blind while the file-scoped one fires, so
         only this shows the file detector is sensitive at all.
+
+        It asserts TWO independent needles absent, and each needs its own arm:
+        neither is a substring of the other, so an arm for one says nothing
+        about the other. The second ("Do NOT write to ...") is the pre-#3775
+        block-2b wording — real text that could reappear in block 2 or a later
+        branch, which is exactly what that detector generalises over. Found
+        unguarded by @johnm-desktop after the first arm landed.
         """
-        outside = SRC + "\n# 2c. A LATER BRANCH: do NOT write results/task-{id}.txt\n"
-        self.assertNotIn("NOT write results/task-{id}", block_2(outside))
-        self.assertIn("NOT write results/task-{id}", outside)
+        for needle in ("NOT write results/task-{id}",
+                       "Do NOT write to results/task-{id}"):
+            with self.subTest(needle=needle):
+                outside = SRC + f"\n# 2c. A LATER BRANCH: {needle}.txt\n"
+                self.assertNotIn(needle, block_2(outside))
+                self.assertIn(needle, outside)
 
 
 if __name__ == "__main__":
