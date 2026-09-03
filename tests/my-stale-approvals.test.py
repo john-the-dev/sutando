@@ -14,7 +14,9 @@ fresh, decisive-when-uncontested AND not-decisive-when-someone-else-blocks.
 
 Run: python3 tests/my-stale-approvals.test.py   (stdlib only, no network)
 """
+import contextlib
 import importlib.util
+import io
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -142,6 +144,16 @@ class StaleApprovals(unittest.TestCase):
                           {8: [_commit("2026-01-02T00:00:00Z")]})
         self.assertEqual(rows[0]["qualifying_approvals"], 1, "the CONTRIBUTOR must not be counted")
 
+    def test_a_commit_AT_the_approval_timestamp_does_not_count_as_after(self):
+        """Pins the boundary so widening `>` to `>=` cannot pass silently. The
+        commit is not 'after' the review that covered it at the same instant."""
+        rows = self._scan([self._pr(11)],
+                          {11: [_review(ME, "APPROVED", "2026-01-02T00:00:00Z")]},
+                          {11: [_commit("2026-01-02T00:00:00Z"),
+                                _commit("2026-01-03T00:00:00Z")]})
+        self.assertEqual(rows[0]["commits_after"], 1,
+                         "only the strictly-later commit is after the approval")
+
     def test_decisive_sorts_first(self):
         rows = self._scan(
             [self._pr(9), self._pr(10)],
@@ -196,6 +208,77 @@ class Scope(unittest.TestCase):
             {1: [_review("someone-else", "APPROVED", "2026-01-01T00:00:00Z")]},
             {1: [_commit("2026-01-02T00:00:00Z")]})
         self.assertEqual((rows, reach), ([], 0))
+
+
+class MultiRepoDefault(unittest.TestCase):
+    """main() must ACTUALLY scan every discovered repo when --repo is omitted.
+
+    Mutation-found gap (yixuan-ag2, at fd96c7867): reverting discovery to a
+    single hardcoded repo left all 13 tests green, so the repo-agnostic
+    behaviour was a decision rather than an invariant — and it is the exact
+    defect the change exists to fix. Testing repos_reviewed() in isolation does
+    not pin that main() calls it.
+    """
+
+    def setUp(self):
+        self.mod = _load()
+
+    def _drive(self, argv):
+        """Two repos, one stale approval each, distinguishable by PR number."""
+        per_repo = {
+            "o/alpha": (101, "2026-01-01T00:00:00Z"),
+            "o/beta": (202, "2026-01-01T00:00:00Z"),
+        }
+        search = {"items": [
+            {"repository_url": "https://api.github.com/repos/o/alpha"},
+            {"repository_url": "https://api.github.com/repos/o/beta"},
+        ]}
+
+        def fake(*args, default=None):
+            joined = " ".join(str(a) for a in args)
+            if "search/issues" in joined:
+                return search
+            if args[0] == "api" and joined.endswith("user"):
+                return {"login": ME}
+            for repo, (num, _at) in per_repo.items():
+                if f"--repo {repo}" in joined or f"repos/{repo}/" in joined:
+                    if args[0] == "pr" and args[1] == "list":
+                        return [{"number": num, "title": f"t{num}",
+                                 "author": {"login": "peer"}, "isDraft": False,
+                                 "baseRefName": "main"}]
+                    if f"/pulls/{num}/reviews" in joined:
+                        return [_review(ME, "APPROVED", per_repo[repo][1])]
+                    if f"/pulls/{num}/commits" in joined:
+                        return [_commit("2026-01-02T00:00:00Z")]
+            return default
+
+        out = io.StringIO()
+        with patch.object(self.mod, "gh_json", fake), \
+             patch.object(self.mod.sys, "argv", ["my-stale-approvals.py"] + argv), \
+             contextlib.redirect_stdout(out):
+            rc = self.mod.main()
+        return rc, out.getvalue()
+
+    def test_omitting_repo_scans_EVERY_discovered_repo(self):
+        rc, out = self._drive(["--login", ME])
+        self.assertEqual(rc, 0)
+        self.assertIn("o/alpha#101", out)
+        self.assertIn("o/beta#202", out, "the second repo must be scanned, not just the first")
+        self.assertIn("2 stale approval(s)", out)
+        self.assertIn("across 2 repo(s)", out)
+
+    def test_CONTROL_an_explicit_repo_scans_only_that_one(self):
+        rc, out = self._drive(["--login", ME, "--repo", "o/alpha"])
+        self.assertEqual(rc, 0)
+        self.assertIn("o/alpha#101", out)
+        self.assertNotIn("o/beta", out, "--repo must stay a narrowing flag")
+        self.assertIn("across 1 repo(s)", out)
+
+    def test_the_scope_line_names_every_repo_scanned(self):
+        _rc, out = self._drive(["--login", ME])
+        scope = out.split("scope:", 1)[1]
+        self.assertIn("o/alpha", scope)
+        self.assertIn("o/beta", scope)
 
 
 if __name__ == "__main__":
