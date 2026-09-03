@@ -57,6 +57,9 @@ def current_login() -> str | None:
     return (d or {}).get("login")
 
 
+PR_LIST_LIMIT = 200
+
+
 def repos_reviewed(login: str):
     """Every repo holding an open PR this login reviewed, newest first.
 
@@ -64,13 +67,26 @@ def repos_reviewed(login: str):
     close: measured, one login had 60 of 98 reviewed PRs in its main repo.
     """
     q = f"is:pr is:open reviewed-by:{login}"
-    data = gh_json("api", f"search/issues?q={q.replace(' ', '+')}&per_page=100", default={}) or {}
-    seen = []
-    for item in data.get("items", []):
-        repo = item.get("repository_url", "").split("/repos/", 1)[-1]
-        if repo and repo not in seen:
-            seen.append(repo)
-    return seen
+    # --slurp is required with --paginate: gh otherwise emits one JSON object
+    # per page, json.loads rejects it, and a 2-page search reads as empty.
+    pages = gh_json("api", "--paginate", "--slurp",
+                    f"search/issues?q={q.replace(' ', '+')}&per_page=100", default=None)
+    if pages is None:
+        # A failed search and an empty one must not be the same value.
+        return [], {"total": None, "seen": 0, "ok": False}
+    if isinstance(pages, dict):
+        pages = [pages]
+    seen, items, total = [], 0, 0
+    for page in pages:
+        total = max(total, page.get("total_count", 0))
+        for item in page.get("items", []):
+            items += 1
+            repo = item.get("repository_url", "").split("/repos/", 1)[-1]
+            if repo and repo not in seen:
+                seen.append(repo)
+    # A repo appearing only in the unreached remainder is silently out of scope,
+    # which is the "single-repo scan reported as an exposure" defect above.
+    return seen, {"total": total, "seen": items, "ok": True}
 
 
 def newest_authored(repo: str, number: int) -> str:
@@ -82,15 +98,24 @@ def newest_authored(repo: str, number: int) -> str:
 
 
 def latest_per_author(reviews):
+    """GitHub counts only each author's latest review, and a DISMISSED one
+    counts as no stance — it does not resurrect that author's previous review.
+    Skipping DISMISSED instead of clearing resurrects it in both polarities:
+    a dismissed approval reads as authorising unread code, and a dismissed
+    CHANGES_REQUESTED reads as a block GitHub no longer holds."""
     out = {}
     for r in reviews:
-        if r.get("state") in ("APPROVED", "CHANGES_REQUESTED"):
+        state = r.get("state")
+        if state in ("APPROVED", "CHANGES_REQUESTED"):
             out[r["user"]["login"]] = r
+        elif state == "DISMISSED":
+            out.pop(r["user"]["login"], None)
     return out
 
 
 def scan(repo: str, login: str, bar: int):
-    prs = gh_json("pr", "list", "--repo", repo, "--state", "open", "--limit", "200",
+    prs = gh_json("pr", "list", "--repo", repo, "--state", "open",
+                  "--limit", str(PR_LIST_LIMIT),
                   "--json", "number,title,author,isDraft,baseRefName", default=[]) or []
     rows, reach = [], 0
     for p in prs:
@@ -113,6 +138,11 @@ def scan(repo: str, login: str, bar: int):
         after = [c for c in commits
                  if len(c.get("parents", [])) == 1
                  and c["commit"]["committer"]["date"] > mine["submitted_at"]]
+        # A conflict-resolving merge carries hand-typed hunks REST cannot show,
+        # so it is an unknown to report, not a no-op to drop.
+        merges = [c for c in commits
+                  if len(c.get("parents", [])) > 1
+                  and c["commit"]["committer"]["date"] > mine["submitted_at"]]
         blockers = [u for u, r in latest.items()
                     if r["state"] == "CHANGES_REQUESTED" and u != login]
         qualifying = sum(1 for r in latest.values()
@@ -121,11 +151,13 @@ def scan(repo: str, login: str, bar: int):
             "number": p["number"], "title": p["title"], "author": p["author"]["login"],
             "base": p["baseRefName"], "approved_at": mine["submitted_at"],
             "newest_authored": cutoff, "commits_after": len(after),
+            "merges_after": len(merges),
             "blocked_by_others": blockers, "qualifying_approvals": qualifying,
             "decisive": not blockers and qualifying >= bar - 1,
         })
     rows.sort(key=lambda r: (not r["decisive"], -r["commits_after"]))
-    return rows, reach
+    # At the cap the remainder is unseen, so a 0 from here is not a measurement.
+    return rows, reach, len(prs) >= PR_LIST_LIMIT
 
 
 def main() -> int:
@@ -146,7 +178,10 @@ def main() -> int:
               "pass --login", file=sys.stderr)
         return 2
 
-    repos = [a.repo] if a.repo else repos_reviewed(login)
+    if a.repo:
+        repos, coverage = [a.repo], None
+    else:
+        repos, coverage = repos_reviewed(login)
     if not repos:
         print(f"my-stale-approvals: found no repo with an open PR reviewed by {login}",
               file=sys.stderr)
@@ -154,17 +189,19 @@ def main() -> int:
 
     all_rows, scanned = [], []
     for repo in repos:
-        rows, reach = scan(repo, login, a.bar)
+        rows, reach, capped = scan(repo, login, a.bar)
         for r in rows:
             r["repo"] = repo
         all_rows.extend(rows)
-        scanned.append((repo, len(rows), reach))
+        scanned.append((repo, len(rows), reach, capped))
     all_rows.sort(key=lambda r: (not r["decisive"], -r["commits_after"]))
     shown = [r for r in all_rows if r["decisive"]] if a.decisive_only else all_rows
 
     if a.json:
         print(json.dumps({"login": login, "bar": a.bar,
-                          "scanned": [{"repo": r, "stale": n, "reach": k} for r, n, k in scanned],
+                          "coverage": coverage,
+                          "scanned": [{"repo": r, "stale": n, "reach": k, "at_pr_limit": c}
+                                      for r, n, k, c in scanned],
                           "rows": shown}, indent=2))
         return 1 if a.fail_on_decisive and any(r["decisive"] for r in all_rows) else 0
 
@@ -175,14 +212,27 @@ def main() -> int:
         mark = "DECISIVE" if r["decisive"] else "blocked "
         why = (f"blocked by {','.join(r['blocked_by_others'])}" if r["blocked_by_others"]
                else f"{r['qualifying_approvals']}/{a.bar} qualifying")
+        # A merge after the approval may carry hand-resolved lines the REST API
+        # cannot show, so it prints as an unknown rather than vanishing.
+        m = (f", +{r['merges_after']} merge(s), content not checked"
+             if r.get("merges_after") else "")
         print(f"  {mark} {r['repo']}#{r['number']:<5} {r['author']:<15} "
-              f"{r['commits_after']} commit(s) after your {r['approved_at'][:10]}  "
+              f"{r['commits_after']} commit(s){m} after your {r['approved_at'][:10]}  "
               f"[{why}] base={r['base'][:12]}  {r['title'][:40]}")
     # Scope is part of the answer: a repo holding none of your reviews cannot
     # produce a meaningful zero, so say which zeros were testable.
     print("  scope:")
-    for repo, n, reach in scanned:
+    if coverage and not coverage["ok"]:
+        print("    repo discovery FAILED (gh search returned nothing usable) — "
+              "the repo set below is not a measurement")
+    elif coverage and coverage["seen"] < coverage["total"]:
+        print(f"    repo discovery reached {coverage['seen']} of {coverage['total']} "
+              f"reviewed PRs — a repo appearing only in the other "
+              f"{coverage['total'] - coverage['seen']} is NOT in this scan")
+    for repo, n, reach, capped in scanned:
         note = "" if reach else "  (no approvals of yours here — this 0 is untestable)"
+        if capped:
+            note += f"  (hit the {PR_LIST_LIMIT}-PR list cap — the remainder is unseen)"
         print(f"    {repo}: {n} stale, {reach} PR(s) carrying your review{note}")
     if a.fail_on_decisive and decisive:
         return 1

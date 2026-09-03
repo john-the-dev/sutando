@@ -67,7 +67,7 @@ class StaleApprovals(unittest.TestCase):
         self.mod = _load()
 
     def _scan(self, prs, reviews, commits, bar=2):
-        rows, _reach = self._scan2(prs, reviews, commits, bar)
+        rows, _reach, _capped = self._scan2(prs, reviews, commits, bar)
         return rows
 
     def _scan2(self, prs, reviews, commits, bar=2):
@@ -222,18 +222,20 @@ class Scope(unittest.TestCase):
             {"repository_url": "https://api.github.com/repos/other/elsewhere"},
         ]}
         with patch.object(self.mod, "gh_json", lambda *a, **k: search):
-            self.assertEqual(self.mod.repos_reviewed(ME), ["o/main-repo", "other/elsewhere"])
+            repos, _cov = self.mod.repos_reviewed(ME)
+            self.assertEqual(repos, ["o/main-repo", "other/elsewhere"])
 
     def test_repos_reviewed_is_empty_when_the_search_returns_nothing(self):
         with patch.object(self.mod, "gh_json", lambda *a, **k: {"items": []}):
-            self.assertEqual(self.mod.repos_reviewed(ME), [])
+            repos, _cov = self.mod.repos_reviewed(ME)
+            self.assertEqual(repos, [])
 
     def test_reach_counts_PRs_carrying_my_review_so_a_zero_is_testable(self):
         """A 0 from a repo holding none of your approvals is untestable, not a
         measurement — positive controls inside a reachable set never test reach."""
         s2 = StaleApprovals("test_my_own_PR_is_skipped")
         s2.mod = self.mod
-        rows, reach = s2._scan2(
+        rows, reach, _capped = s2._scan2(
             [s2._pr(1)],
             {1: [_review(ME, "APPROVED", "2026-01-03T00:00:00Z")]},
             {1: [_commit("2026-01-02T00:00:00Z")]})
@@ -243,7 +245,7 @@ class Scope(unittest.TestCase):
     def test_reach_is_zero_when_no_PR_carries_my_review(self):
         s2 = StaleApprovals("test_my_own_PR_is_skipped")
         s2.mod = self.mod
-        rows, reach = s2._scan2(
+        rows, reach, _capped = s2._scan2(
             [s2._pr(1)],
             {1: [_review("someone-else", "APPROVED", "2026-01-01T00:00:00Z")]},
             {1: [_commit("2026-01-02T00:00:00Z")]})
@@ -407,6 +409,212 @@ class Plumbing(unittest.TestCase):
         self.assertEqual(rc, 1, "opt-in gate must fail the build when it is armed")
         rc2, _o, _e = self._main(["--login", ME, "--repo", "o/r"], gh)
         self.assertEqual(rc2, 0, "CONTROL: without the flag it stays a report")
+
+
+class DismissedClearsTheStance(unittest.TestCase):
+    """GitHub counts only each author's latest review, and a DISMISSED one is no
+    stance. Skipping DISMISSED rather than clearing resurrects the author's
+    PREVIOUS review, which is wrong in both polarities — and both were live:
+
+    on sonichi/sutando#3356 the old code reported a qingyun-wu approval that
+    GitHub's own `latestReviews` does not list at all, and on #3327 / #3537 it
+    listed a blocker GitHub no longer holds, hiding a DECISIVE row behind a
+    phantom. There was no DISMISSED anywhere in this suite before now.
+    """
+
+    def setUp(self):
+        self.mod = _load()
+
+    def _scan(self, prs, reviews, commits, bar=2):
+        with patch.object(self.mod, "gh_json", Fake(prs, reviews, commits)):
+            return self.mod.scan("o/r", ME, bar)[0]
+
+    def _pr(self, n, author="peer"):
+        return {"number": n, "title": f"pr {n}", "author": {"login": author},
+                "isDraft": False, "baseRefName": "main"}
+
+    def test_my_APPROVED_then_DISMISSED_is_not_a_stale_approval(self):
+        """The #3356 polarity: a row claiming an approval authorises unread code
+        while GitHub counts no approval of mine at all."""
+        rows = self._scan(
+            [self._pr(1)],
+            {1: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z"),
+                 _review(ME, "DISMISSED", "2026-01-01T01:00:00Z")]},
+            {1: [_commit("2026-01-02T00:00:00Z")]})
+        self.assertEqual(rows, [])
+
+    def test_CONTROL_without_the_dismissal_that_same_row_IS_reported(self):
+        """Pins that the arm above fails for the dismissal and not because the
+        fixture is inert."""
+        rows = self._scan(
+            [self._pr(1)],
+            {1: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z")]},
+            {1: [_commit("2026-01-02T00:00:00Z")]})
+        self.assertEqual([r["number"] for r in rows], [1])
+
+    def test_a_DISMISSED_block_is_not_a_blocker(self):
+        """The #3327 polarity, and the dangerous one: a phantom blocker hides a
+        DECISIVE row, which is the state this tool exists to surface."""
+        rows = self._scan(
+            [self._pr(2)],
+            {2: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z"),
+                 _review("other", "CHANGES_REQUESTED", "2026-01-01T02:00:00Z"),
+                 _review("other", "DISMISSED", "2026-01-01T03:00:00Z"),
+                 _review("third", "APPROVED", "2026-01-01T04:00:00Z")]},
+            {2: [_commit("2026-01-02T00:00:00Z")]})
+        self.assertEqual(rows[0]["blocked_by_others"], [])
+        self.assertTrue(rows[0]["decisive"])
+
+    def test_CONTROL_an_UNdismissed_block_still_blocks(self):
+        rows = self._scan(
+            [self._pr(2)],
+            {2: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z"),
+                 _review("other", "CHANGES_REQUESTED", "2026-01-01T02:00:00Z")]},
+            {2: [_commit("2026-01-02T00:00:00Z")]})
+        self.assertEqual(rows[0]["blocked_by_others"], ["other"])
+        self.assertFalse(rows[0]["decisive"])
+
+    def test_a_dismissal_BEFORE_a_later_review_does_not_erase_it(self):
+        """Order matters: clearing must apply to the dismissal's position in the
+        sequence, not to the author wholesale."""
+        rows = self._scan(
+            [self._pr(3)],
+            {3: [_review(ME, "APPROVED", "2026-01-01T00:00:00Z"),
+                 _review(ME, "DISMISSED", "2026-01-01T01:00:00Z"),
+                 _review(ME, "APPROVED", "2026-01-01T02:00:00Z")]},
+            {3: [_commit("2026-01-03T00:00:00Z")]})
+        self.assertEqual([r["number"] for r in rows], [3])
+
+
+class MergesAfterAreAnUnknownNotAZero(unittest.TestCase):
+    """A conflict-resolving merge is a 2-parent commit whose resolution hunks
+    were typed by a person. Staleness is still keyed on authored commits — that
+    is deliberate and unchanged — but a merge after the approval must print as
+    an unknown rather than vanishing into "nobody wrote anything"."""
+
+    def setUp(self):
+        self.mod = _load()
+
+    def _pr(self, n):
+        return {"number": n, "title": f"pr {n}", "author": {"login": "peer"},
+                "isDraft": False, "baseRefName": "main"}
+
+    def test_a_merge_after_the_approval_is_counted_separately(self):
+        with patch.object(self.mod, "gh_json", Fake(
+                [self._pr(1)],
+                {1: [_review(ME, "APPROVED", "2026-01-02T00:00:00Z")]},
+                {1: [_commit("2026-01-01T00:00:00Z"),
+                     _commit("2026-01-03T00:00:00Z", parents=2),
+                     _commit("2026-01-04T00:00:00Z", parents=2)]})):
+            rows, _reach, _cap = self.mod.scan("o/r", ME, 2)
+        # Not stale by authored commits, so nothing to report at all...
+        self.assertEqual(rows, [])
+
+    def test_merges_after_appear_on_a_row_that_IS_stale(self):
+        with patch.object(self.mod, "gh_json", Fake(
+                [self._pr(2)],
+                {2: [_review(ME, "APPROVED", "2026-01-02T00:00:00Z")]},
+                {2: [_commit("2026-01-03T00:00:00Z"),
+                     _commit("2026-01-04T00:00:00Z", parents=2)]})):
+            rows, _reach, _cap = self.mod.scan("o/r", ME, 2)
+        self.assertEqual(rows[0]["commits_after"], 1)
+        self.assertEqual(rows[0]["merges_after"], 1)
+
+    def test_a_merge_BEFORE_the_approval_is_not_counted(self):
+        with patch.object(self.mod, "gh_json", Fake(
+                [self._pr(3)],
+                {3: [_review(ME, "APPROVED", "2026-01-05T00:00:00Z")]},
+                {3: [_commit("2026-01-04T00:00:00Z", parents=2),
+                     _commit("2026-01-06T00:00:00Z")]})):
+            rows, _reach, _cap = self.mod.scan("o/r", ME, 2)
+        self.assertEqual(rows[0]["merges_after"], 0)
+
+
+class SearchCeilingIsReportedNotAssumedAbsent(unittest.TestCase):
+    """`repos_reviewed` read ONE page and never looked at total_count. Measured
+    live: `is:pr is:open reviewed-by:qingyun-wu` -> total_count 134, items 100,
+    so 34 PRs deciding the repo set were unseen and any repo appearing only in
+    them was silently out of scope."""
+
+    def setUp(self):
+        self.mod = _load()
+
+    def test_pages_are_concatenated(self):
+        pages = [
+            {"total_count": 3, "items": [
+                {"repository_url": "https://api.github.com/repos/o/a"}]},
+            {"total_count": 3, "items": [
+                {"repository_url": "https://api.github.com/repos/o/b"},
+                {"repository_url": "https://api.github.com/repos/o/a"}]},
+        ]
+        with patch.object(self.mod, "gh_json", lambda *a, **k: pages):
+            repos, cov = self.mod.repos_reviewed(ME)
+        self.assertEqual(repos, ["o/a", "o/b"])
+        self.assertEqual(cov, {"total": 3, "seen": 3, "ok": True})
+
+    def test_a_SHORTFALL_is_reported_rather_than_read_as_complete(self):
+        page = {"total_count": 134, "items": [
+            {"repository_url": "https://api.github.com/repos/o/a"}]}
+        with patch.object(self.mod, "gh_json", lambda *a, **k: page):
+            _repos, cov = self.mod.repos_reviewed(ME)
+        self.assertLess(cov["seen"], cov["total"])
+
+    def test_the_shortfall_reaches_the_OUTPUT_not_just_the_return_value(self):
+        """A coverage number nobody prints cannot correct a reader."""
+        page = {"total_count": 134, "items": [
+            {"repository_url": "https://api.github.com/repos/o/a"}]}
+        out = io.StringIO()
+        with patch.object(self.mod, "gh_json", lambda *a, **k: page), \
+                patch.object(self.mod, "current_login", lambda: ME), \
+                patch.object(self.mod, "scan", lambda *a, **k: ([], 0, False)), \
+                patch("sys.argv", ["x"]), contextlib.redirect_stdout(out):
+            self.mod.main()
+        self.assertIn("134", out.getvalue())
+        self.assertRegex(out.getvalue(), r"reached 1 of 134")
+
+    def test_a_FAILED_search_is_not_an_empty_one(self):
+        """gh_json swallows a decode error into its default, so the two states
+        arrive identical. Measured: --paginate without --slurp emits one JSON
+        object per page, and a 2-page (134-result) search silently became 0
+        repos while a 1-page (96-result) one was fine — a single-login check
+        would have passed."""
+        with patch.object(self.mod, "gh_json", lambda *a, **k: None):
+            repos, cov = self.mod.repos_reviewed(ME)
+        self.assertEqual(repos, [])
+        self.assertFalse(cov["ok"])
+
+    def test_a_GENUINELY_empty_search_is_reported_as_ok(self):
+        with patch.object(self.mod, "gh_json",
+                          lambda *a, **k: {"total_count": 0, "items": []}):
+            repos, cov = self.mod.repos_reviewed(ME)
+        self.assertEqual(repos, [])
+        self.assertTrue(cov["ok"])
+
+    def test_the_search_is_slurped_or_pagination_silently_empties_it(self):
+        seen = {}
+        def spy(*args, **k):
+            seen["args"] = args
+            return {"total_count": 0, "items": []}
+        with patch.object(self.mod, "gh_json", spy):
+            self.mod.repos_reviewed(ME)
+        self.assertIn("--paginate", seen["args"])
+        self.assertIn("--slurp", seen["args"])
+
+    def test_the_PR_LIST_CAP_is_reported_too(self):
+        """`gh pr list --limit 200` at the cap means the remainder is unseen."""
+        prs = [{"number": i, "title": "t", "author": {"login": "peer"},
+                "isDraft": True, "baseRefName": "main"}
+               for i in range(self.mod.PR_LIST_LIMIT)]
+        with patch.object(self.mod, "gh_json", Fake(prs, {}, {})):
+            _rows, _reach, capped = self.mod.scan("o/r", ME, 2)
+        self.assertTrue(capped)
+
+    def test_CONTROL_below_the_cap_is_not_flagged(self):
+        prs = [{"number": 1, "title": "t", "author": {"login": "peer"},
+                "isDraft": True, "baseRefName": "main"}]
+        with patch.object(self.mod, "gh_json", Fake(prs, {}, {})):
+            _rows, _reach, capped = self.mod.scan("o/r", ME, 2)
+        self.assertFalse(capped)
 
 
 if __name__ == "__main__":
