@@ -79,8 +79,14 @@ class Block2FailureArchives(unittest.TestCase):
         neither is a substring of the other, so an arm for one says nothing
         about the other. The second ("Do NOT write to ...") is the pre-#3775
         block-2b wording — real text that could reappear in block 2 or a later
-        branch, which is exactly what that detector generalises over. Found
-        unguarded by @johnm-desktop after the first arm landed.
+        branch, which is exactly what that detector generalises over.
+
+        It was UNARMED, not unguarded — @yixuan-ag2's correction, and the
+        distinction is the one this file is about. `test_NEITHER_branch...`
+        has asserted both needles since long before either arm existed, so a
+        P2 regression would have failed at the previous head and every head
+        before it. What was missing was any demonstration that the assertion
+        could flip. A guard detects; an arm proves the guard detects.
         """
         for needle in ("NOT write results/task-{id}",
                        "Do NOT write to results/task-{id}"):
