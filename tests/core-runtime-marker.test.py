@@ -3,7 +3,9 @@
 The delegation half fails if either launcher grows its own writer back."""
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -209,6 +211,136 @@ class TestRollback(unittest.TestCase):
 
     def test_stash_of_empty_workspace_returns_empty(self):
         self.assertEqual(crm.stash_marker(""), "")
+
+
+class TestRollbackCLI(unittest.TestCase):
+    """The launcher reaches the rollback ONLY through this argv surface, so the
+    functions being covered is not the same as the contract being covered."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp())
+
+    def _marker(self):
+        return self.ws / "state" / "core-runtime.json"
+
+    def _seed(self, runtime="codex"):
+        (self.ws / "state").mkdir(parents=True, exist_ok=True)
+        rec = {"runtime": runtime, "session": "sutando-core", "started_at": 1}
+        self._marker().write_text(json.dumps(rec) + "\n")
+        return rec
+
+    def test_stash_prints_absent_when_no_marker(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = crm.main(["core_runtime_marker.py", "--stash", str(self.ws)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue().strip(), crm.ABSENT)
+
+    def test_stash_prints_a_token_for_an_existing_marker(self):
+        self._seed()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = crm.main(["core_runtime_marker.py", "--stash", str(self.ws)])
+        self.assertEqual(rc, 0)
+        self.assertTrue(Path(buf.getvalue().strip()).exists())
+
+    def test_stash_without_a_workspace_is_a_usage_error(self):
+        self.assertEqual(crm.main(["core_runtime_marker.py", "--stash"]), 2)
+
+    def test_stash_that_saves_nothing_exits_nonzero(self):
+        # "" means the copy failed; exiting 0 would tell the launcher it may roll back.
+        real = crm.tempfile.mkstemp
+        self._seed()
+
+        def boom(*a, **k):
+            raise OSError("simulated")
+
+        crm.tempfile.mkstemp = boom
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = crm.main(["core_runtime_marker.py", "--stash", str(self.ws)])
+            self.assertEqual(rc, 1)
+        finally:
+            crm.tempfile.mkstemp = real
+
+    def test_restore_round_trip_through_argv(self):
+        prior = self._seed("codex")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            crm.main(["core_runtime_marker.py", "--stash", str(self.ws)])
+        token = buf.getvalue().strip()
+        self.assertTrue(crm.write_marker(self.ws, "claude", "sutando-core"))
+        rc = crm.main(["core_runtime_marker.py", "--restore", str(self.ws), token])
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(self._marker().read_text()), prior)
+
+    def test_restore_absent_through_argv_removes_the_marker(self):
+        self.assertTrue(crm.write_marker(self.ws, "claude", "sutando-core"))
+        rc = crm.main(["core_runtime_marker.py", "--restore", str(self.ws), crm.ABSENT])
+        self.assertEqual(rc, 0)
+        self.assertFalse(self._marker().exists())
+
+    def test_restore_without_a_token_is_a_usage_error(self):
+        self.assertEqual(crm.main(["core_runtime_marker.py", "--restore", str(self.ws)]), 2)
+
+    def test_restore_with_a_bad_token_exits_nonzero(self):
+        rc = crm.main(["core_runtime_marker.py", "--restore", str(self.ws), ""])
+        self.assertEqual(rc, 1)
+
+
+class TestRollbackIOFailures(unittest.TestCase):
+    """A rollback that cannot complete must report False, never a silent True."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp())
+        (self.ws / "state").mkdir(parents=True, exist_ok=True)
+        self.marker = self.ws / "state" / "core-runtime.json"
+
+    def test_unlink_failure_on_absent_restore_reports_false(self):
+        self.marker.write_text("{}\n")
+        real = Path.unlink
+
+        def boom(self_, *a, **k):
+            raise OSError("simulated: read-only fs")
+
+        Path.unlink = boom
+        try:
+            self.assertFalse(crm.restore_marker(self.ws, crm.ABSENT))
+        finally:
+            Path.unlink = real
+
+    def test_replace_failure_reports_false_and_drops_the_stash(self):
+        self.marker.write_text('{"runtime": "codex"}\n')
+        token = crm.stash_marker(self.ws)
+        real = crm.os.replace
+
+        def boom(*a, **k):
+            raise OSError("simulated: cross-device link")
+
+        crm.os.replace = boom
+        try:
+            self.assertFalse(crm.restore_marker(self.ws, token))
+        finally:
+            crm.os.replace = real
+        self.assertFalse(Path(token).exists())
+
+    def test_a_failing_cleanup_does_not_mask_the_restore_failure(self):
+        # Both the replace AND the stash cleanup fail: the caller must still be told
+        # False, with no exception escaping the error path.
+        self.marker.write_text('{"runtime": "codex"}\n')
+        token = crm.stash_marker(self.ws)
+        real_replace, real_unlink = crm.os.replace, crm.os.unlink
+
+        def boom(*a, **k):
+            raise OSError("simulated")
+
+        crm.os.replace = boom
+        crm.os.unlink = boom
+        try:
+            self.assertFalse(crm.restore_marker(self.ws, token))
+        finally:
+            crm.os.replace, crm.os.unlink = real_replace, real_unlink
 
 
 class TestLauncherDelegation(unittest.TestCase):
