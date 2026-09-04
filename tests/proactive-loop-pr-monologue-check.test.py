@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Contract for the PR monologue guard: refuse to post into a thread that is only me."""
+from __future__ import annotations
+
+import importlib.util
+import sys
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+MOD = REPO / "skills" / "proactive-loop" / "scripts" / "pr-monologue-check.py"
+spec = importlib.util.spec_from_file_location("pr_monologue_check", MOD)
+g = importlib.util.module_from_spec(spec)
+sys.modules["pr_monologue_check"] = g
+spec.loader.exec_module(g)
+
+ME = "me"
+
+
+def c(ts, login):
+    return {"created_at": ts, "user": {"login": login}}
+
+
+def r(ts, login):
+    return {"submitted_at": ts, "user": {"login": login}}
+
+
+def T(n):
+    return f"2026-09-0{n}T00:00:00Z"
+
+
+class TestTrailingRun(unittest.TestCase):
+    def test_all_mine_counts_every_one(self):
+        ev = g.merge_events([c(T(1), ME), c(T(2), ME), c(T(3), ME)], [])
+        self.assertEqual(g.trailing_run(ev, ME)[0], 3)
+
+    def test_someone_else_last_gives_zero(self):
+        ev = g.merge_events([c(T(1), ME), c(T(2), ME), c(T(3), "peer")], [])
+        self.assertEqual(g.trailing_run(ev, ME)[0], 0)
+
+    def test_only_the_trailing_run_counts(self):
+        ev = g.merge_events([c(T(1), ME), c(T(2), "peer"), c(T(3), ME)], [])
+        self.assertEqual(g.trailing_run(ev, ME)[0], 1)
+
+    def test_empty_timeline(self):
+        self.assertEqual(g.trailing_run([], ME), (0, 0.0))
+
+    def test_span_measures_the_run_not_the_thread(self):
+        ev = g.merge_events([c(T(1), "peer"), c(T(3), ME), c(T(5), ME)], [])
+        run, span = g.trailing_run(ev, ME)
+        self.assertEqual(run, 2)
+        self.assertAlmostEqual(span, 2.0, places=3)
+
+
+class TestSurfaces(unittest.TestCase):
+    def test_a_review_is_engagement_and_breaks_the_run(self):
+        # A thread answered only by a review must not read as silence.
+        ev = g.merge_events([c(T(1), ME), c(T(2), ME)], [r(T(3), "peer")])
+        self.assertEqual(g.trailing_run(ev, ME)[0], 0)
+
+    def test_my_own_review_extends_the_run(self):
+        ev = g.merge_events([c(T(1), ME), c(T(2), ME)], [r(T(3), ME)])
+        self.assertEqual(g.trailing_run(ev, ME)[0], 3)
+
+    def test_events_interleave_by_timestamp_across_surfaces(self):
+        ev = g.merge_events([c(T(1), ME), c(T(3), ME)], [r(T(2), "peer")])
+        self.assertEqual([e["login"] for e in ev], [ME, "peer", ME])
+
+
+class TestBots(unittest.TestCase):
+    def test_a_bot_comment_does_not_count_as_a_reply(self):
+        # Measured live: github-actions[bot] reset a real run of 2 to 0 on #2406.
+        ev = g.merge_events([c(T(1), ME), c(T(2), ME), c(T(3), "github-actions[bot]")], [])
+        self.assertEqual(g.trailing_run(ev, ME)[0], 2)
+
+    def test_count_bots_reproduces_the_false_safe(self):
+        ev = g.merge_events(
+            [c(T(1), ME), c(T(2), ME), c(T(3), "github-actions[bot]")], [], keep_bots=True)
+        self.assertEqual(g.trailing_run(ev, ME)[0], 0)
+
+    def test_is_bot_only_matches_the_suffix(self):
+        self.assertTrue(g.is_bot("dependabot[bot]"))
+        self.assertFalse(g.is_bot("randombet"))
+        self.assertFalse(g.is_bot("open-mac-bot"))
+
+
+class TestMain(unittest.TestCase):
+    def _with_fetch(self, comments, reviews, argv):
+        real = g.fetch
+        g.fetch = lambda repo, number: (comments, reviews)
+        try:
+            return g.main(argv)
+        finally:
+            g.fetch = real
+
+    def test_refuses_at_the_threshold(self):
+        ev = [c(T(1), ME), c(T(2), ME), c(T(3), ME)]
+        self.assertEqual(self._with_fetch(ev, [], ["1", "--me", ME]), 1)
+
+    def test_allows_below_the_threshold(self):
+        ev = [c(T(1), ME), c(T(2), ME)]
+        self.assertEqual(self._with_fetch(ev, [], ["1", "--me", ME]), 0)
+
+    def test_threshold_is_configurable(self):
+        ev = [c(T(1), ME), c(T(2), ME)]
+        self.assertEqual(self._with_fetch(ev, [], ["1", "--me", ME, "--threshold", "2"]), 1)
+
+    def test_empty_thread_is_safe(self):
+        self.assertEqual(self._with_fetch([], [], ["1", "--me", ME]), 0)
+
+    def test_a_fetch_failure_is_cannot_answer_not_a_green_light(self):
+        real = g.fetch
+
+        def boom(repo, number):
+            raise RuntimeError("injected: gh api failed")
+
+        g.fetch = boom
+        try:
+            self.assertEqual(g.main(["1", "--me", ME]), 2)
+        finally:
+            g.fetch = real
+
+    def test_a_nonsense_threshold_refuses_rather_than_guessing(self):
+        self.assertEqual(self._with_fetch([], [], ["1", "--me", ME, "--threshold", "0"]), 2)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=1)
