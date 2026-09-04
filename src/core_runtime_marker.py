@@ -61,9 +61,67 @@ def write_marker(workspace, runtime: str, session: str, source: str = "start-cli
     return ok
 
 
+ABSENT = "-"
+
+
+def stash_marker(workspace) -> str:
+    """Capture the marker before a caller publishes over it. Returns a token for restore_marker:
+    ABSENT if no marker exists, else the path of a sibling copy ("" when nothing could be saved)."""
+    if not workspace:
+        return ""
+    marker = Path(workspace) / "state" / "core-runtime.json"
+    if not marker.exists():
+        return ABSENT
+    try:
+        fd, tmp = tempfile.mkstemp(dir=str(marker.parent), prefix=".core-runtime.stash.")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(marker.read_text())
+        return tmp
+    except OSError:
+        return ""
+
+
+def restore_marker(workspace, token: str) -> bool:
+    """Undo a publish whose launch then failed. ABSENT removes the marker entirely —
+    no core is live, so no runtime may be claimed. False means the claim may still stand."""
+    if not workspace or not token:
+        return False
+    marker = Path(workspace) / "state" / "core-runtime.json"
+    if token == ABSENT:
+        try:
+            marker.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+        return True
+    try:
+        os.replace(token, str(marker))
+    except OSError:
+        try:
+            os.unlink(token)
+        except OSError:
+            pass
+        return False
+    return True
+
+
 def main(argv: list[str]) -> int:
+    # Rollback modes come first: they take a workspace only, not the publish triple.
+    if len(argv) > 1 and argv[1] == "--stash":
+        if len(argv) < 3:
+            print("usage: core_runtime_marker.py --stash <workspace>", file=sys.stderr)
+            return 2
+        token = stash_marker(argv[2])
+        print(token)
+        return 0 if token else 1
+    if len(argv) > 1 and argv[1] == "--restore":
+        if len(argv) < 4:
+            print("usage: core_runtime_marker.py --restore <workspace> <token>", file=sys.stderr)
+            return 2
+        return 0 if restore_marker(argv[2], argv[3]) else 1
     if len(argv) < 4:
-        print("usage: core_runtime_marker.py <workspace> <runtime> <session> [source]",
+        print("usage: core_runtime_marker.py <workspace> <runtime> <session> [source]\n       core_runtime_marker.py --stash|--restore <workspace> [token]",
               file=sys.stderr)
         return 2
     try:

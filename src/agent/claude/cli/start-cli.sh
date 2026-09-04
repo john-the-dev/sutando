@@ -107,6 +107,27 @@ restore_shutdown_sentinel() {
   rm -f "$_SENTINEL_STASH" 2>/dev/null || true
   _SENTINEL_STASH=""
 }
+
+_RUNTIME_STASH=""
+# Paired with restore_runtime_marker: exec cannot roll back once it replaces us,
+# so the prior record is captured through the shared writer before we publish.
+stash_runtime_marker() {
+  _RUNTIME_STASH=""
+  _rw="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null)" || return 0
+  [ -n "$_rw" ] || return 0
+  _RUNTIME_STASH="$("${PY:-python3}" "$REPO/src/core_runtime_marker.py" --stash "$_rw" 2>/dev/null)" \
+    || _RUNTIME_STASH=""
+}
+# Only reachable when exec FAILED: exec never returns on success.
+restore_runtime_marker() {
+  [ -n "$_RUNTIME_STASH" ] || return 0
+  _rw="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null)" || return 0
+  "${PY:-python3}" "$REPO/src/core_runtime_marker.py" --restore "$_rw" "$_RUNTIME_STASH" \
+    > /dev/null 2>&1 \
+    || echo "start-cli.sh: the runtime claim may outlive the launch that failed" >&2
+  _RUNTIME_STASH=""
+}
+
 export SUTANDO_CORE_RUNTIME=claude
 CORE_ENV_ARGS=(-e SUTANDO_CORE_SESSION=1 -e SUTANDO_CORE_RUNTIME=claude)
 [ -n "${SUTANDO_TMUX_SOCKET:-}" ] && CORE_ENV_ARGS+=(-e "SUTANDO_TMUX_SOCKET=$SUTANDO_TMUX_SOCKET")
@@ -774,6 +795,7 @@ if ! command -v tmux > /dev/null 2>&1; then
     exit 127
   fi
   stash_shutdown_sentinel
+  stash_runtime_marker
   clear_shutdown_sentinel
   # exec replaces this process, so this is the last point that can publish.
   stamp_runtime_claude "start-cli"
@@ -786,7 +808,8 @@ if ! command -v tmux > /dev/null 2>&1; then
   _exec_rc=$?
   set -e
   restore_shutdown_sentinel
-  echo "  ⚠ claude failed to exec — shutdown sentinel restored, no core is live." >&2
+  restore_runtime_marker
+  echo "  ⚠ claude failed to exec — sentinel and runtime marker restored, no core is live." >&2
   exit "$_exec_rc"
 fi
 
