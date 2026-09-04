@@ -124,5 +124,66 @@ class TestMain(unittest.TestCase):
         self.assertEqual(self._with_fetch([], [], ["1", "--me", ME, "--threshold", "0"]), 2)
 
 
+class TestFetchLayer(unittest.TestCase):
+    """The gh layer the other tests inject around. Its failure path is the one that
+    decides between REFUSE and a false 'safe', so it needs its own coverage."""
+
+    def _fake_run(self, rc, out="", err=""):
+        class R:
+            returncode, stdout, stderr = rc, out, err
+
+        calls = []
+
+        def run(args, **kw):
+            calls.append(args)
+            return R()
+
+        return run, calls
+
+    def test_gh_json_parses_a_successful_response(self):
+        run, calls = self._fake_run(0, '[{"x": 1}]')
+        real = g.subprocess.run
+        g.subprocess.run = run
+        try:
+            self.assertEqual(g._gh_json("repos/o/r/issues/1/comments"), [{"x": 1}])
+        finally:
+            g.subprocess.run = real
+        self.assertEqual(calls[0][:2], ["gh", "api"])
+
+    def test_gh_json_raises_naming_the_path_when_gh_fails(self):
+        run, _ = self._fake_run(1, "", "HTTP 404: Not Found")
+        real = g.subprocess.run
+        g.subprocess.run = run
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                g._gh_json("repos/o/r/pulls/9/reviews")
+            self.assertIn("pulls/9/reviews", str(ctx.exception))
+        finally:
+            g.subprocess.run = real
+
+    def test_fetch_reads_both_surfaces(self):
+        run, calls = self._fake_run(0, "[]")
+        real = g.subprocess.run
+        g.subprocess.run = run
+        try:
+            comments, reviews = g.fetch("o/r", 7)
+        finally:
+            g.subprocess.run = real
+        self.assertEqual((comments, reviews), ([], []))
+        paths = [c[2] for c in calls]
+        self.assertTrue(any("issues/7/comments" in p for p in paths), paths)
+        self.assertTrue(any("pulls/7/reviews" in p for p in paths), paths)
+
+    def test_a_gh_failure_reaches_main_as_cannot_answer(self):
+        # End to end through the real fetch: a failing gh must exit 2, not 0.
+        run, _ = self._fake_run(1, "", "boom")
+        real = g.subprocess.run
+        g.subprocess.run = run
+        try:
+            self.assertEqual(g.main(["1", "--me", ME]), 2)
+        finally:
+            g.subprocess.run = real
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
