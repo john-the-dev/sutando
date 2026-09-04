@@ -170,7 +170,9 @@ class TestFetchLayer(unittest.TestCase):
         finally:
             g.subprocess.run = real
         self.assertEqual((comments, reviews), ([], []))
-        paths = [c[2] for c in calls]
+        # Search the whole argv, not a fixed index — a new flag must not silently
+        # shift what this assertion is reading.
+        paths = [a for c in calls for a in c]
         self.assertTrue(any("issues/7/comments" in p for p in paths), paths)
         self.assertTrue(any("pulls/7/reviews" in p for p in paths), paths)
 
@@ -183,6 +185,62 @@ class TestFetchLayer(unittest.TestCase):
             self.assertEqual(g.main(["1", "--me", ME]), 2)
         finally:
             g.subprocess.run = real
+
+
+class TestPagination(unittest.TestCase):
+    """>100 records on either surface. GitHub returns the OLDEST page first, so an
+    unpaginated read computes the trailing run from a stale end and fails OPEN."""
+
+    def test_gh_json_requests_every_page(self):
+        seen = []
+
+        class R:
+            returncode, stdout, stderr = 0, "[]", ""
+
+        def run(args, **kw):
+            seen.append(args)
+            return R()
+
+        real = g.subprocess.run
+        g.subprocess.run = run
+        try:
+            g._gh_json("repos/o/r/issues/1/comments")
+        finally:
+            g.subprocess.run = real
+        self.assertIn("--paginate", seen[0],
+                      "unpaginated: only the OLDEST 100 records are read")
+
+    def _long_thread(self, tail):
+        """147 peer events, then `tail` — more than one page on either surface."""
+        ev = [c(f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z", "peer") for i in range(147)]
+        return ev + tail
+
+    def test_over_100_records_with_my_three_newest_refuses(self):
+        tail = [c("2026-09-01T00:00:00Z", ME), c("2026-09-02T00:00:00Z", ME),
+                c("2026-09-03T00:00:00Z", ME)]
+        ev = self._long_thread(tail)
+        self.assertGreater(len(ev), 100)
+        run, _ = g.trailing_run(g.merge_events(ev, []), ME)
+        self.assertEqual(run, 3)
+
+    def test_over_100_records_with_a_peer_newest_is_safe(self):
+        # The discriminating twin: same 150 records, one different last event.
+        tail = [c("2026-09-01T00:00:00Z", ME), c("2026-09-02T00:00:00Z", ME),
+                c("2026-09-03T00:00:00Z", "peer")]
+        ev = self._long_thread(tail)
+        self.assertGreater(len(ev), 100)
+        run, _ = g.trailing_run(g.merge_events(ev, []), ME)
+        self.assertEqual(run, 0)
+
+    def test_the_stale_prefix_a_truncated_read_would_see_says_safe(self):
+        # Fail-OPEN, not merely incomplete: the first 100 records end in peer
+        # traffic, so a truncated read clears the post the full thread refuses.
+        tail = [c("2026-09-01T00:00:00Z", ME), c("2026-09-02T00:00:00Z", ME),
+                c("2026-09-03T00:00:00Z", ME)]
+        ev = self._long_thread(tail)
+        full, _ = g.trailing_run(g.merge_events(ev, []), ME)
+        truncated, _ = g.trailing_run(g.merge_events(ev[:100], []), ME)
+        self.assertEqual((full, truncated), (3, 0))
 
 
 if __name__ == "__main__":

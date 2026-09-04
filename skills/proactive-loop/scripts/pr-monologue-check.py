@@ -65,7 +65,9 @@ def trailing_run(events, me: str):
 
 
 def _gh_json(path: str):
-    proc = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+    # --paginate or the newest events are missing: GitHub returns the OLDEST 100
+    # first, so an unpaginated read computes the trailing run from a stale end.
+    proc = subprocess.run(["gh", "api", "--paginate", path], capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"gh api failed for {path}: {proc.stderr.strip()[:200]}")
     return json.loads(proc.stdout)
