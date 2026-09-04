@@ -125,6 +125,92 @@ class TestContract(unittest.TestCase):
         self.assertEqual(self._marker()["runtime"], "claude")
 
 
+class TestRollback(unittest.TestCase):
+    """stash_marker/restore_marker undo a publish whose launch then failed."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp())
+
+    def _marker_path(self):
+        return self.ws / "state" / "core-runtime.json"
+
+    def _seed(self, runtime="codex"):
+        (self.ws / "state").mkdir(parents=True, exist_ok=True)
+        rec = {"runtime": runtime, "session": "sutando-core", "started_at": 1}
+        self._marker_path().write_text(json.dumps(rec) + "\n")
+        return rec
+
+    def test_stash_reports_absent_when_no_marker_exists(self):
+        self.assertEqual(crm.stash_marker(self.ws), crm.ABSENT)
+
+    def test_restore_of_absent_removes_a_marker_published_over_it(self):
+        # The failed-launch case with no prior record: no core is live, so the
+        # claim must go entirely rather than be replaced by an empty one.
+        token = crm.stash_marker(self.ws)
+        self.assertTrue(crm.write_marker(self.ws, "claude", "sutando-core"))
+        self.assertTrue(self._marker_path().exists())
+        self.assertTrue(crm.restore_marker(self.ws, token))
+        self.assertFalse(self._marker_path().exists())
+
+    def test_restore_of_absent_is_idempotent(self):
+        crm.stash_marker(self.ws)
+        self.assertTrue(crm.restore_marker(self.ws, crm.ABSENT))
+        self.assertTrue(crm.restore_marker(self.ws, crm.ABSENT))
+
+    def test_stash_then_restore_returns_the_exact_prior_record(self):
+        prior = self._seed("codex")
+        token = crm.stash_marker(self.ws)
+        self.assertNotEqual(token, crm.ABSENT)
+        self.assertTrue(crm.write_marker(self.ws, "claude", "sutando-core"))
+        self.assertEqual(json.loads(self._marker_path().read_text())["runtime"], "claude")
+        self.assertTrue(crm.restore_marker(self.ws, token))
+        self.assertEqual(json.loads(self._marker_path().read_text()), prior)
+
+    def test_stash_copies_rather_than_aliasing_the_live_file(self):
+        # A rename/symlink instead of a copy would let the publish clobber the
+        # stash, so the restore would put the failed claim back.
+        self._seed("codex")
+        token = crm.stash_marker(self.ws)
+        self.assertTrue(Path(token).exists())
+        self.assertNotEqual(Path(token).resolve(), self._marker_path().resolve())
+
+    def test_stash_leaves_the_live_marker_in_place(self):
+        prior = self._seed("codex")
+        crm.stash_marker(self.ws)
+        self.assertEqual(json.loads(self._marker_path().read_text()), prior)
+
+    def test_restore_consumes_the_stash_file(self):
+        self._seed("codex")
+        token = crm.stash_marker(self.ws)
+        self.assertTrue(crm.restore_marker(self.ws, token))
+        self.assertFalse(Path(token).exists())
+
+    def test_restore_refuses_an_empty_token(self):
+        # "" is what stash_marker returns when it could NOT save anything;
+        # treating it as success would silently leave a false claim standing.
+        self._seed("codex")
+        self.assertFalse(crm.restore_marker(self.ws, ""))
+
+    def test_restore_refuses_an_empty_workspace(self):
+        self.assertFalse(crm.restore_marker("", crm.ABSENT))
+
+    def test_stash_returns_empty_when_the_copy_cannot_be_made(self):
+        self._seed("codex")
+        real = crm.tempfile.mkstemp
+
+        def boom(*a, **k):
+            raise OSError("simulated: no space")
+
+        crm.tempfile.mkstemp = boom
+        try:
+            self.assertEqual(crm.stash_marker(self.ws), "")
+        finally:
+            crm.tempfile.mkstemp = real
+
+    def test_stash_of_empty_workspace_returns_empty(self):
+        self.assertEqual(crm.stash_marker(""), "")
+
+
 class TestLauncherDelegation(unittest.TestCase):
     """Neither launcher may write these records itself."""
 
